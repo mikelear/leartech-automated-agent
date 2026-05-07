@@ -43,15 +43,31 @@ ingress:
   host: ""
   tlsSecretName: ""
 
-# Secrets pulled from existing cluster resources.
-# Both already provisioned for ai-review's use — no new secret creation needed.
+# Secrets — chart materialises ai-review-api-keys via ExternalSecret in
+# its own namespace, pulling the SAME values ai-review's chart uses (so
+# there's only one source of truth per cluster). tekton-git already
+# exists in jx-staging on both clusters; we just reference it.
+#
+# Each cluster's jx-values.yaml in the GitOps repo overrides
+# `secrets.backend` to "gsm" (GCP) or "vault" (AZ) so the right
+# ExternalSecret template renders.
 secrets:
+  # "gsm" (GCP — default) | "vault" (AZ — must be set per-cluster via helmfile values).
+  # Cluster-specific override lives in each GitOps repo's
+  # helmfiles/jx-staging/configs/leartech-automated-agent.yaml (or equivalent)
+  # so the same chart deploys correctly on both clusters.
+  backend: gsm
   anthropicApiKey:
     secretName: ai-review-api-keys
     secretKey: CLAUDE_API_KEY
   ghToken:
     secretName: tekton-git
     secretKey: password
+  gsm:
+    projectId: product-first
+  vault:
+    mountPoint: kubernetes
+    role: jx-vault
 
 # Where consumer-repo checkouts get mounted in cluster mode.
 # The Initiative agent resolves repo paths against this prefix.
