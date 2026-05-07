@@ -74,7 +74,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["gate"]
+source = ["gate", "app"]
 omit = [
     "gate/criteria/*",
     "gate/cli.py",
@@ -83,9 +83,6 @@ omit = [
     "gate/agent/lessons/cli.py",
     "gate/initiatives/loader.py",
     "tests/*",
-    # app/* (FastAPI scaffold) excluded for now — TestClient-based tests land in
-    # phase B v1.5 along with proper async-lifecycle integration coverage.
-    "app/*",
 ]
 
 [tool.coverage.report]

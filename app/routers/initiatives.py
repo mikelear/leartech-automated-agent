@@ -30,7 +30,7 @@ from app.state import (
     get as get_record,
 )
 from gate.agent.initiative import run_initiative
-from gate.initiatives.loader import Initiative, load_initiative
+from gate.initiatives.loader import load_initiative
 
 logger = logging.getLogger(__name__)
 
@@ -141,17 +141,29 @@ async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
     return refreshed
 
 
-@router.get('/_validate/{initiative}', response_model=Initiative)
-async def validate_initiative(initiative: str) -> Initiative:
-    """Resolve and parse an initiative YAML, returning the validated model.
+@router.get('/_validate/{initiative}')
+async def validate_initiative(initiative: str) -> dict[str, object]:
+    """Resolve and parse an initiative YAML, returning a summary dict.
 
     No side effects. Useful for callers (Tekton task, CRD controller) to
-    verify YAML correctness before POST.
+    verify YAML correctness before POST. Returns a plain dict rather than
+    the Initiative model itself because the model carries both new
+    (`repos: [...]`) and legacy (`repo`, `branch`, `base`) shapes after
+    normalization, which trips re-validation when re-serialized.
     """
     yaml_path = _initiatives_dir() / f'{initiative}.yaml'
     if not yaml_path.exists():
         raise HTTPException(status_code=404, detail=f'Initiative {initiative!r} not found')
     try:
-        return load_initiative(yaml_path)
+        loaded = load_initiative(yaml_path)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
+    primary = loaded.primary
+    return {
+        'name': loaded.name,
+        'description': loaded.description,
+        'repos': [{'repo': r.repo, 'branch': r.branch, 'base': r.base} for r in loaded.repos],
+        'primary': {'repo': primary.repo, 'branch': primary.branch, 'base': primary.base},
+        'gate_marks': loaded.gate_marks,
+        'max_iterations': loaded.max_iterations,
+    }
