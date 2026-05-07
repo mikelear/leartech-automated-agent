@@ -43,31 +43,41 @@ ingress:
   host: ""
   tlsSecretName: ""
 
-# Secrets — chart materialises ai-review-api-keys via ExternalSecret in
-# its own namespace, pulling the SAME values ai-review's chart uses (so
-# there's only one source of truth per cluster). tekton-git already
-# exists in jx-staging on both clusters; we just reference it.
-#
-# Each cluster's jx-values.yaml in the GitOps repo overrides
-# `secrets.backend` to "gsm" (GCP) or "vault" (AZ) so the right
-# ExternalSecret template renders.
+# Secrets — deployment references existing K8s Secret names; ExternalSecrets
+# materialise them per-cluster using the auth-service pattern (same chart,
+# both backends represented, cluster's GitOps configs/<chart>.yaml flips
+# the right toggle on).
 secrets:
-  # "gsm" (GCP — default) | "vault" (AZ — must be set per-cluster via helmfile values).
-  # Cluster-specific override lives in each GitOps repo's
-  # helmfiles/jx-staging/configs/leartech-automated-agent.yaml (or equivalent)
-  # so the same chart deploys correctly on both clusters.
-  backend: gsm
   anthropicApiKey:
     secretName: ai-review-api-keys
     secretKey: CLAUDE_API_KEY
   ghToken:
     secretName: tekton-git
     secretKey: password
-  gsm:
+
+# ExternalSecret rendering — both clusters' shape kept here so the chart is
+# multi-cluster-ready out of the box. Activate one via the cluster's
+# configs/leartech-automated-agent.yaml override; never both at once.
+externalSecrets:
+  gcp:
+    enabled: false  # set true on GCP via configs/leartech-automated-agent.yaml
     projectId: product-first
-  vault:
-    mountPoint: kubernetes
-    role: jx-vault
+    secrets:
+      - name: ai-review-api-keys
+        data:
+          - name: CLAUDE_API_KEY
+            key: claude-api-key
+
+  azure:
+    enabled: false  # set true on AZ via configs/leartech-automated-agent.yaml
+    vaultMountPoint: kubernetes
+    vaultRole: jx-vault
+    secrets:
+      - name: ai-review-api-keys
+        data:
+          - name: CLAUDE_API_KEY
+            key: secret/data/ai/claude
+            property: apiKey
 
 # Where consumer-repo checkouts get mounted in cluster mode.
 # The Initiative agent resolves repo paths against this prefix.
