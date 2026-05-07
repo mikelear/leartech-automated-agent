@@ -79,6 +79,21 @@ externalSecrets:
             key: secret/data/ai/claude
             property: apiKey
 
+# tekton-git — materialises the basic-auth Secret used by `gh` / git inside
+# the agent pod. Toggle via configs/<chart>.yaml. See
+# templates/externalsecret-tekton-git.yaml for the convention discussion
+# (long-term cleanup is to refactor ai-classifier onto the same toggle).
+tektonGit:
+  create: false
+  backend: ""  # "gsm" | "vault"
+  gsm:
+    projectId: product-first
+    key: tf-jx-usable-bird-jx-pipeline-user
+  vault:
+    mountPoint: kubernetes
+    role: jx-vault
+    key: secret/data/jx/pipelineUser
+
 # Where consumer-repo checkouts get mounted in cluster mode.
 # The Initiative agent resolves repo paths against this prefix.
 leartechRepoRoot: /workspace
