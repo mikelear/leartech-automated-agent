@@ -1,0 +1,39 @@
+# auth-ui-home-component-spec — fills auth-ui modernisation backlog item #4.
+#
+# Currently only `placeholder.spec.ts` exists in src/app/. This initiative lifts
+# per-file coverage on src/app/home.component.ts toward the 60% threshold by
+# adding a real Karma/Jasmine spec.
+#
+# Run with: `make initiative INITIATIVE=auth-ui-home-component-spec`
+
+name: auth-ui-home-component-spec
+
+description: |
+  Add a real Karma/Jasmine spec for HomeComponent. Fills auth-ui modernisation
+  backlog item #4 ("Real component specs — placeholder.spec.ts is the only suite").
+
+repo: leartech-auth-ui
+branch: agent/home-component-spec
+base: main
+
+goal: |
+  Create `src/app/home.component.spec.ts` with at least 3 Karma/Jasmine test cases:
+
+  1. Component instantiates without errors via TestBed.createComponent.
+  2. Component template renders the expected app-root structure.
+  3. The `data-testid` attributes referenced by Playwright e2e specs in
+     end2end-ui/*.spec.ts are present in the rendered output.
+
+  Constraints:
+  - Don't change application code. Only add the spec file.
+  - Use TestBed + jasmine, matching `auth.service.spec.ts` as a structural pattern.
+  - Use `npm install --legacy-peer-deps` for any npm operations (auth-ui requires this).
+  - Branch from main; commit message follows conventional commits.
+  - Open the PR with a clear description summarising the change and citing the
+    backlog item.
+  - Don't modify .lighthouse/jenkins-x/ — coverage threshold is already at 60%.
+
+gate_marks:
+  - unit
+
+max_iterations: 5

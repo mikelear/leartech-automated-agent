@@ -1,0 +1,310 @@
+# webcoder-ui-add-initiatives-tab
+#
+# First UI piece of the agent-dashboard arc. Adds an Initiatives section
+# to the project-detail page (/projects/:id), powered by hardcoded mock
+# data for v1. The data shape MUST match the locked contract from
+# webcoder-service's internal/handlers/initiatives.go (InitiativeRun) so
+# that swapping mock for real SDK calls later is a one-file change.
+#
+# Reference contract:
+#   ~/.claude/projects/-Users-mikelear-leartech-webCoder/memory/project_agent_dashboard_eventing.md
+#
+# Run with: `make initiative INITIATIVE=webcoder-ui-add-initiatives-tab`
+
+name: webcoder-ui-add-initiatives-tab
+
+description: |
+  Adds an Initiatives section to the project-detail page (/projects/:id),
+  rendered from a hardcoded mock list of InitiativeRun objects. Standalone
+  Angular component with the locked InitiativeRun TypeScript interface
+  defined in src/app/initiatives/initiative-run.model.ts so the new
+  initiatives-list component AND any future SDK-consuming swap share one
+  type definition.
+
+repo: webcoder-ui
+branch: agent/add-initiatives-tab
+base: main
+
+goal: |
+  Add a self-contained `<app-initiatives-list>` component, wire it into
+  the existing `<app-project-detail>` page, and define the locked
+  InitiativeRun TypeScript model. Mock data only — POST/GET to webcoder-
+  service is wired in a follow-up after the SDK includes the new
+  endpoints.
+
+  ## Read first (no edits)
+
+  - `src/app/components/project-detail.component.ts` — current placeholder
+    page. The new Initiatives section embeds INSIDE this component's
+    template, below the existing "Coming in Phase 2" hint card.
+  - `src/app/components/dashboard.component.ts` — see the standalone-
+    component idiom this repo uses (inject(), signals, inline template).
+    Match it exactly.
+  - `src/app/components/pr.component.ts` — bigger reference for state-pill /
+    card-grid styling and data-testid conventions. Mirror its
+    `[data-testid="..."]` attribute style and its mock-data array shape.
+  - `src/app/about/about.component.ts` — the most-recent component pattern
+    from PR #7. Match its standalone declaration shape.
+
+  Do NOT read or edit:
+  - `src/app/auth/` — auth code is privileged for follow-up
+  - Any `.lighthouse/jenkins-x/` files
+  - Any `charts/` files
+  - `package.json` — no new dependencies for this initiative
+
+  ## Files to create
+
+  ### `src/app/initiatives/initiative-run.model.ts`
+
+  Locked TypeScript interface mirroring webcoder-service's
+  `internal/handlers/initiatives.go` `InitiativeRun` struct exactly. Field
+  names use the JSON-tagged camelCase form (so direct JSON binding
+  works when the SDK swap happens).
+
+  ```typescript
+  /**
+   * Represents one agent-initiative run. Mirrors the locked label +
+   * annotation contract on the K8s Job that backs each run; field
+   * names match the JSON shape webcoder-service's GET /api/v1/
+   * initiatives/:runId returns. Single source of truth for both the
+   * mock data in <app-initiatives-list> AND any future SDK-driven
+   * consumer — keep this model and the Go struct in lockstep.
+   */
+  export interface InitiativeRun {
+    runId: string;
+    initiative: string;
+    tenant: string;
+    projectId: string;
+    state: InitiativeState;
+    iteration: number;
+    budgetIter: number;
+    sourcePr?: string;
+    triggeredBy: string;
+    targetPr?: string;
+    assets: InitiativeAssets;
+    deferReason?: string;
+    createdAt: string;       // RFC3339
+    lastUpdate: string;      // RFC3339
+  }
+
+  export type InitiativeState =
+    | 'queued'
+    | 'running'
+    | 'iterating'
+    | 'awaiting-human'
+    | 'done'
+    | 'deferred'
+    | 'killed';
+
+  export interface InitiativeAssets {
+    trace?: string;
+    coverage?: string;
+    stickyComment?: string;
+  }
+  ```
+
+  ### `src/app/initiatives/initiatives-api.adapter.ts`
+
+  Thin Angular service that wraps the SDK's `InitiativesService` with
+  human-friendly method names. Consumers (components, future shared
+  state) inject THIS adapter, never the raw SDK service. Reasons:
+  - SDK method names are auto-derived from REST paths (e.g.
+    `apiV1ProjectsProjectIdInitiativesPost`) — verbose, OpenAPI-shape
+    sensitive. Adapter gives stable, ergonomic names.
+  - Adapter is the natural mock-vs-real seam — initiative #2 returns
+    mock arrays from the adapter; a follow-up flips it to delegate to
+    `InitiativesService`. UI consumers don't change.
+  - Centralizes any auth-header injection, error mapping, or
+    Observable-to-Signal conversion in one file.
+
+  Until SDK 0.1.5 lands in webcoder-ui's package.json, the adapter
+  RETURNS HARDCODED MOCK DATA — the SDK import is added in a separate
+  follow-up. So this initiative does NOT add `@mikelear/webcoder-service-angular`
+  to package.json.
+
+  ```typescript
+  import { Injectable, signal } from '@angular/core';
+  import { Observable, of, delay } from 'rxjs';
+  import { InitiativeRun, InitiativeState } from './initiative-run.model';
+
+  /**
+   * Public-facing API for the initiatives feature. Components inject THIS
+   * service, never the raw SDK service. Stable method names survive SDK
+   * regen (auto-derived names like apiV1ProjectsProjectIdInitiativesPost
+   * change with OpenAPI tweaks; these don't).
+   *
+   * v1: returns hardcoded MOCK_RUNS with simulated network latency.
+   * Follow-up wires real `InitiativesService` from
+   * @mikelear/webcoder-service-angular@0.1.5+ behind the same surface.
+   */
+  @Injectable({ providedIn: 'root' })
+  export class InitiativesApiAdapter {
+    /** List initiative runs for a project. */
+    listForProject(projectId: string): Observable<InitiativeRun[]> {
+      return of(MOCK_RUNS.filter((r) => r.projectId === projectId)).pipe(delay(150));
+    }
+
+    /** Get one run by id. */
+    getRun(runId: string): Observable<InitiativeRun | undefined> {
+      return of(MOCK_RUNS.find((r) => r.runId === runId)).pipe(delay(100));
+    }
+
+    /** Trigger a new run. (Stub — real wiring comes with SDK swap.) */
+    triggerInitiative(_projectId: string, _initiativeYaml: string): Observable<{ runId: string; state: InitiativeState }> {
+      return of({ runId: 'agent-init-mock-pending', state: 'queued' as InitiativeState }).pipe(delay(200));
+    }
+
+    /** Stream / fetch logs for a run. */
+    streamLogs(_runId: string, _since?: number): Observable<string> {
+      return of('(mock log output — real wiring comes with SDK swap)\n').pipe(delay(50));
+    }
+
+    /** Kill a running run. */
+    killRun(_runId: string): Observable<void> {
+      return of(undefined).pipe(delay(100));
+    }
+  }
+
+  // MOCK_RUNS — 5–7 entries covering states (queued, running, iterating,
+  // awaiting-human, done, deferred, killed). Move OUT of the component
+  // into this file so all mock data lives in one place. Make at least 2
+  // runs share projectId='demo' so the project-detail page renders rows.
+  const MOCK_RUNS: InitiativeRun[] = [
+    // ... agent fills in 5–7 realistic InitiativeRun objects
+  ];
+  ```
+
+  Method-name contract for the adapter (matching the dashboard memo's API surface):
+
+  | Adapter method | Underlying SDK method (when wired) |
+  |---|---|
+  | `listForProject(projectId)` | `apiV1ProjectsProjectIdInitiativesGet(projectId)` |
+  | `getRun(runId)` | `apiV1InitiativesRunIdGet(runId)` |
+  | `triggerInitiative(projectId, body)` | `apiV1ProjectsProjectIdInitiativesPost(projectId, body)` |
+  | `streamLogs(runId, since)` | `apiV1InitiativesRunIdLogsGet(runId)` |
+  | `killRun(runId)` | `apiV1InitiativesRunIdDelete(runId)` |
+
+  ### `src/app/initiatives/initiatives-api.adapter.spec.ts`
+
+  Unit tests covering each adapter method:
+  - `listForProject('demo')` returns ≥2 entries (those tagged `projectId: 'demo'`).
+  - `listForProject('non-existent')` returns `[]`.
+  - `getRun(<known runId>)` returns the matching run.
+  - `getRun('non-existent')` returns `undefined`.
+  - `triggerInitiative` resolves with shape `{runId, state: 'queued'}`.
+  - `streamLogs` resolves with a non-empty string.
+  - `killRun` resolves to undefined.
+
+  ### `src/app/initiatives/initiatives-list.component.ts`
+
+  Standalone Angular component, inline template (match the rest of the
+  app — pr.component.ts uses inline templates).
+
+  - Selector: `app-initiatives-list`
+  - Inputs: `runs = input<InitiativeRun[]>([])` (signal-based input).
+  - Renders:
+    - If `runs().length === 0`: empty-state element with `data-testid="initiatives-empty-state"` and message "No initiatives yet for this project."
+    - Otherwise: list/grid of run cards.
+  - Each run card carries `[data-testid]="'initiatives-list-row'"` AND a stable per-id testid `[data-testid]="'initiatives-list-row-' + run.runId"`.
+  - Each run card displays:
+    - Initiative name (`run.initiative`)
+    - State pill — `[data-testid]="'initiatives-state-pill-' + run.state"` plus a class derived from state for colour (`pill-running`, `pill-done`, etc.)
+    - Iteration: `"{{ run.iteration }} / {{ run.budgetIter }}"`
+    - Triggered by: `run.triggeredBy`
+    - If `run.targetPr` set: link "View PR" with `data-testid="initiatives-target-pr-link"` and `href` set to `run.targetPr`
+    - Last update: relative time string (e.g., "2 minutes ago" — keep simple, format as ISO if relative formatting is heavy)
+  - Component uses `ChangeDetectionStrategy.OnPush`.
+
+  ### `src/app/initiatives/initiatives-list.component.spec.ts`
+
+  - Standard Angular unit test — `TestBed.configureTestingModule({ imports: [InitiativesListComponent] })`.
+  - At minimum:
+    - Renders empty state when `runs = []`.
+    - Renders one row per item when given 3 mock runs.
+    - State pill has correct class for each state.
+    - Target-PR link rendered only when `run.targetPr` set.
+  - Use `data-testid` selectors throughout — never tag-name selectors.
+
+  ## Files to modify
+
+  ### `src/app/components/project-detail.component.ts`
+
+  Embed the new component, source data from the adapter (NOT inline
+  mock arrays). The adapter contains the MOCK_RUNS internally so the
+  component is identical now and after the SDK swap.
+
+  - Add `imports: [InitiativesListComponent]` to the component metadata.
+  - Inject the adapter: `private adapter = inject(InitiativesApiAdapter);`
+  - Define a signal: `runs = toSignal(this.adapter.listForProject(this.slug()), { initialValue: [] as InitiativeRun[] });`
+  - Add `<app-initiatives-list [runs]="runs()" data-testid="initiatives-list"></app-initiatives-list>` to the template, BELOW the existing "Coming in Phase 2" hint card.
+
+  Use `MOCK_RUNS` initiative names like `webcoder-ui-add-tenant-list-page`,
+  `auth-ui-fix-login-button-spacing` — realistic short tasks. The adapter's
+  filter-by-projectId means at least 2 mock runs should have
+  `projectId: 'demo'` so the page renders rows when navigating to
+  `/projects/demo`.
+
+  ## Acceptance
+
+  - `make all` passes (lint, test, build).
+  - `make pre-push` passes (Tier-1 sweep).
+  - New component test file exercises the empty state + the populated
+    list. All `data-testid` selectors used per leartech convention.
+  - `<app-initiatives-list>` selector usable in app's template (component
+    correctly exported).
+  - Project-detail page now shows the mock runs below the existing card.
+  - No changes to package.json, auth/, charts/, .lighthouse/.
+
+  ## data-testid contract (declared up front — UI tests will rely on these)
+
+  - `initiatives-list` — outer container (set on the embedded element)
+  - `initiatives-list-row` — repeated per run
+  - `initiatives-list-row-<runId>` — per-run unique handle
+  - `initiatives-empty-state` — shown when zero runs
+  - `initiatives-state-pill-<state>` — state pill (one per state value)
+  - `initiatives-target-pr-link` — link to the agent-opened PR
+  - `initiatives-iteration` — "N/M" iteration counter on each row
+  - `initiatives-triggered-by` — who started the run
+
+  ## Constraints
+
+  - **Playwright spec EXPECTED.** The repo's gate runs
+    `test_ui_changes_have_playwright_coverage` — when this initiative
+    adds a new visible component, the criterion will detect the gap
+    and the spec_suggester will draft a spec. Apply the suggestion
+    verbatim (per `agent-applies-spec-convention-when-gate-silent`).
+    The spec asserts against the locked `data-testid` contract above,
+    so it's stable across the mock → SDK swap that happens in a later
+    initiative — testids don't change, only the data source does.
+  - **DO NOT touch `auth/`, `charts/`, `.lighthouse/jenkins-x/`,
+    `package.json`, `eslint.config.mjs`, or any tsconfig.**
+  - **Always post `/hold` immediately after opening the PR** (per
+    `agent-prs-must-be-held-pending-review`). State plainly in the PR
+    description: "Held pending human review (`/hold` posted)."
+  - **Never post `/hold cancel`** — humans only.
+  - **Use `mcp__leartech-pipeline__wait_for_terminal`** to wait on
+    pipelines (per `prefer-blocking-watch-over-polling`). Note: the
+    agent SDK has hit `agent-sdk-crash-during-long-initiative` twice
+    already — if the wait crashes after the PR is open + `/hold` is
+    posted + most checks have run, the work is COMPLETE; the slow
+    checks (end2end, dynamic-scan) just take a long time.
+  - **Run `make pre-push` LOCALLY before pushing** — repo now has
+    `make pre-push` (b2740c2). Agent must use it. Catches lint/format/
+    type drift in seconds locally instead of 10+ min Tekton round-trips.
+  - `git add <specific files>` only — never `-A`. Files in this PR:
+    - `src/app/initiatives/initiative-run.model.ts`
+    - `src/app/initiatives/initiatives-api.adapter.ts`
+    - `src/app/initiatives/initiatives-api.adapter.spec.ts`
+    - `src/app/initiatives/initiatives-list.component.ts`
+    - `src/app/initiatives/initiatives-list.component.spec.ts`
+    - `src/app/components/project-detail.component.ts`
+    - `end2end-ui/0N-initiatives-tab.spec.ts` (added when spec_suggester
+      fires — pick the next free 0N number based on existing specs)
+  - Conventional commit message: `feat(initiatives): add InitiativesListComponent + project-detail mock embed`
+  - Do a *full-gate* run before posting "Ready for client review"
+    sticky — `full-gate-verification-before-sticky`.
+  - Read failure detail before fixing — `read-failure-detail-before-fixing`.
+
+gate_marks: []   # Full gate from the start.
+
+max_iterations: 7

@@ -1,0 +1,33 @@
+# TEMPLATE: Mechanical refactor across one or more files.
+# Copy to initiatives/<service>-refactor-<scope>.yaml and replace the <PLACEHOLDERS>.
+
+name: <SERVICE>-refactor-<SCOPE>
+
+description: |
+  Apply a mechanical refactor: <DESCRIBE>. Resolves modernisation backlog item
+  <BACKLOG_ITEM>.
+
+repo: <SERVICE>
+branch: agent/refactor-<SCOPE>
+base: main
+
+goal: |
+  Apply the following refactor across <FILES_OR_PATTERN>:
+
+  <STEP-BY-STEP DESCRIPTION>
+
+  Constraints:
+  - Behaviour must be preserved exactly. The refactor is mechanical, not semantic.
+  - Run the full local test suite (`npm test --legacy-peer-deps`) and confirm
+    100% of the existing tests still pass before pushing.
+  - DO NOT add new tests or change existing tests as part of this initiative
+    unless the refactor itself requires it (e.g. test setup must change).
+    Test additions belong in a separate initiative.
+  - DO NOT touch unrelated files even if they show similar patterns.
+  - Conventional commit (`refactor(<scope>): <one-liner>`).
+
+gate_marks:
+  # Refactors run the full gate so we catch unintended behavioural changes.
+  []
+
+max_iterations: 5

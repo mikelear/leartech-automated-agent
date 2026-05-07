@@ -1,0 +1,42 @@
+# auth-ui-login-component-spec — companion to auth-ui-home-component-spec.
+#
+# Same shape as PR #37 but targets LoginComponent. Lets us directly compare
+# agent behaviour with the calibration lessons now in place — chatops retest,
+# read-failure-detail-first, criteria citation should appear from turn 1.
+#
+# Run with: `make initiative INITIATIVE=auth-ui-login-component-spec`
+
+name: auth-ui-login-component-spec
+
+description: |
+  Add a real Karma/Jasmine spec for LoginComponent. Continues filling auth-ui
+  modernisation backlog item #4 alongside the home.component.spec.ts landed in PR #37.
+
+repo: leartech-auth-ui
+branch: agent/login-component-spec
+base: main
+
+goal: |
+  Create `src/app/login/login.component.spec.ts` with at least 3 Karma/Jasmine test cases.
+
+  Use `home.component.spec.ts` (landed in PR #37 on main) as the structural reference —
+  factory helper, nested describes, FAKE_JWT pattern if relevant.
+
+  Cover at minimum:
+  1. Component instantiates without errors via TestBed.createComponent.
+  2. Template renders the expected login form structure (or whatever the component renders).
+  3. Any conditional logic in `ngOnInit` / lifecycle hooks is exercised in both branches.
+  4. `data-testid` attributes referenced by Playwright e2e specs are present in the rendered DOM.
+
+  Constraints:
+  - Don't change application code. Only add the spec file.
+  - Use TestBed + jasmine, matching the home.component.spec.ts pattern.
+  - Use `npm install --legacy-peer-deps` for any npm operations.
+  - Branch from main; conventional commit message; cite the failing criteria in the body.
+  - Open the PR with a clear description summarising the change and citing backlog item #4.
+  - Don't modify .lighthouse/jenkins-x/ — coverage threshold is already at 80%.
+
+gate_marks:
+  - unit
+
+max_iterations: 5

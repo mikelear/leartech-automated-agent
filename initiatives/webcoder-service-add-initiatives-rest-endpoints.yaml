@@ -1,0 +1,199 @@
+# webcoder-service-add-initiatives-rest-endpoints
+#
+# First webcoder-service initiative under the agent dashboard arc. Adds the
+# full REST surface (POST/GET-list/GET-one/GET-logs/DELETE) for the
+# initiative-run resource. The K8s Job spawn + watch logic is intentionally
+# OUT OF SCOPE — that lands in a follow-up direct-work session because it
+# touches charts/ (RBAC) and the K8s client (security-sensitive).
+#
+# This initiative produces the HTTP layer + swag annotations + unit tests
+# only. POST returns 501 with a clear "wired in follow-up" body; DELETE
+# returns 501 with the same. GET endpoints return empty arrays / 404
+# (since no Jobs are queryable yet) — they're structurally correct so the
+# UI can build against them with mock-then-real progression.
+#
+# Run with: `make initiative INITIATIVE=webcoder-service-add-initiatives-rest-endpoints`
+
+name: webcoder-service-add-initiatives-rest-endpoints
+
+description: |
+  Adds the REST endpoints for the agent-initiatives dashboard surface to
+  webcoder-service. HTTP + types + tests only — the actual K8s Job spawn
+  is direct work in a follow-up session. POST/DELETE return 501 stubs;
+  GET endpoints return empty/404 against the structural contract.
+  Validates the locked label/annotation contract from
+  ~/.claude/projects/-Users-mikelear-leartech-webCoder/memory/project_agent_dashboard_eventing.md
+  is reflected in the response types.
+
+repo: webcoder-service
+branch: agent/add-initiatives-api
+base: main
+
+goal: |
+  Add five HTTP endpoints + their swag annotations + unit tests for the
+  agent-initiatives resource. **HTTP layer only** — no K8s client work
+  in this PR. Follow the same pattern as `internal/handlers/me.go`.
+
+  ## Read first (no edits)
+
+  - `internal/handlers/me.go` — the canonical handler pattern (struct,
+    NewXHandler constructor, RegisterRoutes on a *gin.RouterGroup, swag
+    annotations). Match it exactly.
+  - `internal/handlers/me_test.go` — unit-test pattern. Match it.
+  - `cmd/server/main.go` — see how `meHandler.RegisterRoutes(authed)` is
+    wired. The new `initiativesHandler` wires the same way.
+  - `internal/handlers/health.go` — second reference for the pattern.
+
+  Do NOT read or edit anything in:
+  - `charts/` (privileged — chart RBAC + ServiceAccount lands in follow-up)
+  - `.lighthouse/jenkins-x/` (privileged)
+  - `internal/middleware/` (auth — out of scope)
+
+  ## Files to create
+
+  ### `internal/handlers/initiatives.go`
+
+  - Package `handlers` (same as me.go).
+  - `import` block matches me.go's style: stdlib first, blank line,
+    third-party (`github.com/gin-gonic/gin`), blank line,
+    `github.com/mikelear/leartech-go-common/pkg/auth` if needed.
+  - Type `InitiativesHandler` (struct, no fields for now — K8s client
+    lands in follow-up).
+  - Constructor `func NewInitiativesHandler() *InitiativesHandler`.
+  - `func (h *InitiativesHandler) RegisterRoutes(rg *gin.RouterGroup)`
+    that wires the five routes onto the group.
+
+  Response types (place above the handler methods, same file):
+
+  ```go
+  // InitiativeRun is the API representation of one agent run. Mirrors the
+  // labels + annotations defined on the K8s Job in the locked contract;
+  // see the dashboard architecture memo for canonical field meanings.
+  type InitiativeRun struct {
+      RunID        string            `json:"runId" example:"agent-init-add-about-page-a1b2c3"`
+      Initiative   string            `json:"initiative" example:"webcoder-ui-add-about-page"`
+      Tenant       string            `json:"tenant" example:"acme"`
+      ProjectID    string            `json:"projectId" example:"a1f2..."`
+      State        string            `json:"state" example:"running" enums:"queued,running,iterating,awaiting-human,done,deferred,killed"`
+      Iteration    int               `json:"iteration" example:"2"`
+      BudgetIter   int               `json:"budgetIter" example:"5"`
+      SourcePR     string            `json:"sourcePr,omitempty" example:"123"`
+      TriggeredBy  string            `json:"triggeredBy" example:"alice@acme.com"`
+      TargetPR     string            `json:"targetPr,omitempty" example:"https://github.com/.../pull/456"`
+      Assets       InitiativeAssets  `json:"assets"`
+      DeferReason  string            `json:"deferReason,omitempty"`
+      CreatedAt    string            `json:"createdAt" example:"2026-05-05T12:00:00Z"`
+      LastUpdate   string            `json:"lastUpdate" example:"2026-05-05T12:05:00Z"`
+  }
+
+  // InitiativeAssets links to artifacts produced by the run.
+  type InitiativeAssets struct {
+      Trace          string `json:"trace,omitempty"`
+      Coverage       string `json:"coverage,omitempty"`
+      StickyComment  string `json:"stickyComment,omitempty"`
+  }
+
+  // CreateInitiativeRequest is the body for POST /api/v1/projects/:projectId/initiatives.
+  type CreateInitiativeRequest struct {
+      // InitiativeYaml is the full YAML body of the initiative. Mutually
+      // exclusive with Template/Params.
+      InitiativeYaml string                 `json:"initiativeYaml,omitempty"`
+      // Template is the name of an initiatives/_templates/<name>.yaml
+      // template to instantiate. Mutually exclusive with InitiativeYaml.
+      Template       string                 `json:"template,omitempty"`
+      // Params populate the template's variables when Template is set.
+      Params         map[string]interface{} `json:"params,omitempty"`
+  }
+
+  // CreateInitiativeResponse is returned by POST.
+  type CreateInitiativeResponse struct {
+      RunID string `json:"runId" example:"agent-init-add-about-page-a1b2c3"`
+      State string `json:"state" example:"queued"`
+      Self  string `json:"self" example:"/api/v1/initiatives/agent-init-add-about-page-a1b2c3"`
+      Logs  string `json:"logs" example:"/api/v1/initiatives/agent-init-add-about-page-a1b2c3/logs"`
+  }
+  ```
+
+  Five handler methods (each with full swag annotation block above):
+
+  | Method | Path | Status | Body |
+  |---|---|---|---|
+  | POST   | `/projects/:projectId/initiatives` | **501** Not Implemented | `{"error": "K8s Job spawn not yet wired (follow-up direct-work session)"}` |
+  | GET    | `/projects/:projectId/initiatives`  | 200 | `[]` (empty list — no Jobs queryable yet) |
+  | GET    | `/initiatives/:runId`               | 404 | `{"error": "run not found"}` (no Jobs) |
+  | GET    | `/initiatives/:runId/logs`          | 404 | `{"error": "run not found"}` (no Jobs) |
+  | DELETE | `/initiatives/:runId`               | **501** Not Implemented | `{"error": "K8s Job kill not yet wired (follow-up direct-work session)"}` |
+
+  - All five register on the `authed` router group (require BearerAuth, same as `/me`).
+  - Each method must have:
+    - GoDoc comment naming what it returns.
+    - swag annotations: `@Summary`, `@Tags initiatives`, `@Security BearerAuth`,
+      `@Accept json` (POST only), `@Produce json`, `@Param projectId path string true "..."`
+      (where applicable), `@Success`, `@Failure`. Use status codes from the
+      table above.
+
+  ### `internal/handlers/initiatives_test.go`
+
+  - Package `handlers_test` (or `handlers` — match what me_test.go uses).
+  - One `Test<MethodName>` per handler method.
+  - Use `httptest.NewRecorder()` + `gin.New()` — same pattern as me_test.go.
+  - For each:
+    - Construct handler, register routes on a fresh router.
+    - Send the request, assert status code matches the table above.
+    - Assert response body is the expected JSON shape (status-code body
+      from the table). Use `json.Unmarshal` + struct comparison; no
+      string-literal compares.
+  - For 501 stubs, verify the error body is the exact wording in the
+    table (the UI will show this verbatim until the wiring lands).
+  - Aim for 100% line coverage of the new file — they're stubs, so this
+    is achievable.
+
+  ## Wire into `cmd/server/main.go`
+
+  After this existing block:
+  ```go
+  meHandler := handlers.NewMeHandler()
+  meHandler.RegisterRoutes(authed)
+  ```
+
+  Add:
+  ```go
+  initiativesHandler := handlers.NewInitiativesHandler()
+  initiativesHandler.RegisterRoutes(authed)
+  ```
+
+  No other main.go changes.
+
+  ## Regenerate OpenAPI spec
+
+  - Run `make swagger` (if the target exists in the Makefile) or
+    `swag init -g cmd/server/main.go -o docs` — match what existing handlers
+    rely on. The regenerated `docs/swagger.json` is part of the PR.
+  - Verify the new endpoints appear in `docs/swagger.json` after regen
+    and the schemas match the Go types.
+
+  ## Constraints
+
+  - **DO NOT add a Playwright spec.** This is a service repo — no UI to
+    Playwright. The end2end shell scripts ARE the integration test surface
+    for this repo; agent need not touch them in this initiative (the
+    endpoints aren't functional yet).
+  - **DO NOT touch `charts/`, `.lighthouse/jenkins-x/`, or
+    `internal/middleware/`.** Those are privileged for follow-up direct work.
+  - **Always post `/hold` immediately after opening the PR** (per the
+    `agent-prs-must-be-held-pending-review` lesson). State plainly in the
+    PR description: "Held pending human review (`/hold` posted)."
+  - **Never post `/hold cancel`** — humans only.
+  - **Use `mcp__leartech-pipeline__wait_for_terminal`** to wait on
+    pipelines (per `prefer-blocking-watch-over-polling`).
+  - `git add <specific files>` only — never `-A`.
+  - Conventional commits.
+  - Do a *full-gate* run (no mark filter) before posting "Ready for client
+    review" sticky — final-pass verification per
+    `full-gate-verification-before-sticky`.
+  - Read failure detail before fixing — cite the specific failing
+    criterion in commit messages (per `cite-failing-criteria-when-explaining-fixes`).
+
+gate_marks: []   # Full gate from the start.
+
+max_iterations: 7

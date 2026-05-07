@@ -1,0 +1,38 @@
+# TEMPLATE: Add a Karma/Jasmine spec for an Angular component.
+# Copy to initiatives/<service>-<component>-spec.yaml and replace the <PLACEHOLDERS>.
+# Pattern proven by initiatives/auth-ui-home-component-spec.yaml → PR #37.
+
+name: <SERVICE>-<COMPONENT>-component-spec
+
+description: |
+  Add a real Karma/Jasmine spec for <COMPONENT>. Continues filling
+  the modernisation backlog (real component specs).
+
+repo: <SERVICE>                              # e.g. leartech-auth-ui
+branch: agent/<COMPONENT>-component-spec
+base: main
+
+goal: |
+  Create `src/app/<PATH>/<COMPONENT>.component.spec.ts` with at least 3
+  Karma/Jasmine test cases. Use the closest existing *.spec.ts in the same
+  repo as the structural reference (factory helper, nested describes, FAKE_JWT
+  pattern if relevant).
+
+  Cover at minimum:
+  1. Component instantiates without errors via TestBed.createComponent.
+  2. Template renders the expected structural elements.
+  3. Any conditional logic in `ngOnInit` / lifecycle hooks is exercised in both branches.
+  4. `data-testid` attributes referenced by Playwright e2e specs are present in the rendered DOM.
+
+  Constraints:
+  - Don't change application code. Only add the spec file.
+  - Use TestBed + jasmine, matching existing patterns.
+  - Use `npm install --legacy-peer-deps` for any npm operations.
+  - Branch from main; conventional commit message; cite the failing criteria in the body.
+  - Open the PR with a clear description summarising the change.
+  - Don't modify .lighthouse/jenkins-x/.
+
+gate_marks:
+  - unit
+
+max_iterations: 5

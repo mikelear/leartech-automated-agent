@@ -1,0 +1,219 @@
+# leartech-auth-ui-add-canonical-makefile
+#
+# First Angular Makefile in the leartech ecosystem. Defines the canonical
+# `make all` / `make pre-push` / `make diagnose` contract for Angular service
+# repos so the agent's pre-push step is `make all` regardless of language
+# (per the dashboard architecture memo's Tier-1 shift-left decision).
+#
+# Pattern after this lands → leartech-angular-service-template gets the same
+# Makefile (initiative #4), then webcoder-ui follows from the template.
+#
+# Reference: leartech-auth-service/Makefile is the canonical Go pattern;
+# this file establishes the Angular equivalent.
+#
+# Run with: `make initiative INITIATIVE=leartech-auth-ui-add-canonical-makefile`
+
+name: leartech-auth-ui-add-canonical-makefile
+
+description: |
+  Create the first canonical Angular Makefile in the leartech ecosystem.
+  Adds `all`, `pre-push`, `diagnose`, plus per-stage targets that wrap
+  the existing npm scripts and add new check-mode variants for the
+  agent's Tier-1 pre-push contract. New file only — no changes to any
+  Angular source, no changes to package.json, no changes to .lighthouse/.
+
+repo: leartech-auth-ui
+branch: agent/add-canonical-makefile
+base: main
+
+goal: |
+  Create a new file `Makefile` at the repo root that defines the canonical
+  Angular Make convention for leartech.
+
+  ## Read first (no edits)
+
+  - `package.json` — see existing scripts: `ng`, `start`, `build`, `watch`,
+    `test`, `lint`. Wrap these; do NOT modify them.
+  - `eslint.config.mjs` — confirms eslint is the linter used.
+  - `~/leartech/leartech-auth-service/Makefile` — Go canonical pattern.
+    Mirror its STRUCTURE (variables, .PHONY, ## help-text, help target)
+    but use Angular/npm tooling.
+  - `~/leartech/webcoder-service/Makefile` — recently restored canonical
+    Go Makefile. Same diagnose-target shape; copy the case-statement
+    structure for the Angular pipeline-mapping.
+  - `.lighthouse/jenkins-x/` — list of pipeline YAMLs (ai-review,
+    end2end-ui.yaml, end2end.yaml, lint.yaml, npm-audit.yaml, security-scan,
+    test.yaml). Drives the diagnose target's mapping.
+
+  Do NOT touch:
+  - `package.json`, `package-lock.json`, `eslint.config.mjs`, `tsconfig*.json`
+  - Any Angular source (`src/`)
+  - `charts/`, `.lighthouse/jenkins-x/`
+  - The CI uses these files as-is; this initiative ONLY adds Makefile.
+
+  ## File to create — `Makefile`
+
+  ### Header + variables
+
+  ```makefile
+  # leartech-auth-ui — Makefile
+  # Canonical Angular pattern: lint + test + build + audit, plus drift checks.
+
+  .PHONY: all pre-push build test test-coverage lint lint-check format-check \
+          type-check audit audit-strict secrets lockfile-check clean help \
+          diagnose
+
+  NPM := npm
+  NPM_INSTALL := $(NPM) install --legacy-peer-deps
+  NPM_CI := $(NPM) ci --legacy-peer-deps
+  GITLEAKS_VERSION := v8.18.4
+  ```
+
+  ### Canonical entry points
+
+  ```makefile
+  all: lint test build   ## Lint, test, production build (matches Go canonical 'all')
+
+  pre-push: lint-check format-check type-check test build audit secrets lockfile-check   ## Tier-1 gates that MUST pass before pushing to a PR
+  ```
+
+  Why distinct:
+  - `all` = "format-and-go" — the dev-loop everyday command.
+  - `pre-push` = check-mode — fails on drift. Agent calls this between commit
+    and push; failure means fix-and-retry locally without burning a Tekton cycle.
+
+  ### Targets to add
+
+  ```makefile
+  build: ## Production build (catches AOT errors)
+  	$(NPM) run build
+
+  test: ## Run unit tests with coverage (headless Chrome)
+  	$(NPM) run test
+
+  test-coverage: ## Same as test — coverage flag is in the npm script
+  	$(NPM) run test
+
+  lint: ## Run eslint (auto-fix where safe)
+  	$(NPM) run lint
+
+  lint-check: ## Run eslint in check-mode (no fixes — fails on any issue)
+  	npx eslint . --max-warnings=0
+
+  format-check: ## Verify formatting (prettier)
+  	@command -v npx >/dev/null || { echo "npx required"; exit 1; }
+  	@if [ -f .prettierrc ] || [ -f .prettierrc.json ] || [ -f .prettierrc.js ] || [ -f prettier.config.js ]; then \
+  		npx prettier --check "src/**/*.{ts,html,scss,css,json}"; \
+  	else \
+  		echo "no prettier config — skipping format-check (add one to enforce)"; \
+  	fi
+
+  type-check: ## Type-check without emitting JS (catches type errors lint misses)
+  	npx tsc --noEmit
+
+  audit: ## npm audit — fail on high+ severity
+  	$(NPM) audit --audit-level=high || { echo "FAIL: npm audit found high-severity vulnerabilities"; exit 1; }
+
+  audit-strict: ## npm audit — fail on moderate+ severity
+  	$(NPM) audit --audit-level=moderate
+
+  lockfile-check: ## Verify package-lock.json is in sync with package.json (CI-mode — no writes)
+  	@cp package-lock.json package-lock.json.bak
+  	@$(NPM_CI) >/dev/null 2>&1 || { mv package-lock.json.bak package-lock.json; echo "FAIL: npm ci failed — package-lock.json may be corrupt or out of sync"; exit 1; }
+  	@if ! diff -q package-lock.json package-lock.json.bak >/dev/null 2>&1; then \
+  		mv package-lock.json.bak package-lock.json; \
+  		echo "FAIL: package-lock.json drifted during 'npm ci' — likely package.json change without lockfile update. Run 'npm install --legacy-peer-deps' and commit package-lock.json."; exit 1; \
+  	fi
+  	@rm -f package-lock.json.bak
+  	@echo "PASS: package-lock.json is in sync"
+
+  secrets: ## Scan for committed secrets (gitleaks)
+  	@command -v gitleaks >/dev/null || { \
+  		echo "Installing gitleaks $(GITLEAKS_VERSION)..."; \
+  		GOOS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+  		GOARCH=$$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/'); \
+  		curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/$(GITLEAKS_VERSION)/gitleaks_$${GITLEAKS_VERSION#v}_$${GOOS}_$${GOARCH}.tar.gz" | \
+  			tar -xz -C /tmp gitleaks && \
+  			mkdir -p $$HOME/bin && \
+  			mv /tmp/gitleaks $$HOME/bin/gitleaks && \
+  			export PATH=$$HOME/bin:$$PATH; \
+  	}
+  	gitleaks detect --source . --no-banner --redact
+
+  clean: ## Clean build artifacts + node_modules cache
+  	rm -rf dist/ coverage/ .angular/ *.bak
+
+  help: ## Show this help
+  	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+  ```
+
+  ### `diagnose` target — local-vs-Tekton coverage gap
+
+  Mirrors webcoder-service's diagnose target structure but with Angular-aware
+  mapping (handles `end2end-ui`, `npm-audit`, `ai-review`, `security-scan/`).
+
+  ```makefile
+  diagnose: ## Show which Tekton presubmit checks are covered locally vs need cluster
+  	@echo "Tekton presubmit checks for this repo (PR-time):"
+  	@echo "─────────────────────────────────────────────────"
+  	@for f in .lighthouse/jenkins-x/*.yaml .lighthouse/jenkins-x/*/*.yaml; do \
+  		[ -f "$$f" ] || continue; \
+  		case "$$f" in *triggers.yaml|*release.yaml|*pullrequest.yaml) continue;; esac; \
+  		name=$$(echo "$$f" | sed 's|.lighthouse/jenkins-x/||; s|.yaml$$||'); \
+  		case $$name in \
+  			lint) covered="✓ \033[32mmake lint-check\033[0m";; \
+  			test) covered="✓ \033[32mmake test\033[0m";; \
+  			npm-audit) covered="✓ \033[32mmake audit\033[0m";; \
+  			end2end) covered="✗ \033[33mTier 3 — needs preview cluster\033[0m";; \
+  			end2end-ui) covered="✗ \033[33mTier 3 — Playwright needs preview cluster\033[0m";; \
+  			ai-review*) covered="✗ \033[33mTier 3 — LLM-against-deployed-preview\033[0m";; \
+  			security-scan/dynamic*) covered="✗ \033[33mTier 3 — DAST needs running app\033[0m";; \
+  			security-scan/image*) covered="✗ \033[33mTier 3 — needs built image\033[0m";; \
+  			security-scan*) covered="◐ \033[33mpartial — gitleaks via 'make secrets'; SAST needs cluster\033[0m";; \
+  			*) covered="? \033[31munknown — extend Makefile diagnose mapping\033[0m";; \
+  		esac; \
+  		printf "  %-30s %b\n" "$$name" "$$covered"; \
+  	done
+  	@echo ""
+  	@echo "Legend: ✓ covered by 'make pre-push'   ◐ partial   ✗ requires Tekton cluster   ? mapping needs update"
+  	@echo ""
+  	@echo "Run 'make pre-push' before pushing to catch all locally-covered failures."
+  ```
+
+  ## Acceptance
+
+  - `make help` lists every target with its `## help-text`.
+  - `make all` succeeds (lint + test + build all pass on clean checkout).
+  - `make pre-push` succeeds locally on a clean checkout (with binaries
+    auto-installed where needed: gitleaks).
+  - `make diagnose` runs without error and prints the table mapping all
+    `.lighthouse/jenkins-x/` pipeline YAMLs.
+  - `make lockfile-check` correctly FAILS if package-lock.json drifts and
+    PASSES when in sync.
+  - No npm scripts modified; no Angular source touched.
+
+  ## Constraints
+
+  - **Single-file PR.** Only `Makefile` is added. No package.json edits, no
+    Angular source, no .lighthouse/ changes.
+  - **Always post `/hold` immediately after opening the PR** (per the
+    `agent-prs-must-be-held-pending-review` lesson). State plainly in the
+    PR description: "Held pending human review (`/hold` posted)."
+  - **Never post `/hold cancel`** — humans only.
+  - **Use `mcp__leartech-pipeline__wait_for_terminal`** to wait on
+    pipelines (per `prefer-blocking-watch-over-polling`). NOTE: the
+    automated-agent SDK has hit `agent-sdk-crash-during-long-initiative`
+    twice now during very long pipeline waits. If the wait loop crashes
+    after the PR is open + `/hold` is posted + most checks have run,
+    the work is COMPLETE — the dynamic-scan / end2end checks just take
+    a long time. The crash is the SDK's fault, not the work's.
+  - `git add Makefile` only — no `-A`, no other files.
+  - Conventional commit message: `feat(makefile): add canonical Angular Makefile (lint/test/build/audit + pre-push + diagnose)`
+  - Do a *full-gate* run (no mark filter) before posting "Ready for client
+    review" sticky — final-pass verification per
+    `full-gate-verification-before-sticky`.
+  - **Run `make pre-push` LOCALLY before pushing** — eat your own dog food.
+
+gate_marks: []   # Full gate from the start.
+
+max_iterations: 7

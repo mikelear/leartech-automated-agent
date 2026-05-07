@@ -1,0 +1,86 @@
+# webcoder-ui-add-about-page — first dogfood demo on a SECOND consumer repo.
+#
+# Mirrors the auth-ui-add-about-page initiative (PR #40) but targets webcoder-ui.
+# Validates that all 11 lessons + AI coverage scanner + /hold governance work
+# on a NEW consumer repo (different from auth-ui where everything was developed).
+#
+# Important difference from auth-ui: webcoder-ui appears to use Angular's
+# standalone-component pattern (app.config.ts + app.routes.ts) rather than
+# NgModule. The agent should read the existing patterns and follow them — do
+# NOT copy the NgModule conventions from auth-ui.
+#
+# Run with: `make initiative INITIATIVE=webcoder-ui-add-about-page`
+
+name: webcoder-ui-add-about-page
+
+description: |
+  Adds a static About page to webcoder-ui (component + route + 4 data-testid
+  anchors). Deliberately omits the Playwright spec so the coverage-gap criterion
+  fires and the agent applies the AI-drafted suggestion. Cross-repo validation
+  that the AI coverage scanner pattern works on any leartech-angular-service-
+  template-derived consumer.
+
+repo: webcoder-ui
+branch: agent/add-about-page
+base: main
+
+goal: |
+  Add a static About page accessible at `/about`. Three deliverables only — keep
+  the change small and idiomatic to webcoder-ui's existing conventions.
+
+  ## Files to create
+
+  ### `src/app/about/about.component.ts`
+
+  - Read `src/app/app.component.ts` and any existing components in
+    `src/app/components/` first to establish the local conventions.
+  - **Match webcoder-ui's component style** — if it uses Angular standalone
+    components (likely, per the presence of `app.config.ts` + `app.routes.ts`),
+    use `standalone: true` with an `imports: [...]` array. If it uses NgModule
+    declarations, use `standalone: false` (auth-ui pattern). **Do not assume —
+    read the existing components and follow them.**
+  - Class `AboutComponent` — purely static, no constructor injection.
+
+  ### `src/app/about/about.component.html`
+
+  Four `data-testid` anchors:
+
+      <div class="about-page" data-testid="about-page">
+        <h2 data-testid="about-heading">About webCoder</h2>
+        <p data-testid="about-description">
+          The webCoder platform helps external developers generate Angular frontends
+          against leartech APIs.
+        </p>
+        <button data-testid="contact-button">Contact us</button>
+      </div>
+
+  ## Wire into the app
+
+  - Add a route entry `{ path: 'about', component: AboutComponent }` to whichever
+    routes file webcoder-ui uses (`app.routes.ts` if standalone, the
+    `app-routing.module.ts` if NgModule). If the route file imports components
+    lazily (`loadComponent: () => import(...)`), follow that pattern.
+  - If using NgModule: add `AboutComponent` to the appropriate module's
+    `declarations`. If using standalone: no module work needed; the component
+    is self-registering via the `imports:` array on consumers.
+
+  ## Constraints
+
+  - **DO NOT add a Playwright spec.** The whole point is to demonstrate the
+    coverage-gap criterion firing. Apply the AI-drafted spec from the gate's
+    failure message verbatim.
+  - **Always post `/hold` immediately after opening the PR** (per the
+    `agent-prs-must-be-held-pending-review` lesson). State plainly in the PR
+    description: "Held pending human review (`/hold` posted)."
+  - **Never post `/hold cancel`** — humans only.
+  - **Use `mcp__leartech-pipeline__wait_for_terminal`** to wait on pipelines —
+    not MCP polling (per the `prefer-blocking-watch-over-polling` lesson).
+  - Use `npm install --legacy-peer-deps` if any npm operations are needed.
+  - `git add <specific files>` only (never `-A`).
+  - Conventional commits.
+  - Do a *full-gate* run (no mark filter) before posting "Ready for client review"
+    sticky — final-pass verification per `full-gate-verification-before-sticky`.
+
+gate_marks: []   # Full gate from the start.
+
+max_iterations: 7

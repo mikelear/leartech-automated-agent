@@ -1,0 +1,195 @@
+# webcoder-ui-add-initiative-new-dialog
+#
+# Adds the "Run new initiative" UX to the project-detail page. A button
+# below the existing initiatives-list opens a modal dialog with a form
+# to trigger a new initiative run via InitiativesApiAdapter.triggerInitiative
+# (which is currently a mock stub — flips to real once the K8s Job spawn
+# logic lands in webcoder-service via direct work).
+#
+# Run with: `make initiative INITIATIVE=webcoder-ui-add-initiative-new-dialog`
+
+name: webcoder-ui-add-initiative-new-dialog
+
+description: |
+  Modal dialog component to trigger new initiative runs from the
+  project-detail page. Uses the native HTML <dialog> element (no CDK/
+  Material dep added). Form captures initiative name + YAML body; submit
+  calls InitiativesApiAdapter.triggerInitiative; mock returns a fake
+  runId that prepends to the list. Dialog closes on success.
+
+repo: webcoder-ui
+branch: agent/add-initiative-new-dialog
+base: main
+
+goal: |
+  Add a self-contained `<app-initiatives-new-dialog>` component, wire a
+  trigger button into project-detail.component.ts, and prepend the
+  freshly-created InitiativeRun to the list on submit. Mock data only —
+  real Job-spawn happens after the privileged direct work (chart RBAC +
+  K8s Job spawn logic) lands in a follow-up.
+
+  ## Read first (no edits)
+
+  - `src/app/initiatives/initiatives-api.adapter.ts` — current adapter
+    with mock data + `triggerInitiative()` stub. The new dialog calls
+    this method on submit.
+  - `src/app/initiatives/initiatives-list.component.ts` — uses signal
+    inputs + OnPush. Match the pattern.
+  - `src/app/components/project-detail.component.ts` — current page
+    that embeds `<app-initiatives-list>`. The new button + dialog
+    embed BELOW the list.
+  - `src/app/about/about.component.ts` — current standalone-component
+    pattern reference.
+
+  Do NOT read or edit:
+  - `src/app/auth/`, `charts/`, `.lighthouse/jenkins-x/`
+  - `package.json` — no new deps (use native <dialog>, not CDK)
+
+  ## Files to create
+
+  ### `src/app/initiatives/initiatives-new-dialog.component.ts`
+
+  Standalone Angular component. Inline template. Uses `<dialog>` element
+  via ViewChild for show/close.
+
+  - Selector: `app-initiatives-new-dialog`
+  - Outputs: `submitted = output<InitiativeRun>()` — fired after successful submit, parent prepends to its list.
+  - Public methods: `open()`, `close()`.
+  - Form (template-driven for simplicity, no FormBuilder dep):
+    - Initiative name input (required, min 3 chars)
+    - YAML body textarea (optional — if empty, `triggerInitiative` is called with a default placeholder body)
+    - Submit button — disabled while form invalid OR submission in flight
+    - Cancel button — closes dialog without submitting
+  - On submit:
+    - Call `inject(InitiativesApiAdapter).triggerInitiative(projectId, yamlBody)`
+    - On success: build a synthetic InitiativeRun (state=`'queued'`, iteration=0, etc.) using the returned runId, emit via `submitted`, close dialog
+    - On error: display inline error message (mock won't error v1)
+  - data-testids:
+    - `initiatives-new-dialog` (the <dialog> root)
+    - `initiatives-new-dialog-name-input`
+    - `initiatives-new-dialog-yaml-textarea`
+    - `initiatives-new-dialog-submit-button`
+    - `initiatives-new-dialog-cancel-button`
+    - `initiatives-new-dialog-error` (only when error state)
+
+  Use `ChangeDetectionStrategy.OnPush`. Inject ProjectId via `input.required<string>()` so parent passes it cleanly.
+
+  ### `src/app/initiatives/initiatives-new-dialog.component.spec.ts`
+
+  Unit tests covering:
+  - Renders dialog closed by default (or open when `open()` called).
+  - Submit button disabled when name input is empty.
+  - Submit button enabled when name input has ≥3 chars.
+  - On submit, `submitted` event fires with synthesised InitiativeRun (state='queued').
+  - Cancel button closes the dialog without firing `submitted`.
+  - All testids resolvable with the established `data-testid` selector pattern.
+
+  ## Files to modify
+
+  ### `src/app/components/project-detail.component.ts`
+
+  - Add `imports: [InitiativesNewDialogComponent]` to component metadata.
+  - Add `@ViewChild(InitiativesNewDialogComponent) dialog!: InitiativesNewDialogComponent;`
+  - Add a button BELOW the existing `<app-initiatives-list>`:
+    ```html
+    <button
+      type="button"
+      class="btn btn-primary"
+      data-testid="initiatives-new-button"
+      (click)="dialog.open()">
+      Run new initiative
+    </button>
+    <app-initiatives-new-dialog
+      [projectId]="slug()"
+      (submitted)="onInitiativeCreated($event)" />
+    ```
+  - Add `onInitiativeCreated(run: InitiativeRun)` method that prepends
+    the new run to the local `runs` signal (mutate via a writable
+    signal rather than re-fetching from the adapter for v1 — the swap
+    to refetch happens with the real backend).
+    - Convert the existing `runs = toSignal(...)` to a `WritableSignal`
+      using `signal<InitiativeRun[]>([])` + an `effect()` (or just a
+      manual subscribe) that initially loads from `adapter.listForProject(slug())`.
+    - On `onInitiativeCreated`, do `this.runs.update(arr => [run, ...arr])`.
+    - Keep the change minimal — don't refactor more than this requires.
+
+  ### `src/app/initiatives/initiatives-api.adapter.ts`
+
+  Tweak `triggerInitiative` mock to return a richer object so the dialog
+  can synthesise the InitiativeRun client-side without re-querying:
+
+  ```typescript
+  triggerInitiative(projectId: string, _yamlBody: string): Observable<InitiativeRun> {
+    const runId = `agent-init-mock-${Date.now().toString(36)}`;
+    const newRun: InitiativeRun = {
+      runId,
+      initiative: 'mock-just-created',
+      tenant: 'demo-tenant',
+      projectId,
+      state: 'queued',
+      iteration: 0,
+      budgetIter: 5,
+      triggeredBy: 'mike@leartech.com',
+      assets: {},
+      createdAt: new Date().toISOString(),
+      lastUpdate: new Date().toISOString(),
+    };
+    return of(newRun).pipe(delay(200));
+  }
+  ```
+
+  Update `initiatives-api.adapter.spec.ts` to assert the new return shape.
+
+  ## Acceptance
+
+  - `make all` + `make pre-push` pass.
+  - "Run new initiative" button visible on /projects/:id below the list.
+  - Click → dialog opens — name input focused.
+  - Submit with valid name → dialog closes, list prepends a new
+    queued-state run.
+  - Cancel → dialog closes without changes.
+  - Native `<dialog>` element used (no CDK dep added to package.json).
+
+  ## data-testid contract
+
+  - `initiatives-new-button` — the trigger button on project-detail
+  - `initiatives-new-dialog` — the dialog root
+  - `initiatives-new-dialog-name-input`
+  - `initiatives-new-dialog-yaml-textarea`
+  - `initiatives-new-dialog-submit-button`
+  - `initiatives-new-dialog-cancel-button`
+  - `initiatives-new-dialog-error`
+
+  ## Constraints
+
+  - **Playwright spec EXPECTED** — `test_ui_changes_have_playwright_coverage`
+    will fire when the new component lands. Apply the spec_suggester
+    output verbatim per `agent-applies-spec-convention-when-gate-silent`.
+    Spec asserts: button visible, click opens dialog, submit prepends
+    row, cancel closes.
+  - **DO NOT add CDK or Material** — native `<dialog>` only.
+  - **DO NOT touch `auth/`, `charts/`, `.lighthouse/jenkins-x/`,
+    `package.json`, `eslint.config.mjs`, tsconfigs.**
+  - **Always post `/hold` immediately** after opening the PR
+    (`agent-prs-must-be-held-pending-review`).
+  - **Never post `/hold cancel`** — humans only.
+  - **Use `mcp__leartech-pipeline__wait_for_terminal`** for pipelines
+    (`prefer-blocking-watch-over-polling`). Note: SDK has hit
+    `agent-sdk-crash-during-long-initiative` previously — if the wait
+    crashes after the PR is open + held + most checks have run, the
+    work is COMPLETE.
+  - **Run `make pre-push` LOCALLY before pushing** — webcoder-ui has
+    `make pre-push` (b2740c2). Eat your own dog food.
+  - `git add <specific files>` only:
+    - `src/app/initiatives/initiatives-new-dialog.component.ts`
+    - `src/app/initiatives/initiatives-new-dialog.component.spec.ts`
+    - `src/app/initiatives/initiatives-api.adapter.ts` (modified)
+    - `src/app/initiatives/initiatives-api.adapter.spec.ts` (modified)
+    - `src/app/components/project-detail.component.ts` (modified)
+    - `end2end-ui/0N-initiative-new-dialog.spec.ts` (added when spec_suggester fires)
+  - Conventional commit: `feat(initiatives): add new-initiative dialog with mock submit`
+  - Full-gate before posting "Ready for client review" sticky.
+
+gate_marks: []   # Full gate.
+
+max_iterations: 7

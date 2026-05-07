@@ -1,0 +1,30 @@
+# TEMPLATE: Bump a single dependency with explicit constraints.
+# Copy to initiatives/<service>-bump-<dep>.yaml and replace the <PLACEHOLDERS>.
+
+name: <SERVICE>-bump-<DEP>
+
+description: |
+  Bump <DEP> from <FROM_VERSION> to <TO_VERSION> in <SERVICE>. Renovate-equivalent
+  but agent-driven so we get verdict-grade analysis on the resulting gate run.
+
+repo: <SERVICE>
+branch: agent/bump-<DEP>-<TO_VERSION>
+base: main
+
+goal: |
+  Update <DEP> from <FROM_VERSION> to <TO_VERSION> in package.json.
+  Run `npm install --legacy-peer-deps` and commit the updated package-lock.json.
+
+  Constraints:
+  - DO NOT touch other dependencies. Only <DEP>.
+  - DO NOT modify application code unless a breaking change in <DEP> requires it.
+  - If a breaking change DOES require code changes, document each one in the PR
+    description and cite the dep's CHANGELOG / migration guide.
+  - Branch from main; conventional commit message (`chore(deps): bump <DEP> from X to Y`).
+
+gate_marks:
+  # Run the full gate — dep bumps need security + e2e + playwright signal,
+  # not just unit. Empty list = no marker filter.
+  []
+
+max_iterations: 5

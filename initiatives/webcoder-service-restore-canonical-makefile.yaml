@@ -1,0 +1,242 @@
+# webcoder-service-restore-canonical-makefile
+#
+# webcoder-service was cloned from leartech-go-service-template (which derived
+# from leartech-auth-service) but its Makefile lost canonical targets along the
+# way. This initiative restores parity AND extends with the new Tier-1 pre-push
+# convention agreed in the dashboard architecture memo:
+#   ~/.claude/projects/-Users-mikelear-leartech-webCoder/memory/project_agent_dashboard_eventing.md
+#
+# Reference: leartech-auth-service/Makefile is the canonical Go shape.
+#
+# Changes in this initiative:
+#   1. Add the missing canonical targets (fmt, vet, tidy, clean, help, all,
+#      test-verbose) to match auth-service.
+#   2. Add new Tier-1 pre-push targets: vuln (govulncheck), secrets (gitleaks),
+#      pre-push (alias for the full Tier-1 sweep).
+#   3. Add NEW make diagnose target — gap analysis between local make targets
+#      and what Tekton presubmit pipelines run on a PR. Human-facing
+#      transparency of "here's what's covered locally vs needs cluster".
+#
+# The PR will be reviewed before automated-agent gets the matching change to
+# call `make all` between commit and push (separate initiative #6).
+#
+# Run with: `make initiative INITIATIVE=webcoder-service-restore-canonical-makefile`
+
+name: webcoder-service-restore-canonical-makefile
+
+description: |
+  Restore canonical Makefile targets to webcoder-service (parity with
+  leartech-auth-service) AND add the new Tier-1 pre-push convention:
+  vuln (govulncheck), secrets (gitleaks), pre-push (full Tier-1 sweep),
+  and a diagnose target that shows the gap between local make coverage
+  and Tekton presubmit pipeline coverage. HTTP/handler code unchanged;
+  Makefile-only work plus a small Makefile-help update.
+
+repo: webcoder-service
+branch: agent/restore-canonical-makefile
+base: main
+
+goal: |
+  Replace the existing Makefile with the canonical Go shape + Tier-1
+  pre-push targets + diagnose target.
+
+  ## Read first (no edits)
+
+  - `Makefile` — current state. Note the existing `swag`, `lint-config`,
+    `lint`, `build`, `test`, `test-coverage` targets. KEEP these — the
+    initiative ADDS targets and reorganizes; it doesn't reinvent.
+  - `~/leartech/leartech-auth-service/Makefile` — canonical reference.
+    Match its structure and conventions (`.PHONY` line, variable
+    declarations, `## help-text` annotations on each target).
+  - `.lighthouse/jenkins-x/` — list of YAML files in this directory drives
+    the diagnose target's "what does Tekton run" list. Read but don't edit.
+
+  Do NOT touch:
+  - `charts/`, `internal/`, `cmd/`, `docs/`, `.lighthouse/jenkins-x/` — out of scope
+  - Any Go source files
+  - The `lint-config` target's yq-merge logic — webcoder-service has a more
+    sophisticated lint-config flow than auth-service (yq merge of base + repo
+    config). Keep it as-is; it's the more correct pattern.
+
+  ## What the new Makefile must contain
+
+  ### Variables (top of file)
+
+  Keep existing `VERSION`, `SWAG_VERSION`, `GOLANGCI_BASE_URL`. Add:
+
+  ```makefile
+  GO              := go
+  BINARY          := webcoder-service
+  GOFLAGS         := -v -trimpath
+  LDFLAGS         := -w -s -X main.version=$(VERSION)
+  GITLEAKS_VERSION := v8.18.4
+  GOVULNCHECK_VERSION := latest
+  GOIMPORTS_VERSION := latest
+  ```
+
+  ### `.PHONY` line
+
+  Update to include every target listed below. Match auth-service's
+  multi-line continuation style.
+
+  ### Canonical entry point
+
+  ```makefile
+  all: fmt swag build test lint   ## Format, regenerate spec, build, test, lint
+  ```
+
+  Mirrors auth-service line-for-line.
+
+  ### NEW Tier-1 pre-push entry point
+
+  ```makefile
+  pre-push: fmt vet swag-check tidy-check build test lint vuln secrets   ## Tier-1 gates that MUST pass before pushing to a PR
+  ```
+
+  Distinct from `all` because:
+  - `all` is the canonical "format-and-go" — it FIXES things (fmt rewrites files, swag regenerates).
+  - `pre-push` is CHECK-mode — it must FAIL if anything's out of date so the
+    agent knows to fix locally instead of pushing dirty.
+
+  ### Targets to add (preserve existing swag/lint/build/test/test-coverage)
+
+  ```makefile
+  fmt: ## Format Go code (gofmt + goimports)
+      $(GO) fmt ./...
+      @command -v goimports >/dev/null || $(GO) install golang.org/x/tools/cmd/goimports@$(GOIMPORTS_VERSION)
+      goimports -w -local github.com/mikelear/webcoder-service .
+
+  vet: ## Run go vet
+      $(GO) vet ./...
+
+  tidy: ## Tidy and verify modules
+      $(GO) mod tidy
+      $(GO) mod verify
+
+  tidy-check: ## Verify go.mod/go.sum are tidy (CI-mode — no writes)
+      @cp go.mod go.mod.bak; cp go.sum go.sum.bak
+      @$(GO) mod tidy
+      @if ! diff -q go.mod go.mod.bak >/dev/null 2>&1 || ! diff -q go.sum go.sum.bak >/dev/null 2>&1; then \
+          mv go.mod.bak go.mod; mv go.sum.bak go.sum; \
+          echo "FAIL: go.mod/go.sum are not tidy. Run 'make tidy' and commit."; exit 1; \
+      fi
+      @rm -f go.mod.bak go.sum.bak
+      @echo "PASS: go.mod/go.sum are tidy"
+
+  swag-check: ## Verify docs/swagger.json is up to date with annotations (CI-mode — no writes)
+      @cp docs/swagger.json docs/swagger.json.bak 2>/dev/null || true
+      @$(MAKE) -s swag >/dev/null 2>&1
+      @if ! diff -q docs/swagger.json docs/swagger.json.bak >/dev/null 2>&1; then \
+          mv docs/swagger.json.bak docs/swagger.json 2>/dev/null || true; \
+          echo "FAIL: docs/swagger.json is not in sync with annotations. Run 'make swag' and commit."; exit 1; \
+      fi
+      @rm -f docs/swagger.json.bak
+      @echo "PASS: docs/swagger.json in sync"
+
+  vuln: ## Scan for known Go vulnerabilities (govulncheck)
+      @command -v govulncheck >/dev/null || $(GO) install golang.org/x/vuln/cmd/govulncheck@$(GOVULNCHECK_VERSION)
+      govulncheck ./...
+
+  secrets: ## Scan for committed secrets (gitleaks)
+      @command -v gitleaks >/dev/null || { \
+          echo "Installing gitleaks $(GITLEAKS_VERSION)..."; \
+          GOOS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+          GOARCH=$$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/'); \
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/$(GITLEAKS_VERSION)/gitleaks_$${GITLEAKS_VERSION#v}_$${GOOS}_$${GOARCH}.tar.gz" | \
+              tar -xz -C /tmp gitleaks && mv /tmp/gitleaks $$(go env GOPATH)/bin/gitleaks; \
+      }
+      gitleaks detect --source . --no-banner --redact
+
+  clean: ## Clean build artifacts
+      rm -rf bin/ cover.out .golangci.base.yml .golangci.merged.yml *.bak
+
+  test-verbose: ## Run tests with verbose output
+      $(GO) test --tags=unit -v -failfast -count=1 ./...
+
+  help: ## Show this help
+      @grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | sort | awk 'BEGIN {FS = ":.*?## "}; {printf "\033[36m%-20s\033[0m %s\n", $$1, $$2}'
+  ```
+
+  ### NEW `diagnose` target — local-vs-Tekton coverage gap
+
+  This is human-facing transparency. List the Lighthouse presubmit pipeline
+  YAMLs in `.lighthouse/jenkins-x/`, map each to whether `make pre-push`
+  covers it, print a colour-coded report.
+
+  ```makefile
+  diagnose: ## Show which Tekton presubmit checks are covered locally vs need cluster
+      @echo "Tekton presubmit checks for this repo (PR-time):"
+      @echo "─────────────────────────────────────────────────"
+      @for f in .lighthouse/jenkins-x/*.yaml; do \
+          [ -f "$$f" ] || continue; \
+          name=$$(basename $$f .yaml); \
+          case $$name in \
+              triggers|release) continue;; \
+              lint) covered="✓ \033[32mmake lint\033[0m";; \
+              test|test-coverage) covered="✓ \033[32mmake test\033[0m";; \
+              govulncheck) covered="✓ \033[32mmake vuln\033[0m";; \
+              end2end) covered="✗ \033[33mTier 3 — needs preview cluster\033[0m";; \
+              end2end-ui) covered="✗ \033[33mTier 3 — Playwright needs preview cluster\033[0m";; \
+              security-scan|security-scan/*) covered="◐ \033[33mpartial — gitleaks via 'make secrets'; SAST needs cluster\033[0m";; \
+              ai-review|ai-review/*) covered="✗ \033[33mTier 3 — LLM-against-deployed-preview\033[0m";; \
+              image-scan|*image-scan*) covered="✗ \033[33mTier 3 — needs built image\033[0m";; \
+              *) covered="? \033[31munknown — extend Makefile diagnose mapping\033[0m";; \
+          esac; \
+          printf "  %-30s %b\n" "$$name" "$$covered"; \
+      done
+      @echo ""
+      @echo "Legend: ✓ covered by 'make pre-push'   ◐ partial   ✗ requires Tekton cluster   ? mapping needs update"
+      @echo ""
+      @echo "Run 'make pre-push' before pushing to catch all locally-covered failures."
+  ```
+
+  Mapping rules to bake in (case statement above):
+  - lint, test/test-coverage, govulncheck → covered (✓)
+  - end2end, end2end-ui, ai-review, image-scan → not covered (✗) — needs cluster
+  - security-scan → partial (◐) — gitleaks local, SAST/DAST cluster
+  - everything else → unknown (?) — flag so the mapping gets extended when new
+    catalog tasks appear
+
+  ### Makefile-help update
+
+  Update the `.PHONY` line to include EVERY target. Make sure `help` lists
+  them in a sensible order (group by purpose: build/test, format/lint, scan,
+  meta).
+
+  ## Acceptance
+
+  - `make help` shows ALL new targets with their `## help-text`.
+  - `make all` succeeds (same as before, just now formally aliased).
+  - `make pre-push` succeeds locally on a clean checkout (with all binaries
+    available — installs gitleaks/govulncheck/goimports on demand).
+  - `make diagnose` runs without error and prints the table for the current
+    `.lighthouse/jenkins-x/` content.
+  - `make swag-check` and `make tidy-check` correctly FAIL when their
+    artifacts are out of date and PASS when they're in sync. Test by
+    deliberately editing a swag annotation and confirming `make swag-check`
+    fails — but **revert before commit**.
+  - Existing `swag`, `lint`, `build`, `test`, `test-coverage`, `lint-config`
+    targets work unchanged.
+
+  ## Constraints
+
+  - **Makefile-only PR.** Don't touch any Go files, charts, .lighthouse/, or docs.
+  - **Always post `/hold` immediately after opening the PR** (per the
+    `agent-prs-must-be-held-pending-review` lesson). State plainly in the
+    PR description: "Held pending human review (`/hold` posted)."
+  - **Never post `/hold cancel`** — humans only.
+  - **Use `mcp__leartech-pipeline__wait_for_terminal`** to wait on
+    pipelines (per `prefer-blocking-watch-over-polling`).
+  - `git add Makefile` only — no `-A`, no other files.
+  - Conventional commit message: `feat(makefile): restore canonical targets + add Tier-1 pre-push gates`
+  - Do a *full-gate* run (no mark filter) before posting "Ready for client
+    review" sticky — final-pass verification per
+    `full-gate-verification-before-sticky`.
+  - Read failure detail before fixing — cite the specific failing
+    criterion in commit messages (per `cite-failing-criteria-when-explaining-fixes`).
+  - **Run `make pre-push` LOCALLY before pushing** — this initiative is
+    PRECISELY about catching pre-push gaps. Eat your own dog food.
+
+gate_marks: []   # Full gate from the start.
+
+max_iterations: 7
