@@ -2,5 +2,7 @@ apiVersion: v2
 name: leartech-automated-agent
 description: Criteria-driven agent runtime exposed as a long-running FastAPI service.
 type: application
-version: 0.1.0
-appVersion: "0.1.0"
+version: 0.0.9
+appVersion: "0.0.9"
+sources:
+  - https://github.com/mikelear/leartech-automated-agent.git
