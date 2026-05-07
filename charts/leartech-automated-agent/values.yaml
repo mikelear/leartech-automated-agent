@@ -1,14 +1,11 @@
 replicaCount: 1
-
 image:
-  repository: ""
-  tag: ""
+  repository: "modernburro.azurecr.io/mikelear/leartech-automated-agent"
+  tag: "0.0.6"
   pullPolicy: IfNotPresent
-
 service:
   type: ClusterIP
   port: 8080
-
 # Anthropic SDK + agent loops are memory-leaning. Start conservative; bump after observation.
 resources:
   requests:
@@ -17,32 +14,27 @@ resources:
   limits:
     cpu: 1000m
     memory: 1Gi
-
 livenessProbe:
   httpGet:
     path: /health
     port: 8080
   initialDelaySeconds: 10
   periodSeconds: 30
-
 readinessProbe:
   httpGet:
     path: /readyz
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 10
-
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
-
 ingress:
   enabled: false
   host: ""
   tlsSecretName: ""
-
 # Secrets — chart materialises ai-review-api-keys via ExternalSecret in
 # its own namespace, pulling the SAME values ai-review's chart uses (so
 # there's only one source of truth per cluster). tekton-git already
@@ -68,11 +60,9 @@ secrets:
   vault:
     mountPoint: kubernetes
     role: jx-vault
-
 # Where consumer-repo checkouts get mounted in cluster mode.
 # The Initiative agent resolves repo paths against this prefix.
 leartechRepoRoot: /workspace
-
 jxRequirements:
   ingress:
     domain: ""
