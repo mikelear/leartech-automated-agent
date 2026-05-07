@@ -1,19 +1,38 @@
-"""Initiative endpoints — start, status, logs, cancel.
+"""Initiative endpoints — start, status, list, cancel.
 
-Phase B v1: validates that the requested initiative YAML exists, returns the
-parsed Initiative shape so callers can sanity-check before triggering. Actual
-async execution wiring (background task, in-memory state, log streaming)
-lands in v1.5.
+Phase B v1.5: actual async execution wired. Each POST /initiatives spawns
+an asyncio.Task that runs `gate.agent.initiative.run_initiative`. State
+lives in `app.state` (in-memory, lost on restart — see that module's
+docstring for the v2 plan).
 """
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from app.state import (
+    InitiativeRecord,
+    list_records,
+    new_id,
+    now,
+    register,
+    update,
+)
+from app.state import (
+    cancel as cancel_initiative_task,
+)
+from app.state import (
+    get as get_record,
+)
+from gate.agent.initiative import run_initiative
 from gate.initiatives.loader import Initiative, load_initiative
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -34,22 +53,32 @@ class StartInitiativeRequest(BaseModel):
     initiative: str = Field(..., description='Initiative YAML name (without .yaml)')
 
 
-class InitiativeStatus(BaseModel):
-    id: str
-    initiative: str
-    status: str = Field(..., description='queued | running | complete | failed | cancelled')
-    pr_number: int | None = None
-    turns: int | None = None
-    cost_usd: float | None = None
+async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
+    """Background task body — runs the initiative, updates state on completion."""
+    update(initiative_id, status='running')
+    try:
+        exit_code = await run_initiative(yaml_path)
+        update(
+            initiative_id,
+            status='complete' if exit_code == 0 else 'failed',
+            finished_at=now(),
+        )
+        logger.info('initiative %s finished with exit_code=%d', initiative_id, exit_code)
+    except asyncio.CancelledError:
+        update(initiative_id, status='cancelled', finished_at=now())
+        logger.info('initiative %s cancelled', initiative_id)
+        raise
+    except Exception as exc:  # noqa: BLE001 — we want to surface any agent failure to the consumer
+        update(initiative_id, status='failed', error=str(exc), finished_at=now())
+        logger.exception('initiative %s failed', initiative_id)
 
 
-@router.post('', response_model=InitiativeStatus, status_code=202)
-async def start_initiative(request: StartInitiativeRequest) -> InitiativeStatus:
-    """Validate the initiative YAML and queue it for execution.
+@router.post('', response_model=InitiativeRecord, status_code=202)
+async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
+    """Validate the initiative YAML and spawn a background task to execute it.
 
-    Phase B v1: validation works; execution returns 501 until v1.5 wires the
-    async background task. This lets callers (Tekton task, CRD controller,
-    dashboard) integrate against the contract before runtime is wired.
+    Returns 202 with the initial record (status=queued). Poll
+    GET /initiatives/{id} for terminal status.
     """
     yaml_path = _initiatives_dir() / f'{request.initiative}.yaml'
     if not yaml_path.exists():
@@ -61,32 +90,63 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeStatus:
 
     try:
         load_initiative(yaml_path)
-    except Exception as exc:  # noqa: BLE001 — surface any pydantic validation error
+    except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
 
-    raise HTTPException(
-        status_code=501,
-        detail='Initiative validated successfully but runtime is not yet wired (phase B v1.5).',
+    initiative_id = new_id()
+    record = InitiativeRecord(
+        id=initiative_id,
+        initiative=request.initiative,
+        status='queued',
+        started_at=now(),
     )
+    task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
+    register(record, task)
+    logger.info('initiative %s queued: %s', initiative_id, request.initiative)
+    return record
 
 
-@router.get('/{initiative_id}', response_model=InitiativeStatus)
-async def get_initiative_status(initiative_id: str) -> InitiativeStatus:
-    """Get current status of a running or completed initiative."""
-    raise HTTPException(status_code=501, detail='State store not yet wired — phase B v1.5')
+@router.get('', response_model=list[InitiativeRecord])
+async def list_initiatives() -> list[InitiativeRecord]:
+    """List all initiatives this process has seen — running, complete, or terminal."""
+    return list_records()
 
 
-@router.post('/{initiative_id}/cancel', response_model=InitiativeStatus)
-async def cancel_initiative(initiative_id: str) -> InitiativeStatus:
-    """Request cancellation of a running initiative."""
-    raise HTTPException(status_code=501, detail='Cancellation not yet wired — phase B v1.5')
+@router.get('/{initiative_id}', response_model=InitiativeRecord)
+async def get_initiative_status(initiative_id: str) -> InitiativeRecord:
+    """Get current status of a queued / running / completed initiative."""
+    record = get_record(initiative_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
+    return record
+
+
+@router.post('/{initiative_id}/cancel', response_model=InitiativeRecord)
+async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
+    """Request cancellation of a running initiative. Idempotent for terminal records."""
+    record = get_record(initiative_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
+
+    cancelled = cancel_initiative_task(initiative_id)
+    if not cancelled and record.status not in {'cancelled', 'complete', 'failed'}:
+        raise HTTPException(
+            status_code=409,
+            detail=f'Initiative {initiative_id!r} is in status {record.status!r}; cannot cancel',
+        )
+
+    refreshed = get_record(initiative_id)
+    if refreshed is None:  # pragma: no cover — record was just confirmed above
+        raise HTTPException(status_code=500, detail='Record disappeared between get and refresh')
+    return refreshed
 
 
 @router.get('/_validate/{initiative}', response_model=Initiative)
 async def validate_initiative(initiative: str) -> Initiative:
     """Resolve and parse an initiative YAML, returning the validated model.
 
-    Useful for callers to verify YAML correctness before POST. No side effects.
+    No side effects. Useful for callers (Tekton task, CRD controller) to
+    verify YAML correctness before POST.
     """
     yaml_path = _initiatives_dir() / f'{initiative}.yaml'
     if not yaml_path.exists():
