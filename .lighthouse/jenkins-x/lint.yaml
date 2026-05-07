@@ -1,0 +1,51 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  creationTimestamp: null
+  name: python-lint
+spec:
+  pipelineSpec:
+    tasks:
+    - name: python-lint
+      resources: {}
+      taskSpec:
+        metadata: {}
+        stepTemplate:
+          env:
+          - name: HOME
+            value: /tekton/home
+          name: ""
+          resources: {}
+          workingDir: /workspace/source
+        steps:
+        - image: uses:jenkins-x/jx3-pipeline-catalog/tasks/git-clone/git-clone-pr.yaml@versionStream
+          name: ""
+          resources: {}
+        - image: python:3.13-slim
+          name: python-lint-format
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+          script: |
+            #!/bin/sh
+            pip install uv --quiet
+            uv sync --dev --frozen --no-cache 2>/dev/null || uv sync --dev --no-cache
+
+            echo "=== Ruff Format Check ==="
+            uv run ruff format --check app gate tests
+
+            echo "=== Ruff Lint ==="
+            uv run ruff check app gate tests
+
+            echo "=== Mypy Type Check ==="
+            uv run mypy app gate
+  podTemplate:
+    tolerations:
+    - key: sku
+      operator: Equal
+      value: build
+      effect: NoSchedule
+  serviceAccountName: tekton-bot
+  timeout: 30m0s
+status: {}

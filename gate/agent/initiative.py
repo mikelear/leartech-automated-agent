@@ -36,7 +36,9 @@ from gate.mcp_servers import (
     build_pr_context_server,
 )
 
-DEFAULT_INITIATIVE_MAX_TURNS = 150  # bumped from 60 after iteration-heavy runs hit cap; cap-vs-SDK termination bug filed as issue #913.
+DEFAULT_INITIATIVE_MAX_TURNS = (
+    150  # bumped from 60 after iteration-heavy runs hit cap; cap-vs-SDK termination bug filed as issue #913.
+)
 
 # Standard write-mode toolkit. Bash gives `git`, `gh`, `npm`, etc.; the rest are file ops.
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']
