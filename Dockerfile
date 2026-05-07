@@ -22,6 +22,7 @@ WORKDIR /app
 COPY pyproject.toml uv.lock* ./
 COPY app/ app/
 COPY gate/ gate/
+COPY initiatives/ initiatives/
 COPY README.md ./
 
 ENV UV_FROZEN=true
