@@ -1,14 +1,11 @@
 replicaCount: 1
-
 image:
-  repository: ""
-  tag: ""
+  repository: "us-central1-docker.pkg.dev/product-first/oci/leartech-automated-agent"
+  tag: "0.0.5"
   pullPolicy: IfNotPresent
-
 service:
   type: ClusterIP
   port: 8080
-
 # Anthropic SDK + agent loops are memory-leaning. Start conservative; bump after observation.
 resources:
   requests:
@@ -17,32 +14,27 @@ resources:
   limits:
     cpu: 1000m
     memory: 1Gi
-
 livenessProbe:
   httpGet:
     path: /health
     port: 8080
   initialDelaySeconds: 10
   periodSeconds: 30
-
 readinessProbe:
   httpGet:
     path: /readyz
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 10
-
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
-
 ingress:
   enabled: false
   host: ""
   tlsSecretName: ""
-
 # Secrets pulled from existing cluster resources.
 # Both already provisioned for ai-review's use — no new secret creation needed.
 secrets:
@@ -52,11 +44,9 @@ secrets:
   ghToken:
     secretName: tekton-git
     secretKey: password
-
 # Where consumer-repo checkouts get mounted in cluster mode.
 # The Initiative agent resolves repo paths against this prefix.
 leartechRepoRoot: /workspace
-
 jxRequirements:
   ingress:
     domain: ""
