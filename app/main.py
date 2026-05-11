@@ -21,16 +21,17 @@ import logging
 
 from fastapi import FastAPI
 
-from app.routers import health, initiatives, lessons
+from app.routers import health, initiatives, introspection, lessons
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 
 app = FastAPI(
     title='leartech-automated-agent',
     description='Criteria-driven agent runtime exposed as a long-running service.',
-    version='0.1.0',
+    version='0.2.0',
 )
 
 app.include_router(health.router, tags=['health'])
 app.include_router(initiatives.router, prefix='/initiatives', tags=['initiatives'])
 app.include_router(lessons.router, prefix='/lessons', tags=['lessons'])
+app.include_router(introspection.router, tags=['introspection'])

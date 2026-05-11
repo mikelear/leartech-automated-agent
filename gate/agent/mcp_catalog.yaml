@@ -1,0 +1,144 @@
+# MCP catalog — single source of truth for the platform's tool surface.
+#
+# Adopts the registry pattern from mqube-mcp-connector (see
+# project_mcp_catalog_pattern memo) without the LLM-gateway layer.
+# claude-agent-sdk handles the Anthropic side; this catalog only describes
+# the MCP servers themselves.
+#
+# Three deployment modes supported (`type:` field):
+#   - sdk     : in-process via claude_agent_sdk.create_sdk_mcp_server.
+#               Builder is a "module:function" reference returning McpSdkServerConfig.
+#   - stdio   : subprocess launched per agent session (mqube pattern).
+#               `command` + `args` + optional `env` describe how to spawn.
+#   - http_sse: long-running HTTP server speaking MCP over SSE.
+#               `url` + optional `auth` describe how to connect.
+#   - remote  : remote API speaking MCP over HTTP.
+#               `url` + optional `auth` describe how to connect.
+#
+# Role-to-MCP mapping below selects which MCPs each agent persona gets
+# at session start. Adding an MCP requires three changes: add to the
+# `mcp_servers` map, add any required env to the chart's externalSecrets,
+# and reference it in the right role's `mcps` list. No agent code changes.
+
+mcp_servers:
+  # In-process — what ships with the runtime today
+  leartech-pipeline:
+    type: sdk
+    builder: gate.mcp_servers.pipeline_server:build_pipeline_server
+    description: Tekton check status across both clusters; PR pipeline state queries.
+
+  leartech-criteria:
+    type: sdk
+    builder: gate.mcp_servers.criteria_server:build_criteria_server
+    description: Discover and execute pytest gate criteria; returns structured pass/fail per criterion.
+
+  leartech-pr-context:
+    type: sdk
+    builder: gate.mcp_servers.pr_context_server:build_pr_context_server
+    description: PR metadata + diff + changed files via gh CLI.
+
+  leartech-test-artifacts:
+    type: sdk
+    builder: gate.mcp_servers.artifacts_server:build_artifacts_server
+    description: Playwright videos, traces, screenshots from GCS test-artifacts bucket.
+
+  # Stdio (subprocess) — for external tools and future cross-process agents.
+  # Marked `status: not_built` until the wrapper repo exists.
+  stitch:
+    type: stdio
+    command: uvx
+    args: [stitch-mcp]
+    env:
+      STITCH_API_KEY: $STITCH_API_KEY
+    description: Leartech design-system catalog; component variants, token lookup.
+    status: not_built
+
+  figma:
+    type: stdio
+    command: npx
+    args: ['@figma/mcp-server', '--readonly']
+    env:
+      FIGMA_TOKEN: $FIGMA_TOKEN
+    description: Figma file + component access for the BA agent's design ingest.
+    status: not_built
+
+  # HTTP/SSE — when a vendor hosts the MCP themselves
+  lovable:
+    type: http_sse
+    url: https://api.lovable.app/mcp/sse
+    auth:
+      type: bearer
+      token_env: LOVABLE_TOKEN
+    description: Lovable mockup + screen-flow access for BA-agent ingest.
+    status: not_built
+
+  github-copilot-mcp:
+    type: remote
+    url: https://api.githubcopilot.com/mcp/
+    auth:
+      type: bearer
+      token_env: GITHUB_TOKEN
+    description: GitHub Copilot's hosted MCP — broader repo/issue/PR queries.
+    status: not_built
+
+roles:
+  initiative_agent:
+    description: |
+      Write-mode agent. Drives an initiative end-to-end: edit code, commit,
+      push, open PR, watch the gate, iterate until green or budget exhausted.
+    mcps:
+      - leartech-pipeline
+      - leartech-criteria
+      - leartech-pr-context
+      - leartech-test-artifacts
+    tools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep
+
+  review_agent:
+    description: |
+      Read-only verdict agent. Looks at a PR, runs the gate, produces a
+      structured review. Cannot write code or push — that's the build agent's job.
+    mcps:
+      - leartech-pipeline
+      - leartech-pr-context
+      - leartech-test-artifacts
+    tools:
+      - Read
+      - Glob
+      - Grep
+
+  ba_agent:
+    description: |
+      Translates intent (Lovable mockup, docs, customer ask) into an initiative-set
+      YAML for orchestrator consumption. Two-track sign-off (design + functional)
+      gates whether the orchestrator picks it up.
+    mcps:
+      - lovable
+      - stitch
+      - figma
+    tools:
+      - Read
+      - Write
+      - Bash
+      - Glob
+      - Grep
+      - WebFetch
+
+  forensic_agent:
+    description: |
+      Read-mostly. Analyses post-merge regressions, generates lessons from
+      qa-arch ring 2 (staging) and ring 3 (forensic) findings, writes them
+      to the catalog via POST /lessons.
+    mcps:
+      - leartech-pipeline
+      - leartech-pr-context
+      - github-copilot-mcp
+    tools:
+      - Read
+      - Grep
+      - Bash

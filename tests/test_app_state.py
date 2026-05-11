@@ -138,7 +138,10 @@ def test_list_records_includes_registered_records() -> None:
     loop = asyncio.get_event_loop()
     task = loop.create_task(noop())
     record = InitiativeRecord(
-        id=new_id(), initiative='listcheck', status='queued', started_at=now(),
+        id=new_id(),
+        initiative='listcheck',
+        status='queued',
+        started_at=now(),
     )
     register(record, task)
     snapshot_count_after = len(list_records())

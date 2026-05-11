@@ -1,6 +1,6 @@
 [project]
 name = "leartech-automated-agent"
-version = "0.1.0"
+version = "0.2.0"
 description = "Criteria-driven agent runner for leartech — deployed as a long-running FastAPI service exposing initiative + lessons APIs. Mirrors the leartech-ai-classifier pattern."
 readme = "README.md"
 requires-python = ">=3.13"
@@ -9,9 +9,11 @@ dependencies = [
     "claude-agent-sdk>=0.1.72",
     "click>=8.1.0",
     "fastapi>=0.115.0",
+    "httpx>=0.27.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "pyyaml>=6.0",
+    "rich>=13.7.0",
     "uvicorn>=0.32.0",
 ]
 
@@ -33,6 +35,7 @@ gate = "gate.cli:main"
 agent = "gate.agent.main:main"
 initiative = "gate.agent.initiative:main"
 lessons = "gate.agent.lessons.cli:main"
+leartech-agent = "app.agent_cli.main:cli"
 
 [tool.ruff]
 target-version = "py312"
@@ -50,6 +53,8 @@ ignore = ["E501"]
 "gate/cli.py" = ["S603", "S607"]
 "gate/mcp_servers/*" = ["S603", "S607"]
 "app/main.py" = ["S104"]
+# Operator CLI deliberately shells out to mmdc / pbcopy for Mermaid rendering.
+"app/agent_cli/*" = ["S108", "S603", "S607"]
 
 [tool.ruff.format]
 quote-style = "single"

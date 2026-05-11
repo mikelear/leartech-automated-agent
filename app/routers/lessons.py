@@ -1,20 +1,32 @@
-"""Lessons-catalog endpoints — list + detail.
+"""Lessons-catalog endpoints — list, detail, capture.
 
-Read-only against `gate/agent/lessons/catalog/`. Capture (write) endpoint
-remains a stub until v1.5; the existing `uv run lessons capture` CLI is
-authoritative for now.
+Read against `gate/agent/lessons/catalog/`; write new lessons there as well.
+
+`POST /lessons` is the integration surface for the three feedback rings:
+- Ring 1 (PR-gate) auto-captures via the agent's in-loop CLI today
+- Ring 2 (qa-arch staging) posts `source.type: staging_test` lessons here
+- Ring 3 (qa-arch forensic) posts `source.type: prod_incident` lessons here
+- Manual webhook receivers post `source.type: manual_review` lessons here
+
+The endpoint refuses if a lesson with the same id already exists — it's
+create-only; subsequent updates need a manual catalog edit + PR.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
+from pathlib import Path
 
+import yaml
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-from gate.agent.lessons.loader import Lesson, load_all_lessons
+from gate.agent.lessons.loader import CATALOG_DIR, Lesson, load_all_lessons
 
 router = APIRouter()
+
+_VALID_ID_RE = re.compile(r'^[a-z0-9][a-z0-9-]*[a-z0-9]$')
 
 
 class LessonSummary(BaseModel):
@@ -37,6 +49,26 @@ def _summarise(lesson: Lesson) -> LessonSummary:
     )
 
 
+def _lesson_path(lesson_id: str) -> Path:
+    """Resolve to <catalog>/<id>.md, refusing any id that could path-escape."""
+    if not _VALID_ID_RE.match(lesson_id):
+        raise HTTPException(
+            status_code=422,
+            detail=f'Invalid lesson id {lesson_id!r}: must be kebab-case (a-z, 0-9, hyphens; cannot start/end with hyphen)',
+        )
+    return CATALOG_DIR / f'{lesson_id}.md'
+
+
+def _serialise_lesson(lesson: Lesson) -> str:
+    """Render a Lesson back into the on-disk frontmatter+markdown format.
+
+    Mirrors `parse_lesson_file`'s expected shape: `---\\n<yaml>\\n---\\n<body>`.
+    """
+    frontmatter = lesson.model_dump(mode='json', exclude={'body'}, exclude_none=True)
+    yaml_text = yaml.safe_dump(frontmatter, sort_keys=False, default_flow_style=False)
+    return f'---\n{yaml_text}---\n\n{lesson.body.rstrip()}\n'
+
+
 @router.get('', response_model=list[LessonSummary])
 async def list_lessons() -> list[LessonSummary]:
     """List every lesson in the catalog."""
@@ -52,7 +84,24 @@ async def get_lesson(lesson_id: str) -> Lesson:
     raise HTTPException(status_code=404, detail=f'No lesson with id {lesson_id!r}')
 
 
-@router.post('', status_code=501)
-async def capture_lesson() -> None:
-    """Capture a new lesson. Use `uv run lessons capture` until v1.5."""
-    raise HTTPException(status_code=501, detail='Capture not yet wired — use the CLI for now')
+@router.post('', response_model=LessonSummary, status_code=201)
+async def capture_lesson(lesson: Lesson) -> LessonSummary:
+    """Capture a new lesson by writing it to the catalog directory.
+
+    Used by qa-arch (rings 2 + 3) and manual-review webhooks to post findings
+    that should calibrate the agent on its next session. The Lesson model
+    validates the body shape; we add filesystem-level checks (id format,
+    no overwrite) on top.
+    """
+    target = _lesson_path(lesson.id)
+    if target.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f'Lesson {lesson.id!r} already exists. To update, edit the file in a PR; POST is create-only.',
+        )
+    # Atomic write: write to tmp, then rename, so a partial write can't
+    # corrupt the catalog and break agent startup.
+    tmp = target.with_suffix('.md.tmp')
+    tmp.write_text(_serialise_lesson(lesson))
+    tmp.rename(target)
+    return _summarise(lesson)
