@@ -34,6 +34,13 @@ ENV LEARTECH_REPO_ROOT=/workspace
 
 RUN mkdir -p /home/agent && chown agent:agent /home/agent
 
+# Lessons catalog must be writable so POST /lessons (qa-arch ring 2 + 3
+# integration) can append new lesson files at runtime. The dir is baked
+# at build time (24+ files); we chown it so the non-root agent user can
+# add to it. Note: writes are still pod-local and lost on restart —
+# qa-arch posts should eventually go via a PR-based path for persistence.
+RUN chown -R agent:agent /app/gate/agent/lessons/catalog
+
 USER agent
 EXPOSE 8080
 
