@@ -349,6 +349,64 @@ def runs_status(ctx: click.Context, run_id: str) -> None:
     console.print(Panel('\n'.join(lines), title=f'Run — {body["id"]}', border_style='cyan'))
 
 
+@runs.command('cancel')
+@click.argument('run_id')
+@click.pass_context
+def runs_cancel(ctx: click.Context, run_id: str) -> None:
+    """Cancel a running initiative. Idempotent for already-terminal records."""
+    response = _client(ctx).post(f'/initiatives/{run_id}/cancel')
+    if response.status_code != 200:
+        _print_error(response)
+        return
+    body = response.json()
+    console.print(f'[yellow]Cancelled[/yellow] run {body["id"]} ({body["initiative"]}) → status={body["status"]}')
+
+
+# ─── fire (top-level convenience) ─────────────────────────────────────────
+
+
+@cli.command()
+@click.argument('initiative_name')
+@click.pass_context
+def fire(ctx: click.Context, initiative_name: str) -> None:
+    """Fire a baked-in initiative on the deployed service. Returns the new run ID.
+
+    The initiative YAML must already exist in the deployed image (run
+    `leartech-agent runs list` or look at the service's bundled
+    initiatives/ directory). Adding a new YAML requires a release + auto-promote.
+    """
+    response = _client(ctx).post('/initiatives', json={'initiative': initiative_name})
+    if response.status_code != 202:
+        if response.status_code == 404:
+            try:
+                detail = response.json()['detail']
+                console.print(f'[red]Unknown initiative {initiative_name!r}.[/red]')
+                available = detail.get('available', []) if isinstance(detail, dict) else []
+                if available:
+                    console.print('\nAvailable initiatives on this service:')
+                    for name in available:
+                        console.print(f'  • {name}')
+                return
+            except (KeyError, ValueError):
+                pass
+        _print_error(response)
+        return
+    body = response.json()
+    console.print(
+        Panel(
+            f'[bold green]Fired[/bold green] {body["initiative"]}\n\n'
+            f'[bold]Run ID:[/bold] {body["id"]}\n'
+            f'[bold]Status:[/bold] {body["status"]} (queued, agent will spawn shortly)\n'
+            f'[bold]Started:[/bold] {body["started_at"]}\n\n'
+            f'Track progress:\n'
+            f'  leartech-agent runs status {body["id"]}\n'
+            f'  leartech-agent runs cancel {body["id"]}  # if needed',
+            title='Initiative queued',
+            border_style='green',
+        )
+    )
+
+
 # ─── topology ─────────────────────────────────────────────────────────────
 
 
