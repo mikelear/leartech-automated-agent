@@ -36,9 +36,12 @@ from gate.mcp_servers import (
     build_pr_context_server,
 )
 
-DEFAULT_INITIATIVE_MAX_TURNS = (
-    150  # bumped from 60 after iteration-heavy runs hit cap; cap-vs-SDK termination bug filed as issue #913.
-)
+# 60 → 150 → 1000. Token cost is acceptable; rabbit-hole detection (the agent
+# burning turns on the same criterion) will land as a separate circuit-breaker
+# slice. Until then, prefer "let the agent finish" over "cap and re-fire".
+# See `agent-sdk-crash-during-long-initiative` lesson — the SDK-cap-hit bug
+# becomes effectively unreachable at this level for any realistic initiative.
+DEFAULT_INITIATIVE_MAX_TURNS = 1000
 
 # Standard write-mode toolkit. Bash gives `git`, `gh`, `npm`, etc.; the rest are file ops.
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']
