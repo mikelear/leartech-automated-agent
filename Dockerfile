@@ -41,6 +41,12 @@ RUN mkdir -p /home/agent && chown agent:agent /home/agent
 # qa-arch posts should eventually go via a PR-based path for persistence.
 RUN chown -R agent:agent /app/gate/agent/lessons/catalog
 
+# /workspace must exist + be writable so run_initiative can clone consumer
+# repos on demand (cluster mode — no pre-mounted repos). Without this the
+# agent dies at the first `gh repo clone` with PermissionError on the
+# parent dir.
+RUN mkdir -p /workspace && chown -R agent:agent /workspace
+
 USER agent
 EXPOSE 8080
 
