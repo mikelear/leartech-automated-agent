@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -98,11 +99,35 @@ async def run_initiative(
     primary = initiative.primary
     cwd = repo_root or _default_repo_root(primary.qualified_repo)
     if not cwd.exists():
+        # Cluster mode: the consumer repo isn't pre-mounted, so clone it from GitHub
+        # on demand. `gh` is baked into the image and honours GH_TOKEN natively.
+        # Laptop mode normally has the repo at ~/leartech/<repo>/ already, so this
+        # branch only fires on a fresh dev machine or the deployed pod.
+        if not os.environ.get('GH_TOKEN'):
+            click.echo(
+                f'Repo checkout not found at {cwd} and GH_TOKEN is not set — cannot clone. '
+                f'Either clone manually (`gh repo clone {primary.qualified_repo} {cwd}`) '
+                f'or set GH_TOKEN.',
+                err=True,
+            )
+            return 2
         click.echo(
-            f'Repo checkout not found at {cwd}. Clone it first: `gh repo clone {primary.qualified_repo} {cwd}`',
+            click.style(f'→ cloning {primary.qualified_repo} → {cwd}', fg='cyan'),
             err=True,
         )
-        return 2
+        cwd.parent.mkdir(parents=True, exist_ok=True)
+        result = subprocess.run(
+            ['gh', 'repo', 'clone', primary.qualified_repo, str(cwd)],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            click.echo(
+                f'Clone failed (exit {result.returncode}):\n{result.stderr}',
+                err=True,
+            )
+            return 2
 
     calibrations = render_for('initiative_agent')
     system_prompt = f'{calibrations}\n\n---\n\n{INITIATIVE_SYSTEM_PROMPT}' if calibrations else INITIATIVE_SYSTEM_PROMPT
