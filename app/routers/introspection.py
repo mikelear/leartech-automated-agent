@@ -16,6 +16,7 @@ Endpoints:
 from __future__ import annotations
 
 from collections import Counter
+from importlib.metadata import PackageNotFoundError, version
 from typing import Literal
 
 from fastapi import APIRouter, HTTPException
@@ -31,6 +32,14 @@ from gate.agent.mcp_catalog import (
 )
 
 router = APIRouter()
+
+
+def _service_version() -> str:
+    """Read the installed package version. Falls back to 'unknown' for editable checkouts."""
+    try:
+        return version('leartech-automated-agent')
+    except PackageNotFoundError:
+        return 'unknown'
 
 
 # ─── /mcps ────────────────────────────────────────────────────────────────
@@ -269,7 +278,7 @@ async def health_detail() -> HealthDetailResponse:
 
     return HealthDetailResponse(
         service='leartech-automated-agent',
-        version='0.2.0',
+        version=_service_version(),
         lessons_loaded=len(lessons),
         lessons_by_category=dict(by_category),
         lessons_by_status=dict(by_status),
