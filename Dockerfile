@@ -1,4 +1,17 @@
-FROM python:3.13-slim AS base
+# Canonical Python service Dockerfile, modelled on leartech-ai-classifier
+# (the org's Python gold-standard) with two extras specific to this service:
+# (a) gh CLI + ffmpeg in system deps (agent uses these via Bash MCP)
+# (b) /workspace pre-created + owned so run_initiative can clone consumer repos
+#
+# Key kaniko-friendly choices:
+# - Single FROM (no AS aliases that don't get used)
+# - User creation, home dir, and /workspace all in ONE atomic RUN (consolidating
+#   multiple chown-on-empty-dir RUNs that historically tripped kaniko's snapshot
+#   detection and produced empty layers)
+# - COPY --chown bakes file ownership at copy time, so no separate chown RUN
+#   is needed for /app/gate/agent/lessons/catalog or other source-derived paths
+
+FROM python:3.13-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
@@ -15,15 +28,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-RUN groupadd -r agent && useradd -r -g agent -u 1000 agent
+# Non-root user + home dir + /workspace (for consumer-repo cloning at runtime)
+# all in one atomic RUN. Single layer with explicit chmod 0775 ownership
+# avoids the kaniko empty-snapshot edge case that affected the previous
+# multi-RUN pattern.
+RUN groupadd -r agent && useradd -r -g agent -u 1000 agent \
+    && mkdir -p /home/agent /workspace \
+    && chown agent:agent /home/agent /workspace
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock* ./
-COPY app/ app/
-COPY gate/ gate/
-COPY initiatives/ initiatives/
-COPY README.md ./
+# COPY --chown bakes ownership at copy time. The agent user can then write to
+# /app/gate/agent/lessons/catalog at runtime without a separate chown step.
+# This is the modern Docker pattern; cleanly handled by kaniko.
+COPY --chown=agent:agent pyproject.toml uv.lock* ./
+COPY --chown=agent:agent app/ app/
+COPY --chown=agent:agent gate/ gate/
+COPY --chown=agent:agent initiatives/ initiatives/
+COPY --chown=agent:agent README.md ./
 
 ENV UV_FROZEN=true
 RUN uv sync --frozen --no-cache --no-dev 2>/dev/null || uv sync --no-cache --no-dev
@@ -31,21 +53,6 @@ RUN uv sync --frozen --no-cache --no-dev 2>/dev/null || uv sync --no-cache --no-
 ENV PORT=8080
 ENV UV_CACHE_DIR=/tmp/uv-cache
 ENV LEARTECH_REPO_ROOT=/workspace
-
-RUN mkdir -p /home/agent && chown agent:agent /home/agent
-
-# Lessons catalog must be writable so POST /lessons (qa-arch ring 2 + 3
-# integration) can append new lesson files at runtime. The dir is baked
-# at build time (24+ files); we chown it so the non-root agent user can
-# add to it. Note: writes are still pod-local and lost on restart —
-# qa-arch posts should eventually go via a PR-based path for persistence.
-RUN chown -R agent:agent /app/gate/agent/lessons/catalog
-
-# /workspace must exist + be writable so run_initiative can clone consumer
-# repos on demand (cluster mode — no pre-mounted repos). Without this the
-# agent dies at the first `gh repo clone` with PermissionError on the
-# parent dir.
-RUN mkdir -p /workspace && chown -R agent:agent /workspace
 
 USER agent
 EXPOSE 8080
