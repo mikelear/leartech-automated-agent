@@ -1,15 +1,11 @@
 # Canonical Python service Dockerfile, modelled on leartech-ai-classifier
-# (the org's Python gold-standard) with two extras specific to this service:
-# (a) gh CLI + ffmpeg in system deps (agent uses these via Bash MCP)
-# (b) /workspace pre-created + owned so run_initiative can clone consumer repos
+# (the org's Python gold-standard) with one extra specific to this service:
+# gh CLI + ffmpeg in system deps (agent uses these via Bash MCP).
 #
-# Key kaniko-friendly choices:
-# - Single FROM (no AS aliases that don't get used)
-# - User creation, home dir, and /workspace all in ONE atomic RUN (consolidating
-#   multiple chown-on-empty-dir RUNs that historically tripped kaniko's snapshot
-#   detection and produced empty layers)
-# - COPY --chown bakes file ownership at copy time, so no separate chown RUN
-#   is needed for /app/gate/agent/lessons/catalog or other source-derived paths
+# /workspace is NOT created here. The Helm chart mounts it as an emptyDir
+# volume — standard K8s pattern for ephemeral writable scratch space, and
+# avoids the kaniko --snapshotMode=redo bug where empty dirs are lost
+# between snapshots.
 
 FROM python:3.13-slim
 
@@ -28,13 +24,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Non-root user + home dir + /workspace (for consumer-repo cloning at runtime)
-# all in one atomic RUN. Single layer with explicit chmod 0775 ownership
-# avoids the kaniko empty-snapshot edge case that affected the previous
-# multi-RUN pattern.
 RUN groupadd -r agent && useradd -r -g agent -u 1000 agent \
-    && mkdir -p /home/agent /workspace \
-    && chown agent:agent /home/agent /workspace
+    && mkdir -p /home/agent \
+    && chown agent:agent /home/agent
 
 WORKDIR /app
 

@@ -15,6 +15,7 @@ Endpoints:
 
 from __future__ import annotations
 
+import os
 from collections import Counter
 from importlib.metadata import PackageNotFoundError, version
 from typing import Literal
@@ -35,7 +36,18 @@ router = APIRouter()
 
 
 def _service_version() -> str:
-    """Read the installed package version. Falls back to 'unknown' for editable checkouts."""
+    """Report the deployed release tag.
+
+    Order of precedence:
+    1. `VERSION` env var — set by the Helm chart from `.Chart.Version`, which jx-promote
+       bumps on every release (mqube org-wide standard, used in 10+ services).
+    2. `importlib.metadata.version()` — works for editable + installed pip packages
+       but the value is frozen at build time from pyproject.toml, so it lags by design.
+    3. `'unknown'` — last-resort fallback for partial installs.
+    """
+    env_version = os.environ.get('VERSION')
+    if env_version:
+        return env_version
     try:
         return version('leartech-automated-agent')
     except PackageNotFoundError:
