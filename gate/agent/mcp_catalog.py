@@ -77,12 +77,46 @@ class McpServer(BaseModel):
         return self
 
 
+class LlmConfig(BaseModel):
+    """Per-role LLM backend + model choice.
+
+    Read at session start by the runtime loop (Phase 0.5) to route
+    turns to the right adapter. Optional today — roles without an
+    `llm:` block fall through to the platform default (Claude opus 4.7).
+    """
+
+    model_config = ConfigDict(extra='forbid')
+
+    backend: str = Field(
+        default='claude',
+        description='LLM adapter identifier. Today only "claude" is implemented; '
+                    '"openai" / "local" come in later phases.',
+    )
+    model: str | None = Field(
+        default=None,
+        description='Backend-specific model name (e.g. "claude-opus-4-7", '
+                    '"claude-haiku-4-5"). None means the adapter default.',
+    )
+    max_turns: int = Field(
+        default=1000,
+        ge=1,
+        description='Hard upper bound on turns per session. Cheap-classification '
+                    'roles (e.g. forensic) set this much lower than initiative work.',
+    )
+    stop_on_tool: list[str] = Field(
+        default_factory=list,
+        description='Tool names that, when invoked, pause the session for review. '
+                    'E.g. ["open_pr"] forces human review before any PR opens.',
+    )
+
+
 class Role(BaseModel):
     """One agent persona's MCP + tool allowlist."""
 
     model_config = ConfigDict(extra='forbid')
 
     description: str = Field(min_length=1)
+    llm: LlmConfig | None = Field(default=None, description='Per-role LLM config. None means platform default.')
     mcps: list[str] = Field(default_factory=list)
     tools: list[str] = Field(default_factory=list)
 

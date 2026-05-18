@@ -86,6 +86,10 @@ roles:
     description: |
       Write-mode agent. Drives an initiative end-to-end: edit code, commit,
       push, open PR, watch the gate, iterate until green or budget exhausted.
+    llm:
+      backend: claude
+      model: claude-opus-4-7
+      max_turns: 1000
     mcps:
       - leartech-pipeline
       - leartech-criteria
