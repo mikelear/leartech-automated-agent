@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
 from gate.agent.mcp_catalog import (
     Catalog,
+    LlmConfig,
     McpServer,
     Role,
     get_mcp,
@@ -122,3 +124,77 @@ def test_reachable_status_missing_auth_for_remote_mcp() -> None:
     # Make sure the env var really isn't set
     os.environ.pop('NEVER_SET_TEST_VAR_X9Z', None)
     assert reachable_status(mcp) == 'missing_auth'
+
+
+# ─── LlmConfig field tests ────────────────────────────────────────────────────
+
+
+def _synthetic_role(llm: object = None) -> dict:
+    """Helper: minimal valid role dict for Catalog-level parse tests."""
+    role: dict = {'description': 'synthetic role for testing'}
+    if llm is not None:
+        role['llm'] = llm
+    return role
+
+
+def test_llm_config_optional_field_defaults_to_none() -> None:
+    """A role with no `llm:` key must parse with role.llm == None."""
+    role = Role.model_validate({'description': 'no llm block here'})
+    assert role.llm is None
+
+
+def test_llm_config_parses_with_explicit_block() -> None:
+    """A role with a full `llm:` block must parse into an LlmConfig instance."""
+    role = Role.model_validate(
+        {
+            'description': 'role with llm block',
+            'llm': {'backend': 'claude', 'model': 'claude-opus-4-7', 'max_turns': 100},
+        }
+    )
+    assert role.llm is not None
+    assert role.llm.backend == 'claude'
+    assert role.llm.model == 'claude-opus-4-7'
+    assert role.llm.max_turns == 100
+
+
+def test_llm_config_max_turns_must_be_positive() -> None:
+    """`max_turns: 0` must raise ValidationError (ge=1 constraint)."""
+    with pytest.raises(ValidationError):
+        LlmConfig.model_validate({'max_turns': 0})
+
+
+def test_llm_config_stop_on_tool_defaults_empty() -> None:
+    """An `llm:` block without `stop_on_tool` must yield an empty list."""
+    role = Role.model_validate(
+        {
+            'description': 'role with partial llm block',
+            'llm': {'backend': 'claude'},
+        }
+    )
+    assert role.llm is not None
+    assert role.llm.stop_on_tool == []
+
+
+def test_llm_config_extra_field_forbidden() -> None:
+    """An unknown field inside `llm:` must raise ValidationError (extra='forbid')."""
+    with pytest.raises(ValidationError):
+        LlmConfig.model_validate({'backend': 'claude', 'unknown_field': 'oops'})
+
+
+def test_existing_roles_still_parse() -> None:
+    """All four real roles load cleanly; initiative_agent has llm populated; others are None."""
+    load_catalog.cache_clear()
+    catalog = load_catalog()
+
+    for role_name in ('initiative_agent', 'review_agent', 'ba_agent', 'forensic_agent'):
+        assert role_name in catalog.roles, f'expected {role_name!r} in catalog'
+
+    initiative = catalog.roles['initiative_agent']
+    assert initiative.llm is not None, 'initiative_agent.llm should be populated'
+    assert initiative.llm.backend == 'claude'
+    assert initiative.llm.model == 'claude-opus-4-7'
+    assert initiative.llm.max_turns == 1000
+
+    for role_name in ('review_agent', 'ba_agent', 'forensic_agent'):
+        role = catalog.roles[role_name]
+        assert role.llm is None, f'{role_name}.llm should be None (no llm block in yaml)'
