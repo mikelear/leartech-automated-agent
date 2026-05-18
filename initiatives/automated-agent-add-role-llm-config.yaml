@@ -1,0 +1,193 @@
+# automated-agent-add-role-llm-config — Phase 0.75 of the conductor architecture.
+#
+# Adds an optional `llm:` block to each agent role in mcp_catalog.yaml,
+# carrying backend + model + max_turns + stop semantics per role. This is the
+# *schema* layer that Phase 0.5 (per-turn runtime loop) will consume to route
+# turns to the right LLM per role.
+#
+# This is the SMALLEST initiative in the conductor-architecture set — pure
+# pydantic schema extension + tests. No runtime behaviour changes today; the
+# new fields are read but not yet used.
+#
+# This is also the FIRST self-modification initiative for the agent. We are
+# deliberately using a tiny scope to probe the agent's calibration on Python
+# work in this codebase. If this lands cleanly, larger Phase 0 / 0.5
+# initiatives will follow.
+#
+# Run with: `make initiative INITIATIVE=automated-agent-add-role-llm-config`
+
+name: automated-agent-add-role-llm-config
+
+description: |
+  Extend the Role pydantic model in gate/agent/mcp_catalog.py with an optional
+  `llm: LlmConfig | None` field. Update gate/agent/mcp_catalog.yaml to add the
+  field to one role (initiative_agent) as a working example. Add parametrised
+  tests covering the new field's parsing, defaults, and validation.
+
+  Phase 0.75 of the conductor architecture (see
+  ~/.claude/projects/-Users-mikelear-leartech-automated-agent/memory/project_conductor_architecture.md
+  for the bigger picture — this initiative implements the role-config layer
+  only, no runtime changes).
+
+repo: leartech-automated-agent
+branch: agent/role-llm-config
+base: main
+
+goal: |
+  Three deliverables, in order:
+
+  ## 1. Add `LlmConfig` pydantic model to gate/agent/mcp_catalog.py
+
+  Insert immediately above the existing `Role` class. Shape:
+
+      class LlmConfig(BaseModel):
+          """Per-role LLM backend + model choice.
+
+          Read at session start by the runtime loop (Phase 0.5) to route
+          turns to the right adapter. Optional today — roles without an
+          `llm:` block fall through to the platform default (Claude opus 4.7).
+          """
+
+          model_config = ConfigDict(extra='forbid')
+
+          backend: str = Field(
+              default='claude',
+              description='LLM adapter identifier. Today only "claude" is implemented; '
+                          '"openai" / "local" come in later phases.',
+          )
+          model: str | None = Field(
+              default=None,
+              description='Backend-specific model name (e.g. "claude-opus-4-7", '
+                          '"claude-haiku-4-5"). None means the adapter default.',
+          )
+          max_turns: int = Field(
+              default=1000,
+              ge=1,
+              description='Hard upper bound on turns per session. Cheap-classification '
+                          'roles (e.g. forensic) set this much lower than initiative work.',
+          )
+          stop_on_tool: list[str] = Field(
+              default_factory=list,
+              description='Tool names that, when invoked, pause the session for review. '
+                          'E.g. ["open_pr"] forces human review before any PR opens.',
+          )
+
+  ## 2. Extend the existing `Role` class with the new field
+
+  Add `llm: LlmConfig | None = None` to the Role class definition. Keep the
+  field optional (`= None`) so existing roles parse without modification.
+
+  Mirror the style of the existing fields — `mcps: list[str] = Field(default_factory=list)`
+  and `tools: list[str] = Field(default_factory=list)` are next to where the
+  new field goes. Use `Field(default=None, description='...')` with a clear
+  description: "Per-role LLM config. None means platform default."
+
+  ## 3. Update one role in gate/agent/mcp_catalog.yaml as a working example
+
+  Add an `llm:` block to the `initiative_agent` role only (leave the other
+  three roles unchanged — they keep the implicit default). Use these values:
+
+      initiative_agent:
+        description: |
+          ...existing description, unchanged...
+        llm:
+          backend: claude
+          model: claude-opus-4-7
+          max_turns: 1000
+        mcps:
+          ...existing mcps, unchanged...
+        tools:
+          ...existing tools, unchanged...
+
+  The position of `llm:` in the YAML doesn't matter; alphabetical between
+  `description` and `mcps` is fine.
+
+  ## 4. Add tests in tests/test_mcp_catalog.py
+
+  Insert new tests at the END of the file. Follow the existing test style
+  exactly (function naming, fixture usage, parametrize patterns).
+
+  Required tests:
+
+  - `test_llm_config_optional_field_defaults_to_none` — load a synthetic role
+    with no `llm:` key; assert `role.llm is None`.
+
+  - `test_llm_config_parses_with_explicit_block` — load a synthetic role with
+    `llm: {backend: claude, model: claude-opus-4-7, max_turns: 100}`; assert
+    the parsed object matches.
+
+  - `test_llm_config_max_turns_must_be_positive` — pass `max_turns: 0`; assert
+    pydantic raises ValidationError.
+
+  - `test_llm_config_stop_on_tool_defaults_empty` — load with no `stop_on_tool`;
+    assert `role.llm.stop_on_tool == []`.
+
+  - `test_llm_config_extra_field_forbidden` — pass an unknown field inside
+    `llm:`; assert pydantic raises ValidationError (extra='forbid').
+
+  - `test_existing_roles_still_parse` — load the real
+    `gate/agent/mcp_catalog.yaml` via `load_catalog()`; assert all four roles
+    parse without error; assert `initiative_agent.llm` is populated and the
+    other three roles' `llm` is None.
+
+  Use parametrize where it reduces duplication, in line with the
+  test_catalog_coverage.py patterns added recently.
+
+  ## 5. Verify nothing else broke
+
+  Run the full test suite locally:
+
+      uv run pytest -q --no-cov
+
+  All previously-passing tests must still pass. The golden tests in
+  tests/test_role_prompt_golden.py should NOT need updating — this change
+  is schema-only, doesn't affect rendered prompts.
+
+  ## Conventions to follow (this is a Python repo — different from your usual Angular work)
+
+  - Package manager: **uv**, not pip. Use `uv run pytest`, `uv run ruff check`.
+  - Test runner: pytest with parametrize. See `tests/test_catalog_coverage.py`
+    for the modern style.
+  - Type hints: always use them. `from __future__ import annotations` is
+    already at the top of most files.
+  - Pydantic v2 syntax: `Field(default=..., description=...)`, `model_config =
+    ConfigDict(extra='forbid')`, etc. Match what's already in mcp_catalog.py.
+  - Conventional commits: `feat(catalog): add LlmConfig per-role schema`
+  - Don't touch any other file. This is schema + tests only.
+
+  ## Reference files — read these BEFORE writing code
+
+  - `gate/agent/mcp_catalog.py` — the file you're editing. Understand the
+    existing `Role` and `Catalog` model shape.
+  - `gate/agent/mcp_catalog.yaml` — the file you're adding one block to.
+  - `tests/test_mcp_catalog.py` — the test file you're appending to. Match
+    its style (helpers, naming, structure).
+  - `tests/test_catalog_coverage.py` — recent addition showing modern
+    parametrize patterns we use now.
+
+  ## What this initiative is NOT
+
+  - It is NOT building the runtime loop. That's Phase 0.5, a separate
+    initiative. The `llm:` field is read at parse-time but no code consumes
+    it yet.
+  - It is NOT adding new LLM adapters. That's also Phase 0.5.
+  - It is NOT changing the platform default model. The Field default
+    `backend='claude'` matches current behaviour; existing roles without
+    `llm:` keep working unchanged.
+
+  ## Why this initiative was chosen as the first self-modification
+
+  This is the smallest possible scope on the agent's own codebase — pure
+  schema work, well-tested area, mirrors patterns the agent can see in the
+  same file. If you handle this cleanly, larger Phase 0 / 0.5 initiatives
+  become safe to fire. If you struggle, the failure surfaces specifically
+  where the agent's Python calibration is weak — which becomes the next
+  lesson to add.
+
+  Take your time. Read existing tests carefully. Match the codebase's style,
+  don't impose Angular/TypeScript habits on Python.
+
+gate_marks:
+  - unit
+
+max_iterations: 8
