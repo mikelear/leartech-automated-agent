@@ -1,0 +1,244 @@
+# automated-agent-add-dynamic-mcp-registry — Phase 0 of the conductor architecture.
+#
+# Adds POST/DELETE/PUT admin endpoints over the MCP catalog with **GitOps-durable
+# PR-back persistence**. The endpoints do NOT mutate in-memory state directly —
+# they edit the source YAML in a workspace clone and open a PR back to
+# leartech-automated-agent. After human review + merge + release + redeploy, the
+# new pod picks up the change naturally.
+#
+# This is the foundation Phase 0.5 (runtime loop) builds on. No runtime changes
+# in this initiative; it's purely the admin surface.
+#
+# Run with: `make initiative INITIATIVE=automated-agent-add-dynamic-mcp-registry`
+
+name: automated-agent-add-dynamic-mcp-registry
+
+description: |
+  Add three admin endpoints — POST /mcps, DELETE /mcps/{name}, PUT /mcps/{name}/roles —
+  that open a PR back to leartech-automated-agent with the requested change to
+  gate/agent/mcp_catalog.yaml. The endpoints return the PR URL synchronously.
+  No in-memory state mutation: the change becomes live only after PR merge
+  + release + redeploy, respecting the GitOps flow.
+
+  Phase 0 of the conductor architecture (see
+  ~/.claude/projects/-Users-mikelear-leartech-automated-agent/memory/project_conductor_architecture.md).
+
+repo: leartech-automated-agent
+branch: agent/dynamic-mcp-registry
+base: main
+
+goal: |
+  Build the admin surface for the MCP catalog. Five deliverables, in order.
+
+  ## 1. Create app/routers/mcp_admin.py
+
+  Mirror the shape of app/routers/introspection.py exactly:
+  - Module docstring describing the endpoints
+  - `from __future__ import annotations`
+  - `router = APIRouter()`
+  - Pydantic request/response models per endpoint
+  - Each endpoint is async, returns the response model
+
+  Endpoints:
+
+  ### POST /mcps
+
+  Request body (Pydantic model `McpRegisterRequest`):
+      name: str               # The new MCP server name, must be unique
+      type: Literal['sdk', 'stdio', 'http_sse', 'remote']
+      description: str        # One-line human-readable description
+      builder: str | None     # `module:function` ref (required if type=='sdk')
+      command: str | None     # subprocess command (required if type=='stdio')
+      args: list[str] | None  # subprocess args (only if type=='stdio')
+      url: str | None         # endpoint URL (required if type in ['http_sse', 'remote'])
+      auth: dict | None       # auth config (optional)
+      status: Literal['ready', 'not_built'] = 'ready'
+
+  Response model `McpAdminResponse`:
+      pr_url: str             # GitHub PR URL where the change can be reviewed + merged
+      pr_number: int
+      branch: str
+      change_summary: str     # "Added MCP 'foo' (type=stdio)"
+
+  Behaviour:
+  - Validate the request (use a model_validator to enforce type-specific required fields:
+    sdk requires builder; stdio requires command; http_sse/remote require url).
+  - Reject (HTTP 409) if `name` already exists in current catalog.
+  - Open a PR via the helper described below.
+
+  ### DELETE /mcps/{name}
+
+  No request body. Response model: same `McpAdminResponse`.
+
+  Behaviour:
+  - Reject (HTTP 404) if `name` is not in the current catalog.
+  - Reject (HTTP 409) if any role's `mcps:` list references this name — caller must
+    detach roles first.
+  - Open a PR removing the MCP from the YAML.
+
+  ### PUT /mcps/{name}/roles
+
+  Request body (Pydantic model `McpRolesUpdate`):
+      grant: list[str] = []   # Roles to ADD this MCP to (must exist in catalog)
+      revoke: list[str] = []  # Roles to REMOVE this MCP from
+
+  Response model: same `McpAdminResponse`.
+
+  Behaviour:
+  - Reject (HTTP 404) if `name` not in catalog.
+  - For each role in `grant`: ensure role exists, ensure name not already in
+    role.mcps, then append.
+  - For each role in `revoke`: ensure role exists, ensure name currently in
+    role.mcps, then remove.
+  - Reject (HTTP 400) on any validation issue with role-membership precondition.
+  - Open a PR with the resulting YAML diff.
+
+  ## 2. Add a PR-back helper module: gate/tools/pr_back.py
+
+  This is the shared mechanism the three endpoints use to open a PR. Keep
+  it pure (no FastAPI imports) so it's testable in isolation.
+
+  Function signature:
+
+      async def open_yaml_change_pr(
+          repo: str,                    # 'leartech-automated-agent'
+          base_branch: str,             # 'main'
+          new_branch: str,              # e.g. 'agent/mcp-add-stitch'
+          file_path: str,               # 'gate/agent/mcp_catalog.yaml'
+          new_yaml_content: str,        # the new file contents
+          commit_message: str,          # conventional commit
+          pr_title: str,
+          pr_body: str,
+      ) -> dict:
+          """Open a PR with the given YAML change. Returns {pr_url, pr_number, branch}."""
+
+  Implementation:
+  - Use a /tmp/ workdir, never /workspace (which is the agent's own clone).
+  - `gh repo clone` the target repo to a temp dir
+  - Create the new branch via `git checkout -b`
+  - Write the new file contents
+  - `git add` + `git commit -m <msg>` + `git push -u origin <branch>`
+  - `gh pr create` with the title and body, capture stdout for the URL
+  - Parse PR number out of the URL via regex (`/pull/(\d+)$`)
+  - Return the dict
+
+  Use `asyncio.create_subprocess_exec` (not blocking `subprocess.run`) since this
+  is an async FastAPI handler. Match the pattern from gate/tools/pipelines.py
+  where `_gh()` is used, but make this async.
+
+  ## 3. Wire the router into app/main.py
+
+  Add an `include_router` call alongside the existing routers. Mirror the
+  introspection router's prefix style. New endpoints should be:
+  - POST /mcps  (not /admin/mcps — keep the resource shape)
+  - DELETE /mcps/{name}
+  - PUT /mcps/{name}/roles
+
+  This collides with the existing GET /mcps from introspection.py if both are
+  mounted at /. **Don't change introspection.py.** Use FastAPI's natural
+  multi-router routing — same path, different methods (GET vs POST/DELETE/PUT)
+  is fine.
+
+  ## 4. Add tests: tests/test_app_mcp_admin.py
+
+  Use the FastAPI TestClient pattern. Existing routers don't have endpoint
+  tests yet — you may need to mock `gate.tools.pr_back.open_yaml_change_pr`
+  to avoid actually opening PRs during tests.
+
+  Required tests (use parametrize where it reduces duplication):
+
+  - `test_post_mcps_sdk_requires_builder` — POST with type=sdk and no builder → 422
+  - `test_post_mcps_stdio_requires_command` — POST with type=stdio and no command → 422
+  - `test_post_mcps_http_sse_requires_url` — POST with type=http_sse and no url → 422
+  - `test_post_mcps_rejects_duplicate_name` — POST with a name already in catalog → 409
+  - `test_post_mcps_opens_pr_on_valid` — mock pr_back, assert called with right args,
+    response contains pr_url + pr_number
+  - `test_delete_mcps_404_if_not_found` — DELETE /mcps/nonexistent → 404
+  - `test_delete_mcps_409_if_role_uses_it` — DELETE /mcps/leartech-pipeline (currently
+    referenced by initiative_agent) → 409
+  - `test_delete_mcps_opens_pr_on_valid` — mock + assert called
+  - `test_put_roles_404_if_mcp_not_found` — PUT /mcps/nonexistent/roles → 404
+  - `test_put_roles_400_if_role_does_not_exist` — grant=['fake_role'] → 400
+  - `test_put_roles_400_if_already_granted` — grant a role that already has this MCP → 400
+  - `test_put_roles_400_if_revoking_ungranted` — revoke from a role that doesn't have it → 400
+  - `test_put_roles_opens_pr_on_valid_grant` — mock + assert
+  - `test_put_roles_opens_pr_on_valid_revoke` — mock + assert
+
+  ## 5. Add a `tests/test_pr_back.py` file
+
+  Unit tests for the PR-back helper. Mock `asyncio.create_subprocess_exec` to
+  simulate gh + git commands. Test:
+
+  - `test_open_yaml_change_pr_runs_expected_commands` — assert clone, checkout -b,
+    write file, add, commit, push, gh pr create are all called with correct args
+  - `test_open_yaml_change_pr_parses_pr_url` — feed canned `gh pr create` output
+    `https://github.com/mikelear/leartech-automated-agent/pull/42`, assert the
+    helper returns pr_url == that URL and pr_number == 42
+  - `test_open_yaml_change_pr_propagates_gh_errors` — simulate gh failure,
+    assert RuntimeError raised with the stderr message
+
+  ## 6. Verify nothing else broke
+
+  Run the full test suite locally:
+
+      uv run pytest -q --no-cov
+
+  All previously-passing tests must still pass. The catalog coverage test
+  (`tests/test_catalog_coverage.py`) should pick up the new endpoints
+  automatically through nothing changing — they don't add new initiatives or
+  lessons. The golden tests (`tests/test_role_prompt_golden.py`) should NOT
+  need updating.
+
+  ## Conventions to follow (Python repo specifics)
+
+  - Package manager: **uv**, not pip. Use `uv run pytest`, `uv run ruff check`.
+  - Test runner: pytest with parametrize. See `tests/test_catalog_coverage.py`
+    for the modern style.
+  - Type hints: always use them. `from __future__ import annotations` at top.
+  - Pydantic v2 syntax: `Field(default=..., description=...)`,
+    `model_config = ConfigDict(extra='forbid')`, `model_validator(mode='after')`.
+    Match what's already in mcp_catalog.py + introspection.py.
+  - FastAPI: `APIRouter()`, async handlers, `HTTPException(status_code=..., detail=...)`.
+  - Conventional commits: e.g. `feat(mcps): add POST/DELETE/PUT admin endpoints`
+  - Don't reformat unrelated files. Don't touch tests/golden/ snapshots.
+
+  ## Reference files — read these BEFORE writing code
+
+  - `app/routers/introspection.py` — the structural template for your new router.
+    Note how it imports from `gate.agent.mcp_catalog`, defines pydantic models
+    inline, uses `@router.get(...)` decorators.
+  - `app/main.py` — to know where to wire the new router.
+  - `gate/agent/mcp_catalog.py` — the data model you'll be reading + writing to.
+    Use the `load_catalog()` function for reads; write back to the YAML file
+    via the pr_back helper.
+  - `gate/agent/mcp_catalog.yaml` — the file you're editing via the PR-back helper.
+    Note the exact indentation + section order.
+  - `gate/tools/pipelines.py` — example of subprocess-driven gh CLI usage.
+    Your async PR-back helper does similar things but in an async style.
+  - `tests/test_app_introspection.py` — FastAPI TestClient style reference.
+  - `tests/test_mcp_catalog.py` — for the synthetic-data patterns to mock
+    catalog loads in the admin tests.
+
+  ## What this initiative is NOT
+
+  - It is NOT mutating in-memory state. Every change goes through a PR. The
+    deployed agent only picks up changes after PR merge + redeploy.
+  - It is NOT adding webcoder-ui surfaces. That's Phase 3.
+  - It is NOT adding new MCPs themselves. That's done via the new endpoints
+    once they exist.
+  - It is NOT touching the runtime loop or initiative.py. That's Phase 0.5.
+
+  ## Why this initiative is the second self-modification
+
+  The first self-modification (Phase 0.75, PR #4) added pure pydantic schema.
+  This one is significantly larger — new router, new helper module, ~14 tests
+  across two test files, and subprocess orchestration. It's the right next
+  scale to push the agent's Python calibration.
+
+  Take time. Read all reference files first. Mirror existing style precisely.
+  Don't impose Angular/TypeScript habits.
+
+gate_marks:
+  - unit
+
+max_iterations: 15
