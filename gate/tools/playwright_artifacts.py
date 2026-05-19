@@ -5,7 +5,7 @@ The catalog's `tasks/end2end-ui/pullrequest.yaml` posts one sticky per cluster:
     <!-- leartech-end2end-ui-gcp -->
     :white_check_mark: **End-to-end UI: PASS** `[gcp]` — 9/9 browser tests passed
 
-    Preview: https://leartech-auth-ui-pr25.jx.leartech.com
+    Preview: https://<repo>-pr<n>.<cluster-domain>
 
     **Artifacts** (screenshots, videos, traces):
 
