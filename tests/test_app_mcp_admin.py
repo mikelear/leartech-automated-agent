@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -20,7 +21,7 @@ _MOCK_PR = {
 
 
 @pytest.fixture(autouse=True)
-def _clear_catalog_cache() -> None:
+def _clear_catalog_cache() -> Iterator[None]:
     """Clear the catalog lru_cache before and after each test for isolation."""
     load_catalog.cache_clear()
     yield
@@ -120,7 +121,7 @@ def test_delete_mcps_opens_pr_on_valid() -> None:
             'review_agent': {'description': 'test role', 'mcps': [], 'tools': []},
         },
     })
-    synthetic_raw: dict = {
+    synthetic_raw: dict[str, object] = {
         'mcp_servers': {
             'orphan-mcp': {'type': 'stdio', 'command': 'foo', 'description': 'unreferenced'},
         },

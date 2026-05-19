@@ -33,7 +33,10 @@ _CATALOG_FILE = 'gate/agent/mcp_catalog.yaml'
 
 def _read_raw_catalog() -> dict[str, Any]:
     """Read the YAML catalog file directly, bypassing the lru_cache."""
-    return yaml.safe_load(CATALOG_PATH.read_text())  # type: ignore[return-value]
+    loaded = yaml.safe_load(CATALOG_PATH.read_text())
+    if not isinstance(loaded, dict):
+        raise TypeError(f'mcp_catalog.yaml must parse as a dict, got {type(loaded).__name__}')
+    return loaded
 
 
 def _dump_catalog(raw: dict[str, Any]) -> str:

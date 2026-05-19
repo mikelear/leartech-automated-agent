@@ -129,9 +129,9 @@ def test_reachable_status_missing_auth_for_remote_mcp() -> None:
 # ─── LlmConfig field tests ────────────────────────────────────────────────────
 
 
-def _synthetic_role(llm: object = None) -> dict:
+def _synthetic_role(llm: object = None) -> dict[str, object]:
     """Helper: minimal valid role dict for Catalog-level parse tests."""
-    role: dict = {'description': 'synthetic role for testing'}
+    role: dict[str, object] = {'description': 'synthetic role for testing'}
     if llm is not None:
         role['llm'] = llm
     return role
