@@ -10,7 +10,10 @@ source:
 category: calibration
 applies_to:
   - initiative_agent
-status: open
+status: encoded
+encoded_in:
+  - gate/agent/lessons/catalog/preflight-target-repo-quality-check.md
+encoded_at: 2026-05-19T11:45:00Z
 ---
 
 Before starting work on a target repo, the agent must run a **pre-flight quality

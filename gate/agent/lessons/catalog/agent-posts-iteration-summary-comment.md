@@ -10,7 +10,10 @@ source:
 category: calibration
 applies_to:
   - initiative_agent
-status: open
+status: encoded
+encoded_in:
+  - gate/agent/lessons/catalog/agent-posts-iteration-summary-comment.md
+encoded_at: 2026-05-19T11:45:00Z
 ---
 
 When the agent stops iterating on an initiative — whether because the work is
