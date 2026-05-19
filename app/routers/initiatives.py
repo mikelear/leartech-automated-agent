@@ -57,13 +57,16 @@ async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
     """Background task body — runs the initiative, updates state on completion."""
     update(initiative_id, status='running')
     try:
-        exit_code = await run_initiative(yaml_path)
+        summary = await run_initiative(yaml_path)
         update(
             initiative_id,
-            status='complete' if exit_code == 0 else 'failed',
+            status='complete' if summary.exit_code == 0 else 'failed',
             finished_at=now(),
+            turns=summary.turns,
+            cost_usd=summary.cost_usd,
+            pr_number=summary.pr_number,
         )
-        logger.info('initiative %s finished with exit_code=%d', initiative_id, exit_code)
+        logger.info('initiative %s finished with exit_code=%d', initiative_id, summary.exit_code)
     except asyncio.CancelledError:
         update(initiative_id, status='cancelled', finished_at=now())
         logger.info('initiative %s cancelled', initiative_id)
