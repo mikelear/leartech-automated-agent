@@ -10,9 +10,11 @@ or interactive interrupts, swap to `ClaudeSDKClient` (v1.5).
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -36,6 +38,44 @@ from gate.mcp_servers import (
     build_pipeline_server,
     build_pr_context_server,
 )
+
+
+@dataclass(frozen=True)
+class RunSummary:
+    """Outcome of a single initiative run — surfaced to API callers via app.state."""
+
+    exit_code: int
+    turns: int | None = None
+    cost_usd: float | None = None
+    pr_number: int | None = None
+
+
+def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
+    """Best-effort: ask GitHub for the open PR on `branch`. Returns None on miss/error.
+
+    Runs synchronously; called once at end-of-run so the few-hundred-ms cost is fine.
+    """
+    try:
+        result = subprocess.run(
+            [
+                'gh', 'pr', 'list',
+                '--repo', qualified_repo,
+                '--head', branch,
+                '--state', 'open',
+                '--json', 'number',
+                '--limit', '1',
+            ],
+            capture_output=True, text=True, check=False, timeout=10,
+        )
+        if result.returncode != 0:
+            return None
+        rows = json.loads(result.stdout or '[]')
+        if not rows:
+            return None
+        number = rows[0].get('number')
+        return int(number) if number is not None else None
+    except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
+        return None
 
 # 60 → 150 → 1000. Token cost is acceptable; rabbit-hole detection (the agent
 # burning turns on the same criterion) will land as a separate circuit-breaker
@@ -68,14 +108,14 @@ async def run_initiative(
     repo_root: Path | None = None,
     model: str = DEFAULT_MODEL,
     max_turns: int = DEFAULT_INITIATIVE_MAX_TURNS,
-) -> int:
-    """Drive a single initiative end-to-end. Returns exit code."""
+) -> RunSummary:
+    """Drive a single initiative end-to-end. Returns a summary of the run."""
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
             'ANTHROPIC_API_KEY not set. Run `leartech-claude-key` to fetch from the cluster.',
             err=True,
         )
-        return 2
+        return RunSummary(exit_code=2)
 
     initiative = load_initiative(initiative_path)
 
@@ -94,7 +134,7 @@ async def run_initiative(
             ),
             err=True,
         )
-        return 2
+        return RunSummary(exit_code=2)
 
     primary = initiative.primary
     cwd = repo_root or _default_repo_root(primary.qualified_repo)
@@ -110,7 +150,7 @@ async def run_initiative(
                 f'or set GH_TOKEN.',
                 err=True,
             )
-            return 2
+            return RunSummary(exit_code=2)
         click.echo(
             click.style(f'→ cloning {primary.qualified_repo} → {cwd}', fg='cyan'),
             err=True,
@@ -127,7 +167,7 @@ async def run_initiative(
                 f'Clone failed (exit {result.returncode}):\n{result.stderr}',
                 err=True,
             )
-            return 2
+            return RunSummary(exit_code=2)
 
     calibrations = render_for('initiative_agent')
     system_prompt = f'{calibrations}\n\n---\n\n{INITIATIVE_SYSTEM_PROMPT}' if calibrations else INITIATIVE_SYSTEM_PROMPT
@@ -162,6 +202,7 @@ async def run_initiative(
 
     exit_code = 0
     last_turn_count = 0
+    last_cost: float | None = None
     try:
         async for message in query(prompt=user_prompt, options=options):
             if isinstance(message, AssistantMessage):
@@ -176,6 +217,7 @@ async def run_initiative(
                 last_turn_count = message.num_turns
                 usage = message.usage or {}
                 cost = message.total_cost_usd if message.total_cost_usd is not None else 0.0
+                last_cost = cost
                 click.echo(
                     click.style(
                         f'\n--- turns={message.num_turns}  '
@@ -217,7 +259,14 @@ async def run_initiative(
             )
             exit_code = 1
 
-    return exit_code
+    pr_number = _resolve_pr_number(primary.qualified_repo, primary.branch)
+
+    return RunSummary(
+        exit_code=exit_code,
+        turns=last_turn_count or None,
+        cost_usd=last_cost,
+        pr_number=pr_number,
+    )
 
 
 @click.command()
@@ -234,7 +283,8 @@ async def run_initiative(
 )
 def main(initiative_path: Path, repo_root: Path | None, model: str, max_turns: int) -> None:
     """Run an initiative YAML end-to-end via the write-mode agent."""
-    sys.exit(asyncio.run(run_initiative(initiative_path, repo_root=repo_root, model=model, max_turns=max_turns)))
+    summary = asyncio.run(run_initiative(initiative_path, repo_root=repo_root, model=model, max_turns=max_turns))
+    sys.exit(summary.exit_code)
 
 
 if __name__ == '__main__':

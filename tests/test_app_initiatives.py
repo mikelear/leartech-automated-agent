@@ -12,6 +12,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from gate.agent.initiative import RunSummary
 
 client = TestClient(app)
 
@@ -64,8 +65,8 @@ def test_post_valid_initiative_queues_with_mocked_runtime() -> None:
     listed = client.post('/initiatives', json={'initiative': 'does-not-exist-xyz'})
     target = listed.json()['detail']['available'][0]
 
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> int:
-        return 0
+    async def fake_run_initiative(*_args: object, **_kwargs: object) -> RunSummary:
+        return RunSummary(exit_code=0)
 
     with patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative):
         response = client.post('/initiatives', json={'initiative': target})
@@ -81,3 +82,33 @@ def test_post_valid_initiative_queues_with_mocked_runtime() -> None:
 def test_cancel_unknown_id_returns_404() -> None:
     response = client.post('/initiatives/unknown-xyz/cancel')
     assert response.status_code == 404
+
+
+def test_completed_run_surfaces_pr_number_turns_cost() -> None:
+    """RunSummary fields (pr_number/turns/cost_usd) must reach the GET response.
+
+    Regression guard: the original handler discarded everything except exit_code,
+    so `GET /initiatives/{id}` showed pr_number=null even after the agent opened
+    the PR. The fix returns a RunSummary and the handler unpacks the fields.
+    """
+    listed = client.post('/initiatives', json={'initiative': 'does-not-exist-xyz'})
+    target = listed.json()['detail']['available'][0]
+
+    async def fake_run_initiative(*_args: object, **_kwargs: object) -> RunSummary:
+        return RunSummary(exit_code=0, turns=7, cost_usd=0.4242, pr_number=99)
+
+    with patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative):
+        post_resp = client.post('/initiatives', json={'initiative': target})
+        run_id = post_resp.json()['id']
+        # The background task is scheduled on the same event loop; TestClient
+        # blocks long enough for it to complete by the time the GET returns.
+        for _ in range(20):
+            get_resp = client.get(f'/initiatives/{run_id}')
+            body = get_resp.json()
+            if body['status'] == 'complete':
+                break
+
+    assert body['status'] == 'complete'
+    assert body['pr_number'] == 99
+    assert body['turns'] == 7
+    assert body['cost_usd'] == 0.4242
