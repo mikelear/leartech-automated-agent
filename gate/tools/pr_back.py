@@ -24,6 +24,8 @@ async def _run(*args: str, cwd: str | None = None) -> tuple[int, str, str]:
         cwd=cwd,
     )
     stdout_bytes, stderr_bytes = await proc.communicate()
+    if proc.returncode is None:
+        raise RuntimeError('subprocess returncode is None after communicate()')
     return proc.returncode, stdout_bytes.decode(), stderr_bytes.decode()
 
 
@@ -36,7 +38,7 @@ async def open_yaml_change_pr(
     commit_message: str,
     pr_title: str,
     pr_body: str,
-) -> dict:
+) -> dict[str, str | int]:
     """Open a PR with the given YAML change. Returns {pr_url, pr_number, branch}.
 
     Uses a /tmp/ workdir — never /workspace (which is the agent's own clone).

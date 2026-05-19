@@ -169,6 +169,7 @@ def test_every_sdk_mcp_builds_via_catalog() -> None:
     for name, mcp in catalog.mcp_servers.items():
         if mcp.type != 'sdk':
             continue
+        assert mcp.builder is not None, f'{name}: sdk MCP missing builder field'
         module_path, _, function_name = mcp.builder.partition(':')
         module = importlib.import_module(module_path)
         builder = getattr(module, function_name)
