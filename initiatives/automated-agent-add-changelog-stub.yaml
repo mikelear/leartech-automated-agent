@@ -1,0 +1,100 @@
+# automated-agent-add-changelog-stub — proof-of-pipeline test initiative.
+#
+# The smallest self-modification possible: add a CHANGELOG.md at repo root.
+# No code, no tests, no schema. Pure markdown file addition.
+#
+# Purpose: prove the agent's own PR pipeline runs end-to-end without admin-merge
+# now that today's fixes are in (PRs #7-10):
+#   - PR #7  — lighthouse pipeline files (ai-review, security-scan, etc.)
+#   - PR #9  — secret replication labels for preview deploys
+#   - PR #10 — mypy strict cleanup + lesson activation + tekton-git Vault fix
+#
+# Expected outcome: agent opens a PR with one new file; all 12 pipelines pass
+# cleanly; normal Lighthouse merge gate accepts it (no admin-bypass needed).
+#
+# Run with: `make initiative INITIATIVE=automated-agent-add-changelog-stub`
+
+name: automated-agent-add-changelog-stub
+
+description: |
+  Add a CHANGELOG.md stub at repo root. One new markdown file. No code changes.
+
+  The smallest viable self-modification. Used to prove the agent's own PR
+  pipeline works end-to-end after today's infrastructure fixes.
+
+repo: leartech-automated-agent
+branch: agent/add-changelog-stub
+base: main
+
+goal: |
+  Create a single new file: `CHANGELOG.md` at the repo root.
+
+  ## File content
+
+  Use Keep-a-Changelog format. Exact body:
+
+      # Changelog
+
+      All notable changes to leartech-automated-agent are documented here.
+
+      Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+      ## [Unreleased]
+
+      ### Added
+
+      - Stub CHANGELOG.md (this file).
+
+      ## [0.7.x] — 2026-05-18 / 2026-05-19
+
+      ### Added
+
+      - Phase 0 dynamic MCP registry — `POST/DELETE/PUT /mcps` endpoints with
+        GitOps PR-back persistence (PR #9 inadvertently included PR #6's content).
+      - Phase 0.75 `LlmConfig` per-role schema (PR #4).
+      - First self-modification initiative YAMLs (PRs #3, #5).
+      - Catalog coverage + golden-prompt snapshot tests (PR #1).
+      - Multi-cluster failure-mode regression tests (PR #2).
+      - Lighthouse `.lighthouse/jenkins-x/` pipeline files for ai-review +
+        security-scan (PR #7) — closing the asymmetric-CI-bar gap.
+
+      ### Fixed
+
+      - mypy strict cleanup across 5 files (PR #10).
+      - tekton-git ExternalSecret Vault property — `token` not `password` (PR #10).
+      - Secret replication labels for PR preview namespaces (PR #9).
+      - Calibration lessons promoted to status: encoded — iteration-summary +
+        preflight-target-repo-quality-check (PR #10).
+
+  ## Constraints
+
+  - **Single new file only.** Do not modify ANY other file.
+  - Conventional commit: `docs: add CHANGELOG.md`
+  - Open PR with one-paragraph description summarising the change.
+  - Do NOT add Markdown formatters, linters, or pre-commit hooks for the
+    new file. Just write the markdown.
+
+  ## What this is NOT
+
+  - Not a docs audit. Don't survey other docs.
+  - Not an opportunity to write a v0.8 entry — keep to v0.7.x facts only.
+  - Not a code change. No Python edits, no tests, no schema.
+  - Not a chance to rewrite existing files like README.md.
+
+  ## Why this initiative exists
+
+  After today's fixes (PRs #7–#10), the agent's PR pipeline coverage matches
+  the consumer-repo standard (12 checks: lint, pr, ai-review × 2 clusters etc.).
+  Firing this trivial initiative is the proof-of-pipeline that the FULL
+  pipeline goes green naturally, with no admin-merge needed — first such
+  proof since the session started.
+
+  Expected pipeline outcome: all 12 checks pass.
+  Expected agent behaviour: ~2 turns (read, write, commit, push, sticky).
+  Expected sticky: indicates `/hold`, lists the one file, classifies any
+  remaining infra noise (likely none).
+
+gate_marks:
+  - unit
+
+max_iterations: 4
