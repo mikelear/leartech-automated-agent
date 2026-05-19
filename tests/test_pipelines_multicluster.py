@@ -17,7 +17,6 @@ We stub `_gh` via monkeypatch — keeps tests offline and deterministic.
 from __future__ import annotations
 
 import json
-from typing import Callable
 
 import pytest
 

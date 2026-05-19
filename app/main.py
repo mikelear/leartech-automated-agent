@@ -21,7 +21,7 @@ import logging
 
 from fastapi import FastAPI
 
-from app.routers import health, initiatives, introspection, lessons
+from app.routers import health, initiatives, introspection, lessons, mcp_admin
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 
@@ -35,3 +35,4 @@ app.include_router(health.router, tags=['health'])
 app.include_router(initiatives.router, prefix='/initiatives', tags=['initiatives'])
 app.include_router(lessons.router, prefix='/lessons', tags=['lessons'])
 app.include_router(introspection.router, tags=['introspection'])
+app.include_router(mcp_admin.router, tags=['mcp-admin'])
