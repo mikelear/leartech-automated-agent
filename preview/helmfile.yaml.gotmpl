@@ -25,6 +25,11 @@ releases:
     args:
     - secret
     - copy
+    # `jx secret copy` defaults to the current namespace (the Tekton task runs
+    # from `jx`); our labelled secrets live in `jx-staging`. Without --ns the
+    # selector finds nothing and the preview pod fails with `secret not found`.
+    - --ns
+    - jx-staging
     - --create-namespace
     - --selector
     - "secret.jenkins-x.io/replica-source=true"
