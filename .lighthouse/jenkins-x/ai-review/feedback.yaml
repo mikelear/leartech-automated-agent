@@ -1,0 +1,29 @@
+apiVersion: tekton.dev/v1beta1
+kind: PipelineRun
+metadata:
+  creationTimestamp: null
+  name: ai-review-feedback
+spec:
+  pipelineSpec:
+    tasks:
+    - name: process-feedback
+      resources: {}
+      taskSpec:
+        metadata: {}
+        stepTemplate:
+          image: uses:mikelear/leartech-pipeline-catalog/tasks/ai-review/feedback.yaml@main
+          name: ""
+          resources: {}
+          workingDir: /workspace/source
+        steps:
+        - name: ""
+          resources: {}
+  podTemplate:
+    tolerations:
+    - key: sku
+      operator: Equal
+      value: build
+      effect: NoSchedule
+  serviceAccountName: tekton-bot
+  timeout: 30m0s
+status: {}
