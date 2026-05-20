@@ -1,0 +1,326 @@
+# mortgages-gw-add-mcp-mock-sourcing — first real spike-test initiative
+#
+# Stands up the /mcp Model Context Protocol endpoint on
+# leartech-mortgages-gw with hardcoded mock product data. Once released,
+# ChatGPT (and Claude Desktop) can register the gateway URL as a connector
+# and we can run the first real conversational test of the mortgages-MCP
+# spike — without waiting for any leartech-mortgages-api work.
+#
+# This deliberately uses mock data so the riskiest unknown (ChatGPT MCP
+# integration: tool discovery, parameter shaping, multi-turn chaining)
+# gets proven before we invest in real sourcing logic. Phase 1 (real
+# api endpoints) and the Phase 2 replace-mocks-with-SDK-calls initiatives
+# follow.
+#
+# Run with: `make initiative INITIATIVE=mortgages-gw-add-mcp-mock-sourcing`
+
+name: mortgages-gw-add-mcp-mock-sourcing
+
+description: |
+  Mount /mcp on leartech-mortgages-gw with three Tier 0 mock tools
+  (search_products, compare_products, get_product_rates) backed by ~10
+  hardcoded representative products. No dependency on
+  leartech-mortgages-api. No auth. The goal is a publicly-reachable
+  /mcp endpoint that ChatGPT can register as a connector and call
+  end-to-end with credible-looking responses.
+
+repo: leartech-mortgages-gw
+branch: agent/add-mcp-mock-sourcing
+base: main
+
+goal: |
+  Stand up the /mcp endpoint with three mock sourcing tools. Six new files
+  + edits to cmd/server/main.go and go.mod.
+
+  ## Add the SDK dependency
+
+  In go.mod, add:
+
+      github.com/modelcontextprotocol/go-sdk v1.6.0
+
+  Run `go mod tidy` after the new code imports it.
+
+  ## Files to create
+
+  ### `internal/mockproducts/products.go`
+
+  Package `mockproducts`. Exports types and a hardcoded fixture set:
+
+      package mockproducts
+
+      // Product is the canonical mortgage product representation used by
+      // the MCP tools. Shape is deliberately stable so later initiatives
+      // can swap the mockproducts source for the generated
+      // leartech-mortgages-api Go SDK without changing the tool layer.
+      type Product struct {
+          ID             string   `json:"id"`
+          Lender         string   `json:"lender"`
+          ProductName    string   `json:"product_name"`
+          ProductType    string   `json:"product_type"`    // residential | btl
+          RateType       string   `json:"rate_type"`       // fixed | tracker | variable
+          InitialRate    float64  `json:"initial_rate"`    // % e.g. 4.21
+          FixLengthYears int      `json:"fix_length_years"` // 0 for variable/tracker
+          MaxLTVPercent  int      `json:"max_ltv_percent"`
+          ArrangementFee int      `json:"arrangement_fee_pence"`
+          ERCs           []ERC    `json:"ercs"`
+          Features       []string `json:"features"`
+      }
+
+      // ERC is an early repayment charge tier.
+      type ERC struct {
+          YearFromStart int     `json:"year_from_start"`
+          Percent       float64 `json:"percent"`
+      }
+
+      // SearchCriteria is the input shape for Search.
+      type SearchCriteria struct {
+          LoanAmount     int    // pence
+          PropertyValue  int    // pence
+          TermYears      int
+          ProductType    string // residential | btl
+          RateType       string // fixed | tracker | variable (empty = any)
+          FixLengthYears int    // 0 = any
+      }
+
+      // Products is the fixture set — 10 representative products.
+      var Products = []Product{ /* see below */ }
+
+      // Find returns the product with ID id, or false if not found.
+      func Find(id string) (Product, bool) { /* ... */ }
+
+      // Search filters Products by criteria (LTV, type, rate type, fix
+      // length) and ranks by ascending 5-year total cost. Returns up to
+      // 10 results.
+      func Search(c SearchCriteria) []Product { /* ... */ }
+
+  The 10 fixture products MUST cover:
+
+  - **At least 3 distinct lenders** from: Halifax, Nationwide, Barclays,
+    Santander, NatWest, HSBC, TSB
+  - **At least one each** of: 2-year fixed, 5-year fixed, 10-year fixed,
+    base-rate tracker, standard variable rate
+  - **LTV spread** covering 60%, 75%, 80%, 85%, 90%
+  - **Mix of residential and BTL** (~7 residential, ~3 BTL)
+  - **Realistic rates** for 2026: fixed roughly 4.0%–5.0%, tracker
+    BoE+0.5%–1.0%, SVR 6.5%–7.5%
+  - Arrangement fees in the £0 to £1499 range
+  - ERC tiers (typical UK 5/4/3/2/1% schedule for 5-year fixed)
+
+  ### `internal/mockproducts/products_test.go`
+
+  Table tests covering:
+
+  - `Find` returns the product when ID exists; returns `_, false` when missing
+  - `Search` with `MaxLTV` filter excludes products with lower MaxLTV than
+    the implied LTV (loan/value)
+  - `Search` with `ProductType="residential"` excludes BTL products
+  - `Search` with `RateType="fixed"`, `FixLengthYears=5` returns only 5-year
+    fixed products
+  - `Search` ranks results by ascending 5-year total cost (monthly payment
+    × 60 + fees, computed from `InitialRate`)
+  - `Search` returns no more than 10 results
+
+  ### `internal/mcphandler/server.go`
+
+  Package `mcphandler`. Builds the MCP server and returns it as an
+  `http.Handler`:
+
+      package mcphandler
+
+      import (
+          "context"
+          "net/http"
+
+          "github.com/modelcontextprotocol/go-sdk/mcp"
+          "github.com/mikelear/leartech-mortgages-gw/internal/mockproducts"
+      )
+
+      // New constructs the MCP server with three Tier 0 mock tools and
+      // returns the Streamable HTTP handler ready to mount.
+      func New() http.Handler {
+          server := mcp.NewServer(&mcp.Implementation{
+              Name:    "leartech-mortgages-gw",
+              Version: "v0.0.0", // overridden by main; pre-release tag-bump fills it
+          })
+
+          // search_products
+          mcp.AddTool(server, &mcp.Tool{
+              Name:        "search_products",
+              Description: "Search the mortgage product catalogue by loan amount, property value, term, product type, rate type, and fix length. Returns up to 10 products ranked by ascending 5-year total cost.",
+              Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+          }, searchProductsHandler)
+
+          // compare_products
+          mcp.AddTool(server, &mcp.Tool{
+              Name:        "compare_products",
+              Description: "Compare 2 to 5 products side-by-side by their IDs. Returns a structured comparison with rate, fees, ERCs, and features rows.",
+              Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+          }, compareProductsHandler)
+
+          // get_product_rates
+          mcp.AddTool(server, &mcp.Tool{
+              Name:        "get_product_rates",
+              Description: "Get the current cheapest available rates for common product shapes (2yr fixed, 5yr fixed, 10yr fixed, tracker) across 60%, 75%, 80%, 85%, 90% LTV bands.",
+              Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+          }, getProductRatesHandler)
+
+          return mcp.NewStreamableHTTPHandler(func(*http.Request) *mcp.Server { return server }, nil)
+      }
+
+  Tool handler functions live alongside. Each takes a typed input struct
+  + returns typed output struct using the go-sdk's `AddTool` generic
+  pattern. Use `mockproducts.Search` / `mockproducts.Find` for the data.
+
+  Compare tool input: `{ ProductIDs []string }` (length 2-5; return an
+  error if outside that range — the SDK surfaces this as a tool error
+  the LLM client can react to).
+
+  Get-rates tool input: empty struct (no args).
+
+  ### `internal/mcphandler/server_test.go`
+
+  At minimum:
+
+  - `TestNew_RegistersThreeTools` — construct the server, list tools via
+    the SDK's in-process listing helper if available; otherwise verify
+    that `New()` returns a non-nil handler and the SDK's internal
+    server has 3 registered tools (introspection method whatever the
+    SDK provides).
+  - `TestSearchProductsHandler_FiltersByLTV` — call the handler
+    directly with a SearchCriteria, assert non-empty result.
+  - `TestCompareProductsHandler_RejectsSingleID` — assert it errors on
+    1 product ID.
+  - `TestCompareProductsHandler_RejectsSixIDs` — assert it errors on 6.
+
+  If the go-sdk's testing primitives don't easily allow in-process
+  invocation, just test the handler functions directly with constructed
+  input/output structs.
+
+  ### `end2end/04-mcp-smoke.sh`
+
+  Bash script using `curl` + `jq`. Verifies the live `/mcp` endpoint
+  responds correctly to the MCP protocol handshake and lists three
+  tools. Tests against `${PREVIEW_URL:-${STAGING_URL}}` (the standard
+  leartech end2end env contract).
+
+  Required behaviour:
+
+  1. POST `/mcp` with the MCP `initialize` request payload — assert
+     HTTP 200 and response has `result.serverInfo.name` containing
+     "mortgages-gw"
+  2. POST `/mcp` with `tools/list` — assert response lists exactly
+     `search_products`, `compare_products`, `get_product_rates`
+  3. POST `/mcp` with `tools/call` for `search_products` using
+     realistic args (£320k on £400k, 25yr, residential, fixed, 5yr) —
+     assert response contains at least 3 products
+  4. Print PASS/FAIL summary and exit 0/non-zero accordingly
+
+  Make the script executable (`chmod +x`) when adding.
+
+  ## Files to modify
+
+  ### `cmd/server/main.go`
+
+  Inside `run()`:
+
+  - Build the existing gin engine as today (don't touch it).
+  - Build the MCP handler: `mcpH := mcphandler.New()`
+  - Use `http.ServeMux` to multiplex: gin gets everything except `/mcp`
+    and `/mcp/*`; mcpH gets `/mcp` and `/mcp/*`.
+  - Replace `r.Run(...)` with `http.ListenAndServe(addr, mux)` (still
+    via `&http.Server{}` with graceful shutdown — see the existing
+    server-shutdown block; just swap the Handler).
+
+  Update the swag annotation at the top of the file:
+
+      // @description Mortgages-domain gateway — MCP (streamable HTTP at /mcp)
+      // + REST (at /api/v1/*) front door. Currently hosts mock sourcing tools
+      // for the ChatGPT integration spike; real downstream calls to
+      // leartech-mortgages-api land in a subsequent initiative. Calls
+      // leartech-mortgages-api via generated Go SDK once that's wired.
+
+  ### `go.mod`
+
+  Add the SDK dependency (see top of this goal). Run `go mod tidy` —
+  commit the updated `go.sum`.
+
+  ## Constraints
+
+  - **Tier 0 only.** No auth middleware on `/mcp`. No JWT validation.
+    No audience binding. No Hydra wiring. Those land in the dedicated
+    `mortgages-gw-add-audience-binding` initiative later.
+  - **No dependency on leartech-mortgages-api.** Mock data lives in
+    this repo only. Do NOT add `github.com/mikelear/leartech-go-packages/*`
+    to go.mod. Do NOT call any leartech-mortgages-api endpoint.
+  - **Don't touch** `internal/handlers/example.go`, `health.go`,
+    `metrics.go`, `fleettest.go`, `middleware/`, `tracing/`, `db/`,
+    `migrations/`. Template spine stays as-is.
+  - **Don't add Postgres or migrations** for any of this. The gateway
+    is stateless edge — `/mcp` is in-memory mocks.
+  - **Don't import any LLM SDK** (no anthropic, no openai). This is a
+    tool server; LLMs live in the client (ChatGPT/Claude).
+  - `git add <specific files>` only (never `-A`).
+  - Conventional commit: `feat(mcp): mount /mcp with mock sourcing tools`
+  - Always post `/hold` immediately after opening the PR per
+    `agent-prs-must-be-held-pending-review`.
+  - Full-gate run before posting "Ready for client review" sticky.
+
+  ## What this is NOT
+
+  - Not real product data. Do not scrape mqube-product-service, do not
+    import production data, do not write a fetcher. ~10 hardcoded
+    fixture products in `internal/mockproducts/products.go` is the
+    deliverable. Real data port is `mortgages-api-port-product-service`
+    much later.
+  - Not the place to add elicitation (when required args are missing),
+    resources (`product://{id}`), or prompts (`start-sourcing`). Those
+    are follow-up initiatives once we know what ChatGPT actually
+    needs from this round.
+  - Not a refactor of `cmd/server/main.go` beyond what's strictly
+    needed to mount the second handler. Don't reorganise the gin
+    router, don't change the env config, don't change health probes.
+  - Not the place to wire OAuth. The `/mcp` endpoint MUST respond to
+    unauthenticated requests and serve all three tools to Tier 0
+    callers (this is the design — see the auth model in
+    `~/leartech/authentication/docs/mcp-auth-flow.md`).
+  - Not an opportunity to bump unrelated dependencies. Only the
+    `modelcontextprotocol/go-sdk` addition + transitive deps.
+
+  ## Why this initiative exists
+
+  The mortgages-MCP spike's biggest unknown is whether ChatGPT (and
+  Claude Desktop, Cursor, etc.) can discover, parameterise, chain, and
+  surface results from the `/mcp` endpoint as designed. Tool catalogue
+  discovery, OAuth-less Tier 0 behaviour, parameter shaping from
+  natural language, multi-turn chaining, error UX — all unknown until
+  we actually run a conversation against a live `/mcp`.
+
+  This initiative de-risks all of that with mock data, before we invest
+  in real sourcing logic (~6 Phase-1 initiatives on
+  leartech-mortgages-api) or generated-SDK consumption wiring (~5
+  Phase-2 initiatives on leartech-mortgages-gw). If ChatGPT can't talk
+  to a mocked `/mcp` cleanly, none of the real work is unblocked, and
+  we want to find that out cheaply.
+
+  Expected pipeline outcome: all 11 PR checks green; release cuts
+  `v0.0.3-{gcp,az}`; gateway reachable at
+  `https://leartech-mortgages-gw-jx-staging.{jx,az}.leartech.com/mcp`.
+
+  Expected ChatGPT test (manual, post-deploy):
+
+  1. ChatGPT → Settings → Connectors → add
+     `https://leartech-mortgages-gw-jx-staging.az.leartech.com/mcp`
+  2. Ask: "Find me the cheapest 5-year fixed mortgage for a £320k loan
+     on a £400k house, 25-year term, residential."
+  3. ChatGPT calls `search_products`, gets the mock catalogue back,
+     presents top 3 by 5-year total cost.
+  4. Ask: "Compare the top 3 in detail."
+  5. ChatGPT calls `compare_products`, gets the comparison structure,
+     presents the table.
+
+  Whatever doesn't work in that conversation becomes the input to the
+  next follow-up initiative (elicitation, resources, prompts, etc.).
+
+gate_marks: []  # Full gate from the start.
+
+max_iterations: 7
