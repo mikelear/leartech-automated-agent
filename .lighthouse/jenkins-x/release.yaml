@@ -11,86 +11,19 @@ spec:
       taskSpec:
         metadata: {}
         stepTemplate:
-          image: uses:mikelear/jx3-pipeline-catalog/tasks/python/release.yaml@master
-          env:
-          - name: HOME
-            value: /tekton/home
-          - name: CLUSTER_ID
-            valueFrom:
-              configMapKeyRef:
-                name: ai-review-cluster-config
-                key: CLUSTER_ID
-                optional: true
-          envFrom:
-          - secretRef:
-              name: jx-boot-job-env-vars
-              optional: true
+          image: uses:mikelear/leartech-pipeline-catalog/tasks/python/release.yaml@main
           name: ""
-          resources:
-            requests:
-              cpu: 200m
-              memory: 512Mi
+          resources: {}
+          env:
+          - name: GIT_TOKEN
+            valueFrom:
+              secretKeyRef:
+                name: tekton-git
+                key: password
+                optional: true
           workingDir: /workspace/source
         steps:
-        - image: uses:jenkins-x/jx3-pipeline-catalog/tasks/git-clone/git-clone.yaml@versionStream
-          name: ""
-          resources: {}
-        - name: next-version
-          resources: {}
-        - name: jx-variables
-          resources: {}
-        - image: python:3.13-slim
-          name: build-python-test
-          resources: {}
-          script: |
-            #!/bin/sh
-            pip install uv --quiet
-            uv sync --dev --frozen --no-cache 2>/dev/null || uv sync --dev --no-cache
-            uv run coverage run -m pytest -v
-            uv run coverage report
-        - name: build-container-build
-          resources: {}
-        - image: bitnami/cosign:latest
-          name: cosign-sign
-          resources: {}
-          securityContext:
-            runAsUser: 0
-          env:
-            - name: COSIGN_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: cosign-keys
-                  key: cosign.key
-            - name: GIT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: tekton-git
-                  key: password
-                  optional: true
-          script: |
-            #!/bin/bash
-            set -e
-            source .jx/variables.sh
-            export COSIGN_PASSWORD=""
-
-            mkdir -p /root/.docker
-            sed 's/"credHelpers":{[^}]*},//' /tekton/creds/.docker/config.json > /root/.docker/config.json
-            if [ -n "$GIT_TOKEN" ]; then
-              GHCR_AUTH=$(printf "mikelear:%s" "$GIT_TOKEN" | base64)
-              sed -i "s/\"auths\":{/\"auths\":{\"ghcr.io\":{\"auth\":\"${GHCR_AUTH}\"},/" /root/.docker/config.json
-            fi
-            export DOCKER_CONFIG=/root/.docker
-
-            echo "$COSIGN_KEY" > /tmp/cosign.key
-            IMAGE="$DOCKER_REGISTRY/$DOCKER_REGISTRY_ORG/$APP_NAME:$VERSION"
-            echo "Signing $IMAGE"
-            cosign sign --key /tmp/cosign.key --yes "$IMAGE"
-            rm -f /tmp/cosign.key
-        - name: promote-changelog
-          resources: {}
-        - name: promote-helm-release
-          resources: {}
-        - name: promote-jx-promote
+        - name: ""
           resources: {}
   podTemplate:
     tolerations:
