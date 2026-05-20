@@ -6,12 +6,15 @@ help:
 	@echo "  ========================"
 	@echo ""
 	@echo "  Development:"
-	@echo "    setup       Install UV and dependencies"
-	@echo "    fmt         Format code (ruff)"
-	@echo "    lint        Lint code (ruff + mypy)"
-	@echo "    test        Run tests with coverage"
-	@echo "    all         fmt + lint + test"
-	@echo "    check       all + build (pre-push validation)"
+	@echo "    setup        Install UV and dependencies"
+	@echo "    fmt          Format code (ruff)"
+	@echo "    lint         Lint code (ruff + mypy)"
+	@echo "    test         Run tests with coverage"
+	@echo "    helm-lint    Lint Helm chart (default + postgresql.enabled toggles)"
+	@echo "    helm-template Render Helm chart, list objects produced"
+	@echo "    helm         helm-lint + helm-template"
+	@echo "    all          fmt + lint + test + helm"
+	@echo "    check        all + build (pre-push validation)"
 	@echo ""
 	@echo "  Service (HTTP):"
 	@echo "    serve       Run FastAPI service locally on :8080"
@@ -49,7 +52,33 @@ test:
 	uv run coverage run -m pytest -v
 	uv run coverage report
 
-all: fmt lint test
+# Helm chart validation — render with realistic values and lint. Mirrors
+# what the chart goes through in JX3 release; catches schema breaks +
+# missing toggles locally before they fail in cluster.
+helm-lint:
+	helm lint charts/leartech-automated-agent \
+	  --set image.repository=local --set image.tag=local
+	@echo "✓ helm lint OK (postgresql.enabled=false default)"
+	helm lint charts/leartech-automated-agent \
+	  --set image.repository=local --set image.tag=local \
+	  --set postgresql.enabled=true
+	@echo "✓ helm lint OK (postgresql.enabled=true)"
+
+helm-template:
+	@echo "Rendering with postgresql.enabled=false (default — no DB objects):"
+	@helm template t charts/leartech-automated-agent \
+	  --set image.repository=local --set image.tag=local \
+	  | grep "^kind:" | sort | uniq -c | sed 's/^/  /'
+	@echo ""
+	@echo "Rendering with postgresql.enabled=true (Database + ConfigMap + Job appear):"
+	@helm template t charts/leartech-automated-agent \
+	  --set image.repository=local --set image.tag=local \
+	  --set postgresql.enabled=true \
+	  | grep "^kind:" | sort | uniq -c | sed 's/^/  /'
+
+helm: helm-lint helm-template
+
+all: fmt lint test helm
 
 check: all build
 
@@ -144,4 +173,4 @@ initiative-mock:
 	LEARTECH_MOCK_PIPELINE_SCENARIO=$$PWD/gate/mcp_servers/mock_scenarios/$(SCENARIO).yaml \
 		uv run initiative initiatives/$(INITIATIVE).yaml 2>&1 | tee "$$LOGFILE"
 
-.PHONY: help setup fmt lint test all check serve api-test build docker-run gate agent initiative lessons-list mock-scenarios mock-scenario initiative-mock
+.PHONY: help setup fmt lint test helm-lint helm-template helm all check serve api-test build docker-run gate agent initiative lessons-list mock-scenarios mock-scenario initiative-mock
