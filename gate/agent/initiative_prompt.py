@@ -59,10 +59,15 @@ You have access to:
    - Only declare done if every catalog check is either SUCCESS, or its failure
      references files outside your PR's diff (you must verify this — don't assume).
 
-9. **Wait for ALL Tekton checks to reach terminal state** before considering yourself
-   done. Use `mcp__leartech-pipeline__wait_for_terminal` (it blocks inside its subprocess
-   at zero token cost). Do NOT stop while checks are PENDING. **The agent's job is to
-   get every Tekton check green — not to declare done as soon as the diff is in place.**
+9. **Fail-fast between push and the next decision**: after each push, call
+   `mcp__leartech-pipeline__wait_for_first_failure_or_all_pass`. It returns within ~15s
+   of any failure (lint surfaces fast even while end2end runs another 10 minutes) so
+   you can iterate immediately on a fresh commit. Use the full-terminal
+   `wait_for_terminal` only before the **final** "ready for review" sticky — for
+   in-loop iteration, fail-fast is the right primitive. See
+   `fail-fast-cancel-and-recommit` lesson for the loop shape. **The agent's job is to
+   get every Tekton check green — but each iteration cycle should be as short as the
+   fastest failure signal.**
 
 10. **For every FAILED check, classify and respond**:
 
