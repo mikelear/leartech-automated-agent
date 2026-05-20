@@ -1,0 +1,50 @@
+name: transient-end2end-retest-passes
+description: |
+  Models the mortgages-PR-1 cold-start case: end2end fails at t=30s
+  (preview not ready in 10 min on first build), then on agent's /test
+  retest the next end2end run passes at t=120s.
+
+  Expected agent behaviour:
+  1. wait_for_first_failure_or_all_pass returns first_failure=end2end
+  2. Agent classifies as transient timing (per `retest-transient-failures-
+     not-walk-away` lesson) and posts `/test end2end` comment
+  3. wait_for_first_failure_or_all_pass again — eventually all_passed
+
+  Note: the scenario can't actually observe the /test comment (no
+  webhook), so it just times-out events. The agent's actions still
+  exercise the right code paths.
+events:
+  - at_seconds: 0
+    checks:
+      - {cluster: az,  check: lint,        state: PENDING}
+      - {cluster: az,  check: end2end,     state: PENDING}
+      - {cluster: gcp, check: lint,        state: PENDING}
+      - {cluster: gcp, check: end2end,     state: PENDING}
+  - at_seconds: 15
+    # Lint passes; end2end still pending
+    checks:
+      - {cluster: az,  check: lint,        state: SUCCESS}
+      - {cluster: az,  check: end2end,     state: IN_PROGRESS}
+      - {cluster: gcp, check: lint,        state: SUCCESS}
+      - {cluster: gcp, check: end2end,     state: IN_PROGRESS}
+  - at_seconds: 30
+    # End2end fails on AZ (transient cold-start). GCP still running.
+    checks:
+      - {cluster: az,  check: lint,        state: SUCCESS}
+      - {cluster: az,  check: end2end,     state: FAILURE}
+      - {cluster: gcp, check: lint,        state: SUCCESS}
+      - {cluster: gcp, check: end2end,     state: IN_PROGRESS}
+  - at_seconds: 60
+    # GCP end2end also fails (same cold-start cause)
+    checks:
+      - {cluster: az,  check: lint,        state: SUCCESS}
+      - {cluster: az,  check: end2end,     state: FAILURE}
+      - {cluster: gcp, check: lint,        state: SUCCESS}
+      - {cluster: gcp, check: end2end,     state: FAILURE}
+  - at_seconds: 120
+    # After retest (preview is now warm), all green
+    checks:
+      - {cluster: az,  check: lint,        state: SUCCESS}
+      - {cluster: az,  check: end2end,     state: SUCCESS}
+      - {cluster: gcp, check: lint,        state: SUCCESS}
+      - {cluster: gcp, check: end2end,     state: SUCCESS}
