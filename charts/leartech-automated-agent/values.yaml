@@ -98,6 +98,30 @@ tektonGit:
 # The Initiative agent resolves repo paths against this prefix.
 leartechRepoRoot: /workspace
 
+# Postgres-backed initiative catalog. Mirrors auth-service's pattern:
+# - CNPG Database CR provisions the per-service DB in the shared cluster
+# - migrations-job applies 0001_initial.sql as a Helm post-install hook
+# - deployment injects DATABASE_URL from the CNPG-auto-generated app secret
+#
+# Disabling the toggle (`postgresql.enabled: false`) makes the catalog
+# endpoints return 503 and the agent falls back to filesystem-only YAML.
+# Use that for previews or any cluster without CNPG.
+postgresql:
+  enabled: false  # flip via configs/leartech-automated-agent.yaml on clusters with CNPG
+  # Name of the existing shared CNPG cluster (provisioned outside this chart,
+  # same one auth-service connects to). Per-service Database is owned by
+  # this chart via the CR below.
+  clusterName: leartech-staging
+  databaseName: leartech_automated_agent
+  # Secret holding the connection URI for our role+DB. CNPG auto-generates
+  # this as `<clusterName>-<role>-app` with key `uri` when the Database CR
+  # is reconciled.
+  secretName: leartech-staging-leartech_automated_agent-app
+  secretKey: uri
+  # post-install/post-upgrade hook applies schema migrations from
+  # files/migrations/*.sql in lexical order. Idempotent (IF NOT EXISTS).
+  runMigrations: true
+
 jxRequirements:
   ingress:
     domain: ""
