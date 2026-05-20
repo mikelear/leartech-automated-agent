@@ -1,0 +1,93 @@
+# mortgages-api-add-changelog-stub — proof-of-pipeline test initiative
+#
+# First initiative against leartech-mortgages-api (cloned from
+# leartech-go-service-template on 2026-05-19 as Phase 0 of the mortgages-MCP
+# spike). Smallest viable change — adds CHANGELOG.md at repo root.
+#
+# Purpose: prove the 11-check presubmit + release chain runs end-to-end on a
+# fresh mortgages-* repo. If green, Phase 1 sourcing endpoints can fire as
+# subsequent initiatives.
+#
+# Run with: `make initiative INITIATIVE=mortgages-api-add-changelog-stub`
+
+name: mortgages-api-add-changelog-stub
+
+description: |
+  Add a CHANGELOG.md stub at repo root of leartech-mortgages-api. One new
+  markdown file. No code changes.
+
+  The smallest viable change. Proves the 11-check presubmit + 5-SDK release
+  chain runs cleanly on a freshly-bootstrapped mortgages-* repo. Sister
+  initiative `mortgages-gw-add-changelog-stub` does the same against
+  leartech-mortgages-gw — both can fire in parallel.
+
+repo: leartech-mortgages-api
+branch: agent/add-changelog-stub
+base: main
+
+goal: |
+  Create a single new file: `CHANGELOG.md` at the repo root.
+
+  ## File content
+
+  Use Keep-a-Changelog format. Exact body:
+
+      # Changelog
+
+      All notable changes to leartech-mortgages-api are documented here.
+
+      Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+
+      ## [Unreleased]
+
+      ### Added
+
+      - Stub CHANGELOG.md (this file).
+
+      ## [0.0.1] — 2026-05-19
+
+      ### Added
+
+      - Initial bootstrap from `leartech-go-service-template` (Phase 0 of the
+        mortgages-MCP spike). Golden Service spine inherited verbatim:
+        `/health/live`, `/health/ready`, `/openapi.json`, `/docs`, `/metrics`,
+        plus the template's `/api/v1/example` and `/api/v1/fleet-test`
+        endpoints. Sourcing-comparison endpoints land in Phase 1 as
+        subsequent initiatives.
+
+  ## Constraints
+
+  - **Single new file only.** Do not modify ANY other file.
+  - Conventional commit: `docs: add CHANGELOG.md`
+  - Open PR with a one-paragraph description referencing Phase 0 of the
+    mortgages-MCP spike.
+  - Do NOT add Markdown formatters, linters, or pre-commit hooks for the
+    new file. Just write the markdown.
+
+  ## What this is NOT
+
+  - Not a docs audit. Don't survey other docs.
+  - Not an opportunity to expand the version history beyond v0.0.1 — that's
+    the only version that exists.
+  - Not a code change. No Go edits, no tests, no schema, no chart.
+  - Not a chance to rewrite existing files like README.md or CLAUDE.md.
+
+  ## Why this initiative exists
+
+  leartech-mortgages-api was bootstrapped from the canonical Go template
+  on 2026-05-19 and v0.0.1 was seeded. No PR has been opened against the
+  repo yet, so the 11-check presubmit + 5-SDK release pipeline chain is
+  unproven on this repo. This trivial initiative is the proof. If green,
+  every subsequent Phase 1 initiative (`mortgages-api-add-product-fixtures`,
+  `mortgages-api-add-product-search`, etc.) inherits the same chain.
+
+  Expected pipeline outcome: all 11 checks pass; postsubmit release cuts
+  `v0.0.2-{gcp,az}`; openapi-generation publishes
+  `@mikelear/leartech-mortgages-api-{angular,typescript}` + Go/Python/Rust
+  mono-repo PRs for the first time.
+  Expected agent behaviour: ~2 turns (read, write, commit, push, sticky).
+
+gate_marks:
+  - unit
+
+max_iterations: 4
