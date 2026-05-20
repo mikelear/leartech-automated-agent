@@ -1,0 +1,173 @@
+# automated-agent-add-initiative-runs-db — durability for the run-state store.
+#
+# Today's app/state.py holds `_records: dict[str, InitiativeRecord]` in memory.
+# OOMKill or pod restart wipes everything — confirmed live 2026-05-20 when
+# mortgages-gw-add-mcp-mock-sourcing OOMKilled at the 1 GiB limit (since
+# bumped to 4 GiB in PR #22). The run state was lost; no resumability,
+# no observable history.
+#
+# This initiative adds the second half of the DB story we started in PR #21:
+# - PR #21 shipped `initiative_catalog` (initiative DEFINITIONS, stored YAML)
+# - This initiative ships `initiative_runs` (one row per EXECUTION + outcome)
+#
+# Reuses the same SQLAlchemy engine, session factory, migration mechanism,
+# and `LEARTECH_INITIATIVE_DB_DSN` env var. Falls back to in-memory state
+# when the DSN is unset (dev, preview, CI) — same graceful-degradation
+# pattern as the catalog.
+
+name: automated-agent-add-initiative-runs-db
+
+description: |
+  Make initiative run state durable. New table `initiative_runs`. Refactor
+  `app/state.py` to be write-through-DB when the DSN is configured;
+  fall back to in-memory when not. Add an on-startup orphan reconcile so
+  runs that were in-flight when a pod died get marked appropriately.
+
+repo: leartech-automated-agent
+branch: agent/add-initiative-runs-db
+base: main
+
+goal: |
+  Build a durable run-state store backed by the same Postgres database
+  as `initiative_catalog` (shipped in PR #21). The shape mirrors the
+  catalog work — same migration mechanism, same SQLAlchemy setup, same
+  env-var-gated graceful fallback.
+
+  ## Files to create
+
+  ### 1. `charts/leartech-automated-agent/files/migrations/0002_initiative_runs.sql`
+
+  Create the table. Mirror the style of `0001_initial.sql` (IF NOT EXISTS,
+  idempotent, with an `updated_at` trigger). Schema:
+
+  ```sql
+  CREATE TABLE IF NOT EXISTS initiative_runs (
+      id            VARCHAR(64) PRIMARY KEY,
+      initiative    VARCHAR(255) NOT NULL,
+      status        VARCHAR(32) NOT NULL,
+      started_at    TIMESTAMPTZ NOT NULL,
+      finished_at   TIMESTAMPTZ,
+      pr_number     INTEGER,
+      pr_repo       VARCHAR(255),
+      turns         INTEGER,
+      cost_usd      NUMERIC(10, 4),
+      error         TEXT,
+      cluster       VARCHAR(32),
+      created_by    VARCHAR(255),
+      updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_runs_status ON initiative_runs(status);
+  CREATE INDEX IF NOT EXISTS idx_runs_initiative ON initiative_runs(initiative);
+  CREATE INDEX IF NOT EXISTS idx_runs_started_at ON initiative_runs(started_at DESC);
+  ```
+
+  Add an `updated_at` trigger mirroring the one in `0001_initial.sql`.
+
+  ### 2. `app/db/models.py` — add `InitiativeRunRow` next to `InitiativeRow`
+
+  Same `DeclarativeBase`, same column conventions. Use:
+  - `id: Mapped[str] = mapped_column(String(64), primary_key=True)`
+  - `initiative: Mapped[str] = mapped_column(String(255), nullable=False)`
+  - `status: Mapped[str] = mapped_column(String(32), nullable=False)`
+  - `started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)`
+  - `finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)`
+  - `pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)`
+  - `pr_repo: Mapped[str | None] = mapped_column(String(255), nullable=True)`
+  - `turns: Mapped[int | None] = mapped_column(Integer, nullable=True)`
+  - `cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)`  # or float
+  - `error: Mapped[str | None] = mapped_column(Text, nullable=True)`
+  - `cluster: Mapped[str | None] = mapped_column(String(32), nullable=True)`
+  - `created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)`
+  - `updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False)`
+
+  ### 3. `app/db/initiative_runs.py` — CRUD operations
+
+  Mirror the structure of `app/db/initiative_catalog.py`:
+  - Frozen dataclass `InitiativeRunRecord` (plain-data view to insulate API from SQLAlchemy types)
+  - `async def create_run(session, *, id, initiative, status, started_at, cluster=None, created_by=None) -> InitiativeRunRecord`
+  - `async def get_run(session, id) -> InitiativeRunRecord | None`
+  - `async def list_runs(session, *, status=None, initiative=None, limit=100) -> list[InitiativeRunRecord]`
+  - `async def update_run(session, *, id, **fields) -> InitiativeRunRecord | None`
+  - `async def mark_orphaned_runs(session, live_ids: set[str]) -> int` — find any status in (`queued`, `running`) where `id NOT IN live_ids` and update to `orphaned`. Returns the count marked.
+
+  ### 4. `app/state.py` — refactor to write-through-DB
+
+  Current shape is sync + in-memory. Change to:
+  - Keep `_tasks: dict[str, asyncio.Task[Any]]` (can't persist asyncio.Task)
+  - Keep `_records` as an in-memory fallback for filesystem-only mode
+  - Make `register`, `get`, `update`, `list_records`, `cancel` async
+  - When `app.db.is_db_enabled()`: use the DB CRUD ops via `app.db.session()`
+  - When not: keep current in-memory dict behaviour (graceful fallback)
+
+  Add a NEW function:
+  ```python
+  async def reconcile_orphaned_runs() -> int:
+      """Mark in-flight DB runs as 'orphaned' if no live asyncio.Task exists.
+
+      Called on FastAPI startup. Pod restart leaves DB rows in 'running'
+      state but no Task in `_tasks`. This rectifies the state.
+      """
+      if not is_db_enabled():
+          return 0
+      async with session() as s:
+          return await mark_orphaned_runs(s, set(_tasks.keys()))
+  ```
+
+  Add `'orphaned'` and `'timed_out'` to the valid status values in the
+  `InitiativeRecord` description.
+
+  ### 5. `app/routers/initiatives.py` — update callers to await
+
+  All call sites of `state.register / get / update / cancel / list_records`
+  need `await`. They're already inside `async def` handlers so this is mechanical.
+
+  Also add a CLUSTER env var read at module level (default 'unknown') and
+  pass it to `register()` when creating a new run.
+
+  ### 6. `app/main.py` — call reconcile_orphaned_runs() on startup
+
+  Inside the existing `lifespan` context manager, after `init_engine()`:
+  ```python
+  from app.state import reconcile_orphaned_runs
+  count = await reconcile_orphaned_runs()
+  if count > 0:
+      _logger.warning(f'marked {count} orphaned runs from prior pod lifecycle')
+  ```
+
+  ### 7. Tests
+
+  Add `tests/test_initiative_runs_db.py` mirroring `tests/test_initiative_catalog_db.py`:
+  - CRUD ops against in-memory SQLite
+  - `mark_orphaned_runs` correctly identifies runs not in the live set
+  - State.py functions write to DB when enabled, fall back to in-memory when not
+  - Existing `tests/test_app_initiatives.py` must continue to pass (it patches `run_initiative` already; the state.py changes should be transparent)
+
+  ## Constraints — do NOT do
+
+  - **Do NOT change the schema of `initiative_catalog`** — that's a separate
+    concern, shipped in PR #21
+  - **Do NOT add an "auth" column to `initiative_runs` beyond `created_by`** —
+    auth integration is its own future PR
+  - **Do NOT modify `gate/agent/initiative.py` or any agent runtime code** —
+    state is the service layer's concern, not the agent loop's
+  - **Do NOT change the existing REST endpoint paths** (`/initiatives/{id}`,
+    etc.) — only the implementation
+  - **Do NOT remove the in-memory fallback** — preview/CI deployments without
+    a Postgres still need to work
+
+  ## Acceptance criteria
+
+  - `make all` passes (lint + mypy + tests + helm)
+  - The new `initiative_runs` table renders in `helm template` with
+    `postgresql.enabled=true` (it's added to the existing migrations
+    ConfigMap automatically)
+  - `tests/test_initiative_runs_db.py` covers create / get / list / update /
+    delete + orphan reconcile + state.py fallback path
+  - PR description explains the orphan-reconcile flow + how it pairs with
+    PR #21's catalog DB work
+
+gate_marks:
+  - unit
+
+max_iterations: 8

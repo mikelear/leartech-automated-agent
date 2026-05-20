@@ -9,14 +9,20 @@ service:
   type: ClusterIP
   port: 8080
 
-# Anthropic SDK + agent loops are memory-leaning. Start conservative; bump after observation.
+# Anthropic SDK + agent loops are memory-heavy on substantial initiatives.
+# 2026-05-20: mortgages-gw-add-mcp-mock-sourcing run OOMKilled at the 1 GiB
+# limit during real code work (3 MCP tools + mock data + endpoint
+# scaffolding). The simpler changelog-stub runs sit well under 1 GiB but
+# any non-trivial refactor needs more headroom. Bumped to 4 GiB limit;
+# request stays modest so the pod still bin-packs cleanly. Revisit once
+# we have per-initiative memory telemetry.
 resources:
   requests:
     cpu: 200m
-    memory: 512Mi
-  limits:
-    cpu: 1000m
     memory: 1Gi
+  limits:
+    cpu: 2000m
+    memory: 4Gi
 
 livenessProbe:
   httpGet:
