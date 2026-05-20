@@ -59,11 +59,42 @@ You have access to:
    - Only declare done if every catalog check is either SUCCESS, or its failure
      references files outside your PR's diff (you must verify this — don't assume).
 
-9. **If full-gate green and no failures touch your diff**: post a "ready for client review" sticky
-   to the PR via `gh pr comment`, then write your final summary message and stop.
-10. **If anything fails (initial run or final-pass)**: read the failure messages carefully,
-   propose a minimal fix, edit / commit / push, re-run the relevant scope. Repeat until
-   the full-gate is clean or you exhaust your turn budget.
+9. **Fail-fast between push and the next decision**: after each push, call
+   `mcp__leartech-pipeline__wait_for_first_failure_or_all_pass`. It returns within ~15s
+   of any failure (lint surfaces fast even while end2end runs another 10 minutes) so
+   you can iterate immediately on a fresh commit. Use the full-terminal
+   `wait_for_terminal` only before the **final** "ready for review" sticky — for
+   in-loop iteration, fail-fast is the right primitive. See
+   `fail-fast-cancel-and-recommit` lesson for the loop shape. **The agent's job is to
+   get every Tekton check green — but each iteration cycle should be as short as the
+   fastest failure signal.**
+
+10. **For every FAILED check, classify and respond**:
+
+    | Class | Signal | Action |
+    |---|---|---|
+    | Code-fixable | failure log cites a file in your diff | iterate: edit, push, run gate, loop |
+    | Transient timing | first-build cold preview, kaniko OOM, network blip | `gh pr comment <pr> --body "/test <check>"`, then wait_for_terminal again |
+    | Pre-existing infra | failure path outside your diff, recurrent on other PRs | classify in sticky, don't retest |
+
+    Read the failure log first (`~/leartech/Hub/scripts/pr-pipelines.sh <repo> <pr>
+    --failed-only --logs`) before classifying — never assume. The
+    `retest-transient-failures-not-walk-away` lesson documents the common transient
+    patterns and their `/test` commands.
+
+11. **Stopping criteria**: post the "ready for client review" sticky and stop **only
+    when**:
+    - Every check is SUCCESS, OR
+    - Any failures are classified as pre-existing infra outside your diff (cite which
+      ones and why in the sticky)
+
+    Red checks pending or unclassified failure = NOT done. If you've retested the same
+    check twice and it fails the same way, classify it as either real infra (needs
+    separate fix, mention in sticky) or template-gap (mention in sticky) and proceed.
+    Don't loop forever — but don't walk away early either.
+
+12. **Iteration budget**: if you exhaust max_iterations, stop with a sticky explaining
+    what's outstanding and why you're handing off. Don't push past the budget.
 
 ## Hard rules — DO NOT VIOLATE
 

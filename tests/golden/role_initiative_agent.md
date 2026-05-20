@@ -442,6 +442,91 @@ are scoped as part of webCoder's K8s Job + CRD work, not automated-agent.
 Slice G as originally framed (MCP tool + criterion *inside* the agent)
 is dissolved; cluster diagnosis lives in the runner.
 
+### Use `wait_for_first_failure_or_all_pass` between push and decision — don't wait for the slowest check
+
+`wait_for_terminal` waits for **every** required check to terminate — slowest
+check wins. End2end on a Go service takes 8–10 minutes; lint on the same PR
+finishes in 30s. If lint fails, the agent already knows it has to commit a
+fix and start a fresh PR cycle. Waiting another 9 minutes for end2end to
+finish before the agent reacts is pure latency.
+
+`wait_for_first_failure_or_all_pass` is the fail-fast counterpart. Polls
+`list_pr_checks` at short intervals and returns as soon as **either**:
+
+- ANY check fails (`status: "first_failure"`, with the failing check's
+  cluster/name/state/pipelinerun-name in `first_failure`), OR
+- ALL checks succeed (`status: "all_passed"`).
+
+Surfaces lint failures in ~15s while end2end is still running, so the agent
+iterates on a fresh commit immediately.
+
+## When to use which
+
+| Tool | Use for |
+|---|---|
+| `wait_for_first_failure_or_all_pass` | Between push and the next decision point — "should I iterate or is this done?" |
+| `wait_for_terminal` | Final-state confirmation before the "ready for client review" sticky — you want to be certain every check is settled |
+
+Use the fail-fast one inside the iteration loop. Use the full-terminal one
+before the final sticky.
+
+## Loop shape
+
+```python
+while iterations < max_iterations:
+    # ... edit, push ...
+    result = wait_for_first_failure_or_all_pass(repo, pr, timeout_seconds=1800)
+    if result.status == 'all_passed':
+        break  # move to final sticky
+    if result.status == 'first_failure':
+        # classify: code-fixable / transient / pre-existing
+        # iterate on code-fixable, /test retest on transient, classify on pre-existing
+        continue
+    if result.status == 'timeout':
+        # 30 min with neither all-pass nor any-fail — likely a real stall
+        # /retest may unblock, or escalate
+        ...
+```
+
+## Why we don't auto-cancel in-flight checks yet
+
+When lint fails fast and the agent iterates, the OTHER checks (end2end,
+security-scan, dynamic-scan) keep running on the stale SHA — wasted cluster
+time. Ideal: cancel them, free resources, push the new commit, new run starts.
+
+That requires cross-cluster `kubectl patch pipelinerun ... status=Cancelled`
+with RBAC the agent's ServiceAccount doesn't have today. It's deferred to a
+follow-up. For now: accept the wasted in-flight time, optimise via fail-fast
+on the **next** cycle instead.
+
+When the cancellation primitive ships, the loop body becomes:
+1. Receive `first_failure`
+2. Classify as code-fixable
+3. Call `cancel_pending_checks(repo, pr)` — kills the wasted in-flight pipelineruns
+4. Edit/commit/push — fresh pipelines start on the new SHA
+
+## Pairs with
+
+- `retest-transient-failures-not-walk-away` — when first_failure is
+  transient, this lesson says retest instead of iterating code.
+- `chatops-recovery-on-stalled-tekton-checks` — when the wait times out,
+  `/retest` to unblock.
+- `prefer-blocking-watch-over-polling` — same principle (block in the
+  subprocess, not in the agent loop); this lesson adds the fail-fast
+  variant.
+
+## Why this matters
+
+Build + test + scan + deploy + e2e takes 8-15 minutes on a fresh PR. If the
+agent iterates 3 times, that's ~30-45 minutes wall-clock just from "waiting
+for slowest check" overhead. Fail-fast collapses that to ~30-45s per
+iteration on lint failures, which is most of them. Compounds across every
+initiative.
+
+Mike's framing 2026-05-20: "the agent's job is to get all Tekton pipelines
+green" — but the path to "all green" includes many cycles of "fix one
+thing", and each cycle should be as short as the fastest failure-signal.
+
 ### Prefer blocking `gh pr checks --watch` over MCP polling loops when waiting on terminal events
 
 When waiting for Tekton checks to reach a terminal state, **always use a single
@@ -628,3 +713,91 @@ Concretely:
 
 A guessed fix that doesn't address the root cause wastes a full pipeline cycle
 (~10-30 min) and erodes trust. One careful read beats three speculative iterations.
+
+### When a check fails for transient reasons, retest via /test — never walk away with red checks unclassified
+
+**The agent's job is to get every Tekton pipeline check green** — not
+to declare done as soon as no code change is required. If checks are
+still pending or transiently failing, the agent must wait and retest,
+not walk away.
+
+## The anti-pattern (observed 2026-05-20)
+
+On `mortgages-api PR #1` and `mortgages-gw PR #1`, the agent opened
+the PR, posted `/hold`, then stopped at iteration 0 with the sticky
+saying:
+
+> "Still running (~75 min in, first-time build): `az/end2end`, `gcp/end2end`, ...
+>  Recommend human review once all checks reach terminal state."
+
+`az/end2end` and `gcp/end2end` then **failed** because the brand-new
+repo's preview deploy didn't reach 3 consecutive 200s on `/health/live`
+within 10 minutes (first-ever build of a new repo — no kaniko cache,
+slow first-image-pull, cold pod start). The preview was healthy 90s
+later, but the agent had already concluded.
+
+A `/test end2end` retest at that point would have passed cleanly. The
+agent should have done that.
+
+## Why this matters
+
+Walking away with red checks unclassified violates two design rules:
+
+1. The agent's success criterion is **all checks SUCCESS or
+   classified as pre-existing infra outside the diff** — not "no code
+   change needed, hand off to human".
+2. Lighthouse Merge Status can never go green until checks resolve. A
+   PR left with red transients sits indefinitely waiting for a human
+   who doesn't know to retest.
+
+## Procedure
+
+After posting `/hold` + sticky, **before declaring done**:
+
+1. **Wait for all checks to reach terminal** (SUCCESS or FAILURE),
+   using `mcp__leartech-pipeline__wait_for_terminal`. Don't stop
+   while any check is PENDING.
+
+2. **For each FAILURE, classify**:
+
+   | Class | Signal | Action |
+   |---|---|---|
+   | **Code-fixable** | failure log cites a file in your diff | iterate: edit, push, repeat |
+   | **Transient timing** | first-build, cold preview, kaniko OOM on small node, network blip | retest: `gh pr comment <pr> -R <repo> --body "/test <check>"`, wait again |
+   | **Pre-existing infra** | failure path outside your diff, recurrent on other PRs | classify in sticky, don't fight |
+
+3. **Only post the "ready for review" sticky once every check is
+   SUCCESS or in the pre-existing-infra bucket.** Red transients
+   without retest = not done.
+
+## Known transient patterns + retest commands
+
+| Failing check | Common cause | Retest command |
+|---|---|---|
+| `*/end2end` | Preview not ready in 10 min on first build of a new repo | `gh pr comment <pr> --body "/test end2end"` |
+| `*/dynamic-scan` | Preview pod CreateContainerConfigError → not reachable | `/test dynamic-scan` (after preview is healthy) |
+| `*/security-scan` | Pod evicted (node memory pressure) | `/test security-scan` |
+| `*/pr` (kaniko build) | Kaniko OOM on a 16 GiB build node for a heavy-image service | `/test pr` (may need infra fix — see Hub Instance 5) |
+| Any check, pending > 15 min with pod gone | Tekton queue wedged | `/retest` (or `/test <check>`) |
+
+## When to STOP retesting
+
+Don't loop forever. After **2 retests of the same check failing the
+same way**, classify it as either:
+- A real infra issue → mention in sticky as "needs infra fix, not in
+  diff scope", post the sticky, hand off
+- A real test failure (something the gold-standard chart should
+  produce but doesn't) → flag as a setup gap
+
+Specifically: if a brand-new repo has no `/health/live` endpoint at
+all because the template doesn't bootstrap one, retest won't help.
+That's a chart/template gap, classify and continue.
+
+## Pairs with
+
+- `chatops-recovery-on-stalled-tekton-checks` — same `/test` mechanism
+  but for PENDING-too-long checks. This lesson covers FAILED-but-transient.
+- `cite-failing-criteria-when-explaining-fixes` — when classifying a
+  failure, cite the actual check + step + log line.
+- `full-gate-verification-before-sticky` — the same "don't stop too
+  early" principle, applied at the gate-test level.
