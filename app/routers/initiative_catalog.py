@@ -40,8 +40,12 @@ router = APIRouter()
 
 class CreateInitiativeRequest(BaseModel):
     name: str = Field(..., min_length=1, description='Kebab-case unique identifier — same shape as YAML stem')
-    yaml_body: str = Field(..., min_length=1, description='Full initiative YAML body — parsed by the same loader as filesystem initiatives')
-    description: str | None = Field(default=None, description='Human-readable rationale; not seen by the agent. Optional.')
+    yaml_body: str = Field(
+        ..., min_length=1, description='Full initiative YAML body — parsed by the same loader as filesystem initiatives'
+    )
+    description: str | None = Field(
+        default=None, description='Human-readable rationale; not seen by the agent. Optional.'
+    )
 
 
 class UpdateInitiativeRequest(BaseModel):

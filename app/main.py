@@ -25,6 +25,7 @@ from fastapi import FastAPI
 
 from app.db import dispose_engine, init_engine, is_db_enabled
 from app.routers import health, initiative_catalog, initiatives, introspection, lessons, mcp_admin
+from app.state import reconcile_orphaned_runs
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
 _logger = logging.getLogger(__name__)
@@ -41,6 +42,9 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     if is_db_enabled():
         _logger.info('initialising DB engine (LEARTECH_INITIATIVE_DB_DSN set)')
         init_engine()
+        count = await reconcile_orphaned_runs()
+        if count > 0:
+            _logger.warning('marked %d orphaned runs from prior pod lifecycle', count)
     else:
         _logger.info('DB DSN not configured — running in filesystem-only mode')
     try:

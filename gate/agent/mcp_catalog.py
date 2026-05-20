@@ -90,23 +90,23 @@ class LlmConfig(BaseModel):
     backend: str = Field(
         default='claude',
         description='LLM adapter identifier. Today only "claude" is implemented; '
-                    '"openai" / "local" come in later phases.',
+        '"openai" / "local" come in later phases.',
     )
     model: str | None = Field(
         default=None,
         description='Backend-specific model name (e.g. "claude-opus-4-7", '
-                    '"claude-haiku-4-5"). None means the adapter default.',
+        '"claude-haiku-4-5"). None means the adapter default.',
     )
     max_turns: int = Field(
         default=1000,
         ge=1,
         description='Hard upper bound on turns per session. Cheap-classification '
-                    'roles (e.g. forensic) set this much lower than initiative work.',
+        'roles (e.g. forensic) set this much lower than initiative work.',
     )
     stop_on_tool: list[str] = Field(
         default_factory=list,
         description='Tool names that, when invoked, pause the session for review. '
-                    'E.g. ["open_pr"] forces human review before any PR opens.',
+        'E.g. ["open_pr"] forces human review before any PR opens.',
     )
 
 

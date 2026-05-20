@@ -30,6 +30,7 @@ def build_pipeline_server() -> McpSdkServerConfig:
     if os.environ.get('LEARTECH_MOCK_PIPELINE_SCENARIO'):
         # Lazy import — production never pays the YAML / scenario module cost.
         from gate.mcp_servers.pipeline_server_mock import build_mock_pipeline_server
+
         return build_mock_pipeline_server()
     return _build_real_pipeline_server()
 

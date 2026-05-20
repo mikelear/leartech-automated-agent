@@ -51,9 +51,7 @@ def test_every_lesson_parses_cleanly(lesson_path: Path) -> None:
 def test_lesson_id_matches_filename(lesson_path: Path) -> None:
     """File `foo-bar.md` must contain `id: foo-bar` — keeps catalog scannable."""
     lesson = parse_lesson_file(lesson_path)
-    assert lesson.id == lesson_path.stem, (
-        f'{lesson_path.name}: id={lesson.id!r} does not match filename stem'
-    )
+    assert lesson.id == lesson_path.stem, f'{lesson_path.name}: id={lesson.id!r} does not match filename stem'
 
 
 @pytest.mark.parametrize('lesson_path', _lesson_files(), ids=lambda p: p.stem)
@@ -69,8 +67,7 @@ def test_calibration_lessons_have_applies_to(lesson_path: Path) -> None:
     if lesson.category == 'architecture':
         return
     assert lesson.applies_to, (
-        f'{lesson_path.name}: category={lesson.category!r} with empty applies_to '
-        f'— this lesson reaches no agent role'
+        f'{lesson_path.name}: category={lesson.category!r} with empty applies_to — this lesson reaches no agent role'
     )
 
 
@@ -123,8 +120,7 @@ def test_every_role_mcp_reference_exists() -> None:
     for role_name, role in catalog.roles.items():
         for mcp_name in role.mcps:
             assert mcp_name in server_names, (
-                f'role {role_name!r} references unknown MCP {mcp_name!r}. '
-                f'Known: {sorted(server_names)}'
+                f'role {role_name!r} references unknown MCP {mcp_name!r}. Known: {sorted(server_names)}'
             )
 
 
@@ -142,16 +138,12 @@ def test_every_sdk_mcp_builder_imports() -> None:
             continue
         assert mcp.builder, f'{name}: sdk MCP missing builder field'
         module_path, _, function_name = mcp.builder.partition(':')
-        assert module_path and function_name, (
-            f'{name}: builder {mcp.builder!r} not in expected `module:function` shape'
-        )
+        assert module_path and function_name, f'{name}: builder {mcp.builder!r} not in expected `module:function` shape'
         try:
             module = importlib.import_module(module_path)
         except ImportError as exc:
             pytest.fail(f'{name}: cannot import {module_path}: {exc}')
-        assert hasattr(module, function_name), (
-            f'{name}: {module_path} has no `{function_name}`'
-        )
+        assert hasattr(module, function_name), f'{name}: {module_path} has no `{function_name}`'
 
 
 def test_every_sdk_mcp_builds_via_catalog() -> None:

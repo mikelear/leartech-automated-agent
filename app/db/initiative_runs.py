@@ -1,0 +1,186 @@
+"""CRUD operations for the DB-backed initiative run store.
+
+Thin async wrappers around InitiativeRunRow. Keeps the state module thin
+and makes operations independently testable against an in-memory SQLite
+engine (real production uses Postgres via asyncpg).
+
+Pattern mirrors app/db/initiative_catalog.py.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
+
+from sqlalchemy import select
+from sqlalchemy import update as sa_update
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.db.models import InitiativeRunRow
+
+
+@dataclass(frozen=True)
+class InitiativeRunRecord:
+    """Plain-data view of a DB-stored run — returned to API handlers.
+
+    Keeping a separate dataclass insulates the state/API layer from
+    SQLAlchemy types (lazy loading, transient session-bound state, etc.).
+    """
+
+    id: str
+    initiative: str
+    status: str
+    started_at: datetime
+    finished_at: datetime | None
+    pr_number: int | None
+    pr_repo: str | None
+    turns: int | None
+    cost_usd: Decimal | None
+    error: str | None
+    cluster: str | None
+    created_by: str | None
+    updated_at: datetime
+
+    @classmethod
+    def from_row(cls, row: InitiativeRunRow) -> InitiativeRunRecord:
+        return cls(
+            id=row.id,
+            initiative=row.initiative,
+            status=row.status,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            pr_number=row.pr_number,
+            pr_repo=row.pr_repo,
+            turns=row.turns,
+            cost_usd=row.cost_usd,
+            error=row.error,
+            cluster=row.cluster,
+            created_by=row.created_by,
+            updated_at=row.updated_at,
+        )
+
+
+async def create_run(
+    session: AsyncSession,
+    *,
+    id: str,
+    initiative: str,
+    status: str,
+    started_at: datetime,
+    cluster: str | None = None,
+    created_by: str | None = None,
+) -> InitiativeRunRecord:
+    """Create a new DB-stored run row. Raises on IntegrityError for duplicate id.
+
+    Caller maps IntegrityError → HTTP 409 at the router layer (kept out of
+    this module to avoid HTTP coupling).
+    """
+    row = InitiativeRunRow(
+        id=id,
+        initiative=initiative,
+        status=status,
+        started_at=started_at,
+        cluster=cluster,
+        created_by=created_by,
+    )
+    session.add(row)
+    await session.flush()
+    await session.refresh(row)
+    return InitiativeRunRecord.from_row(row)
+
+
+async def get_run(session: AsyncSession, id: str) -> InitiativeRunRecord | None:
+    """Return a single run record or None if not found."""
+    row = await session.get(InitiativeRunRow, id)
+    return InitiativeRunRecord.from_row(row) if row is not None else None
+
+
+async def list_runs(
+    session: AsyncSession,
+    *,
+    status: str | None = None,
+    initiative: str | None = None,
+    limit: int = 100,
+) -> list[InitiativeRunRecord]:
+    """Return runs ordered by started_at DESC, with optional filters.
+
+    `status` and `initiative` are exact-match filters. Both may be combined.
+    `limit` caps the result set — default 100 to avoid unbounded scans.
+    """
+    stmt = select(InitiativeRunRow).order_by(InitiativeRunRow.started_at.desc())
+    if status is not None:
+        stmt = stmt.where(InitiativeRunRow.status == status)
+    if initiative is not None:
+        stmt = stmt.where(InitiativeRunRow.initiative == initiative)
+    stmt = stmt.limit(limit)
+    result = await session.execute(stmt)
+    return [InitiativeRunRecord.from_row(row) for row in result.scalars()]
+
+
+async def update_run(
+    session: AsyncSession,
+    *,
+    id: str,
+    **fields: object,
+) -> InitiativeRunRecord | None:
+    """Partial update of a run row. Returns None if not found.
+
+    Accepted field names mirror the InitiativeRunRow columns:
+    status, finished_at, pr_number, pr_repo, turns, cost_usd, error, cluster.
+
+    `id`, `initiative`, `started_at`, `created_by` are immutable after creation.
+    Unknown field names are silently ignored (avoids tight coupling to callers
+    passing arbitrary kwargs).
+    """
+    _mutable = frozenset(
+        {
+            'status',
+            'finished_at',
+            'pr_number',
+            'pr_repo',
+            'turns',
+            'cost_usd',
+            'error',
+            'cluster',
+        }
+    )
+    filtered = {k: v for k, v in fields.items() if k in _mutable}
+    if not filtered:
+        return await get_run(session, id)
+
+    row = await session.get(InitiativeRunRow, id)
+    if row is None:
+        return None
+    for k, v in filtered.items():
+        setattr(row, k, v)
+    await session.flush()
+    await session.refresh(row)
+    return InitiativeRunRecord.from_row(row)
+
+
+async def mark_orphaned_runs(session: AsyncSession, live_ids: set[str]) -> int:
+    """Mark in-flight DB runs as 'orphaned' if their id is NOT in `live_ids`.
+
+    Called on FastAPI startup after a pod restart. A restarted pod has an
+    empty `_tasks` dict, so `live_ids` will typically be empty on first call.
+    Any run with status in ('queued', 'running') that has no live asyncio.Task
+    is unreachable — mark it orphaned so callers can detect the gap.
+
+    Returns the count of rows updated.
+    """
+    # Fetch candidates first (avoids a NOT IN subquery with a potentially
+    # empty set, which has dialect-specific behaviour).
+    stmt = select(InitiativeRunRow).where(InitiativeRunRow.status.in_(['queued', 'running']))
+    result = await session.execute(stmt)
+    rows = result.scalars().all()
+    orphan_ids = [row.id for row in rows if row.id not in live_ids]
+    if not orphan_ids:
+        return 0
+
+    # Bulk-update the orphaned rows.
+    await session.execute(
+        sa_update(InitiativeRunRow).where(InitiativeRunRow.id.in_(orphan_ids)).values(status='orphaned')
+    )
+    await session.flush()
+    return len(orphan_ids)

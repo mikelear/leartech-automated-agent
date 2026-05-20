@@ -50,9 +50,9 @@ def _build_engine() -> AsyncEngine:
         raise RuntimeError(f'{DSN_ENV} is not set; cannot build engine')
     # Normalise postgres:// → postgresql+asyncpg:// for SQLAlchemy 2.x
     if dsn.startswith('postgres://'):
-        dsn = 'postgresql+asyncpg://' + dsn[len('postgres://'):]
+        dsn = 'postgresql+asyncpg://' + dsn[len('postgres://') :]
     elif dsn.startswith('postgresql://'):
-        dsn = 'postgresql+asyncpg://' + dsn[len('postgresql://'):]
+        dsn = 'postgresql+asyncpg://' + dsn[len('postgresql://') :]
     # pool_size/max_overflow only apply to QueuePool (Postgres). SQLite uses
     # StaticPool which rejects them — skip when running against SQLite (tests).
     kwargs: dict[str, object] = {'pool_pre_ping': True}
