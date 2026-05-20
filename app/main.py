@@ -18,20 +18,50 @@ invoked with.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
-from app.routers import health, initiatives, introspection, lessons, mcp_admin
+from app.db import dispose_engine, init_engine, is_db_enabled
+from app.routers import health, initiative_catalog, initiatives, introspection, lessons, mcp_admin
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+_logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    """FastAPI lifespan — bring up + tear down the DB engine when configured.
+
+    `is_db_enabled()` reads `LEARTECH_INITIATIVE_DB_DSN`. Production sets it
+    via the chart's ExternalSecret; dev/CI runs without it and the
+    initiative-catalog endpoints return 503.
+    """
+    if is_db_enabled():
+        _logger.info('initialising DB engine (LEARTECH_INITIATIVE_DB_DSN set)')
+        init_engine()
+    else:
+        _logger.info('DB DSN not configured — running in filesystem-only mode')
+    try:
+        yield
+    finally:
+        if is_db_enabled():
+            await dispose_engine()
+            _logger.info('DB engine disposed')
+
 
 app = FastAPI(
     title='leartech-automated-agent',
     description='Criteria-driven agent runtime exposed as a long-running service.',
     version='0.2.0',
+    lifespan=lifespan,
 )
 
 app.include_router(health.router, tags=['health'])
+# initiative_catalog must register BEFORE initiatives — the former's `/initiatives/catalog`
+# paths would otherwise be shadowed by initiatives' `/initiatives/{initiative_id}`.
+app.include_router(initiative_catalog.router, prefix='/initiatives/catalog', tags=['initiative-catalog'])
 app.include_router(initiatives.router, prefix='/initiatives', tags=['initiatives'])
 app.include_router(lessons.router, prefix='/lessons', tags=['lessons'])
 app.include_router(introspection.router, tags=['introspection'])

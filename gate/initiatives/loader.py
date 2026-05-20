@@ -137,10 +137,20 @@ class Initiative(BaseModel):
         return ' or '.join(self.gate_marks)
 
 
+def load_initiative_from_yaml(yaml_body: str) -> Initiative:
+    """Parse an initiative from a raw YAML string. Same validation as load_initiative().
+
+    Used by the DB-backed initiative catalog where the YAML is stored as a
+    column rather than a file. Sharing this validation keeps DB-stored and
+    filesystem-stored initiatives interchangeable.
+    """
+    data = yaml.safe_load(yaml_body)
+    if not isinstance(data, dict):
+        raise ValueError(f'Initiative YAML must contain a mapping at the top level (got {type(data).__name__})')
+    return Initiative.model_validate(data)
+
+
 def load_initiative(path: Path | str) -> Initiative:
     """Parse an initiative YAML file. Raises pydantic.ValidationError on schema mismatch."""
     p = Path(path)
-    data = yaml.safe_load(p.read_text())
-    if not isinstance(data, dict):
-        raise ValueError(f'Initiative file {p} must contain a mapping at the top level (got {type(data).__name__})')
-    return Initiative.model_validate(data)
+    return load_initiative_from_yaml(p.read_text())
