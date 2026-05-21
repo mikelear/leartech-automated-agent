@@ -1,0 +1,188 @@
+# mortgages-gw-empty-slice-serialization — fix the regression introduced by the schema tightening
+#
+# Surfaced 2026-05-21 right after mortgages-gw-fix-tool-schemas landed
+# (v0.1.1). The schema tightening worked — slice fields now declare plain
+# "array" (no null union) — but it exposed a runtime bug that the loose
+# union was masking: handlers return nil slices for empty results, and
+# the now-strict output schema rejects those with:
+#
+#   MCP error 0: validating tool output: validating root: validating
+#   /properties/products: type: <invalid reflect.Value> has type "null",
+#   want "array"
+#
+# Net effect: searches with no matches now ERROR out (previously they
+# returned {"products": null} which was tolerated). Worse UX than before.
+#
+# Fix: ensure every slice field returned by every handler is a non-nil
+# empty slice (`[]T{}`) when there are no items. Surgical change in the
+# handlers and the underlying mockproducts.Search function.
+
+name: mortgages-gw-empty-slice-serialization
+
+description: |
+  Make every slice field in MCP tool responses serialize as `[]` (empty
+  array) rather than `null` when there are no items. Closes the
+  validation-error regression introduced by mortgages-gw-fix-tool-schemas
+  on 2026-05-21 (deployed as v0.1.1).
+
+repo: leartech-mortgages-gw
+branch: agent/empty-slice-serialization
+base: main
+
+goal: |
+  Ensure every slice-typed field in every MCP tool's output is a non-nil
+  empty slice (`[]T{}`) when empty, not nil. Required because the schema
+  is now strictly "array" and the runtime currently returns null on
+  empty results, failing output validation.
+
+  ## Symptom (verified 2026-05-21)
+
+  Calling search_products with criteria that match nothing (e.g. 95%
+  LTV residential) now returns:
+
+      MCP error 0: validating tool output: validating root:
+      validating /properties/products: type: <invalid reflect.Value>
+      has type "null", want "array"
+
+  Before mortgages-gw-fix-tool-schemas landed this returned
+  `{"products": null}` (tolerated by the `["null","array"]` union).
+  The schema fix correctly tightened the contract; now the handler
+  needs to honour it.
+
+  ## Target
+
+  Same call returns `{"products": []}` — empty array, valid against
+  the strict schema, no error.
+
+  Verified via smoke test:
+    ./demo/smoke-tests.sh
+  Specifically: "95% LTV: products field is [] not null" must pass.
+
+  ## Files to modify
+
+  ### `internal/mockproducts/products.go`
+
+  In the `Search` function, initialise the result slice to an empty
+  non-nil slice instead of letting it default to nil:
+
+      // Before
+      var results []Product
+      for _, p := range Products { ... results = append(results, p) ... }
+      return results
+
+      // After
+      results := make([]Product, 0)   // non-nil empty slice
+      for _, p := range Products { ... results = append(results, p) ... }
+      return results
+
+  If `Search` already uses `make([]Product, 0, n)` or `[]Product{}`, no
+  change needed there — go straight to the handler-side fixes.
+
+  ### `internal/mcphandler/server.go`
+
+  Audit the three tool handlers. Every output struct field that's a
+  slice type must be non-nil when returned:
+
+  **searchProductsHandler:** `Products []mockproducts.Product` —
+  reuses `mockproducts.Search` output, so the Search fix above
+  covers it. Verify.
+
+  **compareProductsHandler:** `Products []mockproducts.Product` AND
+  `Table []ComparisonField`. Both must be non-nil. The Table is
+  built locally in the handler — make sure it's initialised as
+  `make([]ComparisonField, 0)` or `[]ComparisonField{}` before the
+  field-append loop.
+
+  **getProductRatesHandler:** `Residential []LTVRates` and `Btl
+  []LTVRates`, plus nested `LTVRates` fields if any are slices.
+  Initialize all to non-nil empty.
+
+  Also inside `mockproducts.Product`, the fields `Ercs []ERC` and
+  `Features []string` — make sure no fixture product has these as
+  nil. Either init each fixture explicitly with `Features: []string{}`
+  if empty, OR add a normalization step at fixture-load time that
+  replaces nil slices with empty.
+
+  Pattern to use in the handler (defensive, works regardless of what
+  mockproducts returns):
+
+      if out.Products == nil {
+          out.Products = []mockproducts.Product{}
+      }
+
+  Or initialise at struct construction:
+
+      out := SearchProductsOutput{
+          Products: []mockproducts.Product{},  // non-nil, may be replaced below
+      }
+      out.Products = mockproducts.Search(...)
+      if out.Products == nil { out.Products = []mockproducts.Product{} }
+
+  Pick whichever pattern fits the existing handler style.
+
+  ### `internal/mcphandler/server_test.go`
+
+  Add a regression test:
+
+  - `TestSearchProductsHandler_NoMatches_ReturnsEmptyArray` — call
+    search with criteria that match nothing. Assert: returned
+    Products is non-nil AND has length 0. (i.e. JSON marshaling
+    would emit `"products": []` not `null`.)
+  - Same shape for `getProductRatesHandler` if any of its slice
+    outputs can be empty (likely BTL bands above a certain LTV).
+
+  ## Files to NOT touch
+
+  - `internal/mcphandler/server.go` schema generation (`mustSchemaFor`,
+    `fixNullArrayTypes`) — that's the input/output schema declaration
+    side and is already correct
+  - `internal/mockproducts/products.go` fixture data — don't change
+    the products themselves, just the Search function and any nil-able
+    nested slice
+  - Dockerfile, Makefile, chart, pipelines
+
+  ## Constraints
+
+  - **Surgical fix.** Make slices non-nil; don't restructure handlers
+    or output types.
+  - **Don't loosen the schema** — leave the `"array"` declaration as-is.
+    The fix is purely runtime serialization side.
+  - **No new dependencies.** Use stdlib `make`/`[]T{}`.
+  - Conventional commit: `fix(mcp): return empty arrays not nil for empty slice outputs`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## What this is NOT
+
+  - Not a refactor of `Search` or any handler beyond the slice-init
+  - Not the place to fix any of the OTHER open initiatives (logging,
+    default-product-type, get-product) — those are separate work
+  - Not the place to change schemas (they're already correct)
+  - Not an opportunity to bump dependencies
+
+  ## Why this initiative exists
+
+  Direct verification on 2026-05-21 right after v0.1.1 deployed showed
+  that the schema-fix initiative tightened the OUTPUT schema correctly
+  but exposed a previously-masked runtime nil-slice bug. The loose
+  `["null","array"]` union had tolerated `null` empties; the new strict
+  `"array"` schema correctly rejects them via output validation —
+  before they reach the LLM client, which is the right behaviour for
+  the contract but breaks any "no results" search response.
+
+  Lesson captured for future initiatives: when tightening a schema,
+  always also tighten the runtime to match — schema and serialization
+  are paired contracts. The original schema-fix initiative had this
+  hinted in its description (the "nil-slice serialization" paragraph
+  added in commit 74869c9) but the agent's run started BEFORE that
+  amendment landed in main. New initiatives should be fully complete
+  at fire time; amendments-during-run lose to whatever the agent read
+  at start.
+
+  Expected pipeline outcome: 11 PR checks green; release cuts v0.1.x
+  (`fix:` patch bump). After release, `./demo/smoke-tests.sh`
+  "95% LTV: products field is [] not null" assertion flips to ✓.
+
+gate_marks:
+  - unit
+
+max_iterations: 4
