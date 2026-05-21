@@ -1,0 +1,153 @@
+# mortgages-gw-add-get-product-tool — fill the "single product lookup" gap surfaced by ChatGPT
+#
+# Surfaced 2026-05-21 during cross-provider testing: when a user asks ChatGPT
+# "show me details for product barc-res-5yr-80", there's no tool that maps
+# cleanly to that intent. ChatGPT works around it by re-running search and
+# filtering, or by pulling from prior conversation context — both brittle
+# and context-dependent.
+#
+# Fix: add a fourth MCP tool `get_product` that takes one product_id and
+# returns the same Product struct that search/compare already use. Single
+# new handler, single new test. The data backing is the existing
+# mockproducts.Find function (already used by compare_products internally).
+
+name: mortgages-gw-add-get-product-tool
+
+description: |
+  Add a `get_product` MCP tool that returns the full Product struct for
+  a single product_id. Closes the "show me details for X" gap that
+  surfaced in cross-provider ChatGPT testing.
+
+repo: leartech-mortgages-gw
+branch: agent/add-get-product-tool
+base: main
+
+goal: |
+  Add a fourth MCP tool `get_product` to the mortgages gateway. Takes
+  one product_id (string), returns the full Product struct.
+
+  ## Tool definition
+
+  ### Name + description (`internal/mcphandler/server.go`)
+
+      mcp.AddTool(server, &mcp.Tool{
+          Name:        "get_product",
+          Description: "Get full details for a single mortgage product by ID. Use this when the user wants to see one product in isolation — for comparisons of 2-5 products use compare_products, for searching the catalogue use search_products.",
+          Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
+      }, getProductHandler)
+
+  ### Input schema
+
+      type getProductInput struct {
+          ProductID string `json:"product_id"`
+      }
+
+  Required: `product_id`. No other fields.
+
+  ### Output schema
+
+      type getProductOutput struct {
+          Product mockproducts.Product `json:"product"`
+      }
+
+  Reuses the existing `mockproducts.Product` type that
+  `search_products` and `compare_products` already return.
+
+  ### Handler
+
+      func getProductHandler(ctx context.Context, req *mcp.CallToolRequest, input getProductInput) (*mcp.CallToolResult, getProductOutput, error) {
+          if input.ProductID == "" {
+              return nil, getProductOutput{}, fmt.Errorf("product_id is required")
+          }
+          p, ok := mockproducts.Find(input.ProductID)
+          if !ok {
+              return nil, getProductOutput{}, fmt.Errorf("product %q not found", input.ProductID)
+          }
+          return nil, getProductOutput{Product: p}, nil
+      }
+
+  Error messages mirror the existing `compare_products` style: clear,
+  LLM-actionable, names the missing ID verbatim.
+
+  ## Files to modify
+
+  ### `internal/mcphandler/server.go`
+
+  - Add the `getProductInput` + `getProductOutput` type declarations
+  - Add the `getProductHandler` function
+  - Add the `mcp.AddTool(server, &mcp.Tool{...}, getProductHandler)`
+    call alongside the existing 3 tool registrations
+
+  ### `internal/mcphandler/server_test.go`
+
+  Add table tests:
+
+  - `TestGetProductHandler_FoundReturnsProduct` — call with a known
+    fixture ID; assert returned product matches `mockproducts.Find` result
+  - `TestGetProductHandler_NotFoundErrors` — call with `"does-not-exist"`;
+    assert error string contains the missing ID
+  - `TestGetProductHandler_EmptyIDErrors` — call with `""`; assert error
+    contains "product_id is required"
+
+  ## Files to NOT touch
+
+  - `internal/mockproducts/products.go` — `Find` already exists, no
+    changes needed
+  - `internal/mcphandler/server.go` other tools — leave search/compare/
+    get_product_rates unchanged
+  - Dockerfile, Makefile, chart, pipelines
+
+  ## Constraints
+
+  - **One new tool only.** Don't rename existing tools, don't change
+    their signatures, don't reshape `mockproducts.Product`.
+  - **Reuse `mockproducts.Find`** — don't duplicate the lookup logic.
+  - **Same error-message style** as `compare_products` ("product
+    \"X\" not found").
+  - **Tool description must steer the LLM** — explicitly mention when
+    to use `get_product` vs `compare_products` vs `search_products`
+    in the description (LLMs use these descriptions to pick the right
+    tool from natural language).
+  - Conventional commit: `feat(mcp): add get_product tool for single-product lookup`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## What this is NOT
+
+  - Not a refactor of compare_products. Comparison stays at 2-5.
+  - Not the place to add a "get_lender" tool, "get_products_by_lender"
+    tool, etc. — single product by ID only.
+  - Not the place to expand Product struct fields. Returns what
+    search/compare return today.
+  - Not an elicitation initiative. If the user asks for "Barclays"
+    with no ID, that's a separate question for a future search-by-
+    natural-language tool.
+
+  ## Why this initiative exists
+
+  Cross-provider testing on 2026-05-21 showed both Claude Desktop and
+  ChatGPT struggle gracefully but inefficiently when asked to "show
+  me details for product X":
+
+  - Claude Desktop reconstructed from prior conversation context
+    (works only with prior search)
+  - ChatGPT re-ran `search_products` with broad criteria + filtered
+    (works but inefficient, double-roundtrip)
+  - Neither hallucinated, but both did indirect work
+
+  A direct `get_product(id)` tool means:
+
+  - Single LLM intent → single tool call → server is source of truth
+  - Works in any conversation context, with or without prior search
+  - Forms a complete CRUD-ish trio with `search_products` (browse)
+    and `compare_products` (compare). Most consumer tool catalogues
+    end up with this shape — start here, add more later.
+
+  Expected pipeline outcome: 11 PR checks green; release cuts a
+  patch or minor bump on mortgages-gw depending on the semver tag of
+  the `feat:` commit.
+  Expected agent behaviour: 3-4 turns. Smallest possible new tool.
+
+gate_marks:
+  - unit
+
+max_iterations: 4
