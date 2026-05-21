@@ -1,0 +1,208 @@
+# mortgages-gw-fix-tool-schemas — surgical schema fix surfaced by first Claude test
+#
+# First real Claude Desktop test of leartech-mortgages-gw on 2026-05-21 worked
+# perfectly for search_products (Claude correctly translated "£320k loan on
+# £400k house" to loan_amount_pounds=320000 / property_value_pounds=400000
+# and got the ranked mock list back). The follow-on `compare_products` call
+# failed: Claude refused to send the array argument because the JSON schema
+# rendered as `"type": ["null", "array"]` instead of plain `"type": "array"`.
+#
+# The Go SDK's default schema generation produces that union for slice fields
+# (nil slices marshal to JSON null). Claude's MCP client validator rejects
+# outbound calls against union types in strict mode. Curl-direct tool calls
+# work — the bug is purely client-side schema validation on Claude.
+#
+# Fix is single-purpose: make every slice-typed field render as plain `"array"`
+# (no null in the union) across input AND output schemas. ~6 fields total in
+# internal/mcphandler/server.go.
+#
+# Run with: `make initiative INITIATIVE=mortgages-gw-fix-tool-schemas`
+
+name: mortgages-gw-fix-tool-schemas
+
+description: |
+  Make MCP tool schemas render slice fields as plain `"type": "array"` instead
+  of the Go-SDK default `"type": ["null", "array"]` union. Single Go-side fix
+  in internal/mcphandler/server.go. Unblocks Claude's compare_products call
+  (and any other MCP client doing strict outbound schema validation).
+
+repo: leartech-mortgages-gw
+branch: agent/fix-tool-schemas
+base: main
+
+goal: |
+  Fix the JSON schema generation so slice-typed fields render as `"type":
+  "array"` (not `"type": ["null", "array"]`) across all three MCP tools'
+  input AND output schemas.
+
+  ## Symptom (verified 2026-05-21)
+
+  Calling `tools/list` against the deployed gateway returns schemas like:
+
+      {
+        "name": "compare_products",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "product_ids": {
+              "type": ["null", "array"],   ← THE BUG
+              "items": {"type": "string"}
+            }
+          },
+          "required": ["product_ids"]
+        }
+      }
+
+  Claude Desktop's MCP client refuses to send an outbound `tools/call` against
+  this schema (strict validation: array argument doesn't satisfy the union
+  type as Claude interprets it). Direct curl POSTs against the server work
+  fine — server-side logic is correct, only the published schema is wrong.
+
+  Same `["null", "array"]` pattern appears on every slice field in every
+  tool's input/output schema today:
+
+  - `compare_products.input.product_ids`
+  - `compare_products.output.products`
+  - `compare_products.output.table`
+  - `search_products.output.products`
+  - `get_product_rates.output.residential`
+  - `get_product_rates.output.btl`
+  - Plus nested slice fields inside those (e.g. `Product.ercs`,
+    `Product.features`, `LtvBandRates.<rateType>`, etc.)
+
+  ## Target
+
+  After this initiative lands, the same `tools/list` request returns each
+  slice field as:
+
+      {
+        "type": "array",
+        "items": {"type": "string"}
+      }
+
+  No `null` in the union. Validate by curl-probing tools/list against the
+  deployed staging URL after the release deploys.
+
+  ## How to fix
+
+  The `modelcontextprotocol/go-sdk` derives the JSON schema from the Go
+  struct definitions in `internal/mcphandler/server.go`. The `["null",
+  "array"]` union is the SDK's default for `[]T` slice fields because a
+  nil slice marshals to JSON `null`.
+
+  Three viable approaches — pick the one that's most idiomatic for the
+  go-sdk version we use, and apply consistently:
+
+  1. **jsonschema struct tags** — e.g. add `jsonschema:"type=array"` or
+     `jsonschema_extras:"type=array"` (exact tag depends on the
+     jsonschema library the SDK uses; check
+     `github.com/invopop/jsonschema` or the SDK's own conventions).
+
+  2. **Custom field types** — wrap `[]T` in a typed alias that has an
+     explicit `JSONSchema()` method returning a non-nullable array.
+
+  3. **SDK upgrade** — if the go-sdk has a newer minor version where
+     slices serialize as plain `"array"` (the SDK was at v1.6.0 when
+     the gateway was authored; check current latest).
+
+  Verify the choice by running the unit test added below + a local probe
+  of `tools/list` after `make build`.
+
+  ## Files to modify
+
+  ### `internal/mcphandler/server.go`
+
+  Update every struct field of slice type with the chosen mechanism. At
+  minimum:
+
+  - `searchProductsOutput.Products []Product`
+  - `compareProductsInput.ProductIDs []string`
+  - `compareProductsOutput.Products []Product`
+  - `compareProductsOutput.Table []ComparisonRow`
+  - `getProductRatesOutput.Residential []LtvBandRates`
+  - `getProductRatesOutput.Btl []LtvBandRates`
+
+  And the nested struct types referenced by those:
+
+  - `Product.Ercs []ERC` (where ERC is the nested struct)
+  - `Product.Features []string`
+  - `ComparisonRow.Values []string`
+
+  Find every `[]<type>` declaration in this file and apply the fix to
+  each. Verify with `grep -E '\][a-zA-Z]+' internal/mcphandler/*.go` —
+  every match should have the schema annotation.
+
+  ### `internal/mcphandler/server_test.go`
+
+  Add a single new test:
+
+  ```go
+  func TestToolSchemasHaveNoNullUnionTypes(t *testing.T) {
+      handler := New()
+      // Issue an MCP tools/list request through the handler in-process
+      // (or via httptest); parse the resulting JSON; assert no field
+      // in any inputSchema or outputSchema has `type` containing "null".
+      // Single test, single assertion, fails clearly if any field
+      // regresses to the union shape.
+  }
+  ```
+
+  If invoking the streamable HTTP handler from a Go test is awkward,
+  it's acceptable to introspect the schemas directly via whatever
+  schema-extraction helper the go-sdk exposes (e.g.
+  `mcp.Server.Tools()` or equivalent). The test's purpose is to lock
+  in the contract.
+
+  ## Files to NOT touch
+
+  - `internal/mockproducts/products.go` — mock data is fine
+  - `internal/handlers/` — REST handlers untouched
+  - `cmd/server/main.go` — mux wiring unchanged
+  - `Dockerfile`, `Makefile`, chart, pipelines — none affected by schema change
+
+  ## Constraints
+
+  - Schema-only fix. **Do NOT change tool behaviour** (same arg names,
+    same response payloads, same error semantics).
+  - **Do NOT remove the slice-field validation** on the server side. If
+    the SDK's tag approach makes a previously-required field optional,
+    re-assert it via `Required` slice in the `mcp.Tool` definition.
+  - Conventional commit: `fix(mcp): remove null from slice-field schema types`
+  - Open PR with one-paragraph description referencing the 2026-05-21
+    Claude Desktop test that surfaced this.
+  - Always post `/hold` immediately after opening the PR.
+  - Full-gate run before "Ready for client review" sticky.
+
+  ## What this is NOT
+
+  - Not an SDK rewrite. Smallest viable schema fix; don't audit the
+    whole codebase.
+  - Not the place to add new tools, elicitation, resources, or prompts —
+    those land in subsequent initiatives once we know what Claude needs
+    next (current test surfaced no other gaps).
+  - Not a refactor of the struct hierarchies — keep field names + types
+    identical, just adjust the schema annotation.
+  - Not a chance to change the mock data, response shapes, or tool
+    descriptions — Claude's reading of search_products was excellent;
+    don't touch what isn't broken.
+
+  ## Why this initiative exists
+
+  The first real Claude Desktop conversation against the deployed gateway
+  proved the protocol + tool-discovery + natural-language-to-args
+  translation + mock-data flow all work end-to-end (search_products was
+  flawless, Claude even added LTV-headroom commentary on its own
+  reasoning). The single failure mode was `compare_products` rejection
+  due to the union-type schema quirk. Fixing it unblocks the multi-turn
+  conversation pattern (search → compare → drill down) that's the
+  primary UX for the mortgages sourcing journey.
+
+  Expected pipeline outcome: all 11 PR checks pass; release cuts
+  `v0.1.1-{gcp,az}` (patch bump from `fix:` semver).
+  Expected agent behaviour: 3-4 turns (read main.go + ServerGo, identify
+  the fix mechanism, apply across fields, add the regression test).
+
+gate_marks:
+  - unit
+
+max_iterations: 5
