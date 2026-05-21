@@ -1,0 +1,128 @@
+# mortgages-gw-default-product-type — fix silently mixing BTL into residential queries
+#
+# Surfaced 2026-05-21 during direct MCP testing: calling search_products with
+# only the three required args (loan_amount_pounds, property_value_pounds,
+# term_years) and no product_type returned residential AND BTL products in
+# the same ranked list. Users (and LLMs) asking about "a mortgage for my
+# house" don't expect Buy-to-Let to silently appear in the results.
+#
+# Fix: when product_type is unset, default it to "residential". One-line
+# change in internal/mockproducts/products.go Search function.
+
+name: mortgages-gw-default-product-type
+
+description: |
+  Default `product_type` to `"residential"` when the caller doesn't specify
+  one, instead of returning a mixed residential+BTL list. Single-line fix
+  in the mock fixture's `Search` function. Improves the search_products
+  UX for the natural "find me a mortgage" prompt where the user is
+  obviously looking for residential.
+
+repo: leartech-mortgages-gw
+branch: agent/default-product-type
+
+base: main
+
+goal: |
+  When `search_products` is called without a `product_type` argument,
+  default to filtering for `residential` products only — not return
+  everything across all types.
+
+  ## Verified behaviour today (the bug)
+
+  Calling `search_products` with only the three required fields:
+
+      {
+        "loan_amount_pounds": 240000,
+        "property_value_pounds": 300000,
+        "term_years": 25
+      }
+
+  returns 3 residential products AND 1 BTL Tracker (Santander). For a
+  consumer prompt like "find me a mortgage for my house", the BTL row is
+  confusing noise.
+
+  ## Target behaviour
+
+  Same call now returns ONLY residential products (the BTL Santander
+  Tracker is filtered out). To explicitly opt into BTL, the caller passes
+  `"product_type": "btl"`. To search across types deliberately, the
+  caller passes `"product_type": "any"` (NEW sentinel — optional, see
+  constraints).
+
+  ## Files to modify
+
+  ### `internal/mockproducts/products.go`
+
+  In the `Search` function (or wherever the product_type filter logic
+  lives — likely a `match` helper), change the default-when-unset
+  behaviour:
+
+      // Before
+      if c.ProductType != "" && p.ProductType != c.ProductType {
+          continue
+      }
+
+      // After
+      productType := c.ProductType
+      if productType == "" {
+          productType = "residential"
+      }
+      if productType != "any" && p.ProductType != productType {
+          continue
+      }
+
+  Add a const for the sentinel if it improves readability:
+
+      const ProductTypeAny = "any"
+
+  ### `internal/mockproducts/products_test.go`
+
+  Add test cases:
+
+  - `TestSearch_UnsetProductType_DefaultsToResidential` — call Search
+    with `SearchCriteria{LoanAmountPounds: 240000, ...}` (no product
+    type). Assert: every result has `ProductType == "residential"`.
+  - `TestSearch_AnyProductType_ReturnsBoth` — call with
+    `ProductType: "any"`. Assert: results contain BOTH residential
+    AND btl products.
+  - `TestSearch_ExplicitBtl_ExcludesResidential` — call with
+    `ProductType: "btl"`. Assert: no residential products in result.
+
+  ## Constraints
+
+  - **One-line behavioural fix.** Don't restructure `Search`, don't
+    rename existing fields, don't change the SearchCriteria struct
+    signature.
+  - **`"any"` sentinel is OPTIONAL.** If the existing fixture/tests
+    don't need it, skip — just default to `"residential"` when empty.
+    Mention in the PR description either way.
+  - **Update tool descriptions** in `internal/mcphandler/server.go`
+    only if the existing `search_products` description claims "returns
+    all types when unset". If it just says "search the product
+    catalogue", no change needed.
+  - Conventional commit: `fix(search): default product_type to residential when unset`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## What this is NOT
+
+  - Not a refactor of `Search` — keep the filtering logic shape
+  - Not the place to fix the residential-tracker-missing fixture gap
+    (separate initiative if/when needed)
+  - Not the place to change the ranking — that's the 5yr-total-cost
+    discussion deferred to real-data port
+  - Not the place to change error messages or schemas — separate
+    initiatives handle those
+
+  ## Why this initiative exists
+
+  Surfaced during direct MCP testing on 2026-05-21 — see the chat
+  notes. With `product_type` unset, asking a natural-language LLM to
+  "find me a 5-year fixed for £240k on a £300k house" silently mixes
+  BTL into the result list. Residential default is what 95% of
+  consumer flows expect.
+
+gate_marks:
+  - unit
+
+max_iterations: 4
