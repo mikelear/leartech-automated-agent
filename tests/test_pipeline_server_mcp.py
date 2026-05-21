@@ -47,12 +47,16 @@ def test_first_failure_short_circuits_immediately() -> None:
         ],
     ]
     with patch('gate.mcp_servers.pipeline_server.list_pr_checks', side_effect=sequence):
-        result = asyncio.run(_wait_handler({
-            'repo': 'leartech-auth-ui',
-            'pr_number': 99,
-            'timeout_seconds': 60,
-            'poll_seconds': 1,
-        }))
+        result = asyncio.run(
+            _wait_handler(
+                {
+                    'repo': 'leartech-auth-ui',
+                    'pr_number': 99,
+                    'timeout_seconds': 60,
+                    'poll_seconds': 1,
+                }
+            )
+        )
 
     payload = _payload(result)
     assert payload['status'] == 'first_failure'
@@ -70,12 +74,16 @@ def test_all_pass_returns_when_every_check_terminal_success() -> None:
         [_check('az', 'lint', 'SUCCESS'), _check('gcp', 'lint', 'SUCCESS')],
     ]
     with patch('gate.mcp_servers.pipeline_server.list_pr_checks', side_effect=sequence):
-        result = asyncio.run(_wait_handler({
-            'repo': 'leartech-auth-ui',
-            'pr_number': 99,
-            'timeout_seconds': 60,
-            'poll_seconds': 1,
-        }))
+        result = asyncio.run(
+            _wait_handler(
+                {
+                    'repo': 'leartech-auth-ui',
+                    'pr_number': 99,
+                    'timeout_seconds': 60,
+                    'poll_seconds': 1,
+                }
+            )
+        )
 
     payload = _payload(result)
     assert payload['status'] == 'all_passed'
@@ -88,12 +96,16 @@ def test_timeout_returns_status_with_last_seen_checks() -> None:
     constant_pending = [_check('az', 'lint', 'PENDING')]
 
     with patch('gate.mcp_servers.pipeline_server.list_pr_checks', return_value=constant_pending):
-        result = asyncio.run(_wait_handler({
-            'repo': 'leartech-auth-ui',
-            'pr_number': 99,
-            'timeout_seconds': 1,  # very short — make the test fast
-            'poll_seconds': 1,
-        }))
+        result = asyncio.run(
+            _wait_handler(
+                {
+                    'repo': 'leartech-auth-ui',
+                    'pr_number': 99,
+                    'timeout_seconds': 1,  # very short — make the test fast
+                    'poll_seconds': 1,
+                }
+            )
+        )
 
     payload = _payload(result)
     assert payload['status'] == 'timeout'
@@ -108,12 +120,16 @@ def test_error_state_counts_as_failure() -> None:
         [_check('az', 'pr', 'ERROR'), _check('gcp', 'pr', 'PENDING')],
     ]
     with patch('gate.mcp_servers.pipeline_server.list_pr_checks', side_effect=sequence):
-        result = asyncio.run(_wait_handler({
-            'repo': 'leartech-auth-ui',
-            'pr_number': 99,
-            'timeout_seconds': 60,
-            'poll_seconds': 1,
-        }))
+        result = asyncio.run(
+            _wait_handler(
+                {
+                    'repo': 'leartech-auth-ui',
+                    'pr_number': 99,
+                    'timeout_seconds': 60,
+                    'poll_seconds': 1,
+                }
+            )
+        )
 
     payload = _payload(result)
     assert payload['status'] == 'first_failure'
@@ -126,10 +142,14 @@ def test_poll_seconds_floor_prevents_busy_loop() -> None:
     # the function accepts a too-small value without crashing.
     sequence = [[_check('az', 'lint', 'FAILURE')]]
     with patch('gate.mcp_servers.pipeline_server.list_pr_checks', side_effect=sequence):
-        result = asyncio.run(_wait_handler({
-            'repo': 'leartech-auth-ui',
-            'pr_number': 99,
-            'timeout_seconds': 60,
-            'poll_seconds': 1,  # below the 5s floor — should still work
-        }))
+        result = asyncio.run(
+            _wait_handler(
+                {
+                    'repo': 'leartech-auth-ui',
+                    'pr_number': 99,
+                    'timeout_seconds': 60,
+                    'poll_seconds': 1,  # below the 5s floor — should still work
+                }
+            )
+        )
     assert _payload(result)['status'] == 'first_failure'

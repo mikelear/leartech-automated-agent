@@ -58,14 +58,24 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
     try:
         result = subprocess.run(
             [
-                'gh', 'pr', 'list',
-                '--repo', qualified_repo,
-                '--head', branch,
-                '--state', 'open',
-                '--json', 'number',
-                '--limit', '1',
+                'gh',
+                'pr',
+                'list',
+                '--repo',
+                qualified_repo,
+                '--head',
+                branch,
+                '--state',
+                'open',
+                '--json',
+                'number',
+                '--limit',
+                '1',
             ],
-            capture_output=True, text=True, check=False, timeout=10,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
         )
         if result.returncode != 0:
             return None
@@ -76,6 +86,7 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
         return int(number) if number is not None else None
     except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
         return None
+
 
 # 60 → 150 → 1000. Token cost is acceptable; rabbit-hole detection (the agent
 # burning turns on the same criterion) will land as a separate circuit-breaker

@@ -1,18 +1,24 @@
-"""SQLAlchemy 2.0 models — DB-backed initiative catalogue.
+"""SQLAlchemy 2.0 models — DB-backed initiative catalogue and run store.
 
-One table for now: `initiative_catalog`. Stores the raw YAML so the schema
-is evolution-free — the loader parses on read using the same pydantic model
-that consumes filesystem YAML. Trades query convenience for schema stability.
+Two tables:
+- `initiative_catalog` — initiative DEFINITIONS (raw YAML). Shipped in PR #21.
+- `initiative_runs`    — initiative EXECUTIONS (one row per run + outcome).
 
-If future endpoints need filtering by repo/branch/etc., parse the YAML in
-the application layer or add a generated column. Don't normalise.
+Stores raw YAML in the catalog so the schema is evolution-free. The runs
+table has typed columns — querying by status/initiative/date is a common
+operational need.
+
+If future endpoints need filtering by repo/branch/etc. in the catalog,
+parse the YAML in the application layer or add a generated column. Don't
+normalise.
 """
 
 from __future__ import annotations
 
 from datetime import datetime
+from decimal import Decimal
 
-from sqlalchemy import DateTime, String, Text, func
+from sqlalchemy import DateTime, Integer, Numeric, String, Text, func
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -59,3 +65,43 @@ class InitiativeRow(Base):
 
     def __repr__(self) -> str:
         return f'InitiativeRow(name={self.name!r}, updated_at={self.updated_at.isoformat()})'
+
+
+class InitiativeRunRow(Base):
+    """One row per initiative execution.
+
+    Tracks status, timing, and outcome so run history survives pod restarts.
+    `initiative_catalog` stores DEFINITIONS; this stores EXECUTIONS.
+
+    `id` is a 12-char hex UUID (matches `app.state.new_id()` — the same ID
+    flows through the REST API, asyncio.Task, and DB row).
+
+    Status lifecycle:
+      queued → running → complete | failed | cancelled
+      queued | running → orphaned  (pod died; reconcile on next startup)
+      running → timed_out          (future: max_runtime exceeded)
+    """
+
+    __tablename__ = 'initiative_runs'
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    initiative: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pr_repo: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    turns: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    cost_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 4), nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    cluster: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    def __repr__(self) -> str:
+        return f'InitiativeRunRow(id={self.id!r}, status={self.status!r})'

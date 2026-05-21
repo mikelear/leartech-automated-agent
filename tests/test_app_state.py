@@ -2,6 +2,10 @@
 
 Tests the state primitives directly (no HTTP layer). Concurrency tests
 use real asyncio.Tasks against a no-op coroutine.
+
+State functions are now async (write-through-DB path). In these tests no
+DSN is set, so all operations use the in-memory fallback — same behaviour
+as before, just needs `await`.
 """
 
 from __future__ import annotations
@@ -33,8 +37,9 @@ def test_now_returns_timezone_aware_utc() -> None:
     assert ts.tzinfo is not None, 'expected timezone-aware datetime'
 
 
-def test_get_unknown_id_returns_none() -> None:
-    assert get('does-not-exist-xxx') is None
+@pytest.mark.asyncio
+async def test_get_unknown_id_returns_none() -> None:
+    assert await get('does-not-exist-xxx') is None
 
 
 @pytest.mark.asyncio
@@ -51,8 +56,8 @@ async def test_register_and_get_round_trip() -> None:
         status='queued',
         started_at=now(),
     )
-    register(record, task)
-    retrieved = get(initiative_id)
+    await register(record, task)
+    retrieved = await get(initiative_id)
     assert retrieved is not None
     assert retrieved.id == initiative_id
     assert retrieved.status == 'queued'
@@ -67,16 +72,16 @@ async def test_update_replaces_fields() -> None:
         return 0
 
     task = asyncio.create_task(noop())
-    register(
+    await register(
         InitiativeRecord(id=initiative_id, initiative='i', status='queued', started_at=now()),
         task,
     )
-    update(initiative_id, status='running')
-    retrieved = get(initiative_id)
+    await update(initiative_id, status='running')
+    retrieved = await get(initiative_id)
     assert retrieved is not None
     assert retrieved.status == 'running'
-    update(initiative_id, status='complete', turns=42, cost_usd=1.23)
-    retrieved = get(initiative_id)
+    await update(initiative_id, status='complete', turns=42, cost_usd=1.23)
+    retrieved = await get(initiative_id)
     assert retrieved is not None
     assert retrieved.status == 'complete'
     assert retrieved.turns == 42
@@ -84,9 +89,10 @@ async def test_update_replaces_fields() -> None:
     await task
 
 
-def test_update_unknown_id_is_noop() -> None:
+@pytest.mark.asyncio
+async def test_update_unknown_id_is_noop() -> None:
     # Should not raise; just silently does nothing.
-    update('unknown-id', status='something')
+    await update('unknown-id', status='something')
 
 
 @pytest.mark.asyncio
@@ -98,18 +104,19 @@ async def test_cancel_running_task_returns_true() -> None:
         return 0
 
     task = asyncio.create_task(slow())
-    register(
+    await register(
         InitiativeRecord(id=initiative_id, initiative='i', status='running', started_at=now()),
         task,
     )
-    cancelled = cancel(initiative_id)
+    cancelled = await cancel(initiative_id)
     assert cancelled is True
     with pytest.raises(asyncio.CancelledError):
         await task
 
 
-def test_cancel_unknown_id_returns_false() -> None:
-    assert cancel('unknown-id-xxx') is False
+@pytest.mark.asyncio
+async def test_cancel_unknown_id_returns_false() -> None:
+    assert await cancel('unknown-id-xxx') is False
 
 
 @pytest.mark.asyncio
@@ -121,30 +128,28 @@ async def test_cancel_already_done_task_returns_false() -> None:
 
     task = asyncio.create_task(quick())
     await task  # Let it complete.
-    register(
+    await register(
         InitiativeRecord(id=initiative_id, initiative='i', status='complete', started_at=now()),
         task,
     )
-    assert cancel(initiative_id) is False
+    assert await cancel(initiative_id) is False
 
 
-def test_list_records_includes_registered_records() -> None:
-    snapshot_count_before = len(list_records())
+@pytest.mark.asyncio
+async def test_list_records_includes_registered_records() -> None:
+    snapshot_count_before = len(await list_records())
 
     async def noop() -> int:
         return 0
 
-    asyncio.set_event_loop(asyncio.new_event_loop())
-    loop = asyncio.get_event_loop()
-    task = loop.create_task(noop())
+    task = asyncio.create_task(noop())
     record = InitiativeRecord(
         id=new_id(),
         initiative='listcheck',
         status='queued',
         started_at=now(),
     )
-    register(record, task)
-    snapshot_count_after = len(list_records())
+    await register(record, task)
+    snapshot_count_after = len(await list_records())
     assert snapshot_count_after > snapshot_count_before
-    loop.run_until_complete(task)
-    loop.close()
+    await task

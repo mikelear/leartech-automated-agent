@@ -1,15 +1,17 @@
 """Initiative endpoints — start, status, list, cancel.
 
-Phase B v1.5: actual async execution wired. Each POST /initiatives spawns
-an asyncio.Task that runs `gate.agent.initiative.run_initiative`. State
-lives in `app.state` (in-memory, lost on restart — see that module's
-docstring for the v2 plan).
+Phase B v2: async state ops wired through write-through-DB. Each
+POST /initiatives spawns an asyncio.Task that runs
+`gate.agent.initiative.run_initiative`. State lives in `app.state` —
+durable in Postgres when `LEARTECH_INITIATIVE_DB_DSN` is set, in-memory
+fallback when not (dev/CI/preview).
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException
@@ -36,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+# CLUSTER identifies which Kubernetes cluster this service instance runs on.
+# Set via the chart's Deployment env — falls back to 'unknown' in local/CI runs.
+_CLUSTER = os.environ.get('CLUSTER', 'unknown')
+
 
 def _initiatives_dir() -> Path:
     """Where YAML initiatives live. Configurable via env in a later slice."""
@@ -55,10 +61,10 @@ class StartInitiativeRequest(BaseModel):
 
 async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
     """Background task body — runs the initiative, updates state on completion."""
-    update(initiative_id, status='running')
+    await update(initiative_id, status='running')
     try:
         summary = await run_initiative(yaml_path)
-        update(
+        await update(
             initiative_id,
             status='complete' if summary.exit_code == 0 else 'failed',
             finished_at=now(),
@@ -68,11 +74,11 @@ async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
         )
         logger.info('initiative %s finished with exit_code=%d', initiative_id, summary.exit_code)
     except asyncio.CancelledError:
-        update(initiative_id, status='cancelled', finished_at=now())
+        await update(initiative_id, status='cancelled', finished_at=now())
         logger.info('initiative %s cancelled', initiative_id)
         raise
     except Exception as exc:  # noqa: BLE001 — we want to surface any agent failure to the consumer
-        update(initiative_id, status='failed', error=str(exc), finished_at=now())
+        await update(initiative_id, status='failed', error=str(exc), finished_at=now())
         logger.exception('initiative %s failed', initiative_id)
 
 
@@ -92,7 +98,7 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         )
 
     try:
-        load_initiative(yaml_path)
+        loaded = load_initiative(yaml_path)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
 
@@ -102,9 +108,11 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         initiative=request.initiative,
         status='queued',
         started_at=now(),
+        pr_repo=loaded.primary.qualified_repo,
+        cluster=_CLUSTER,
     )
     task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
-    register(record, task)
+    await register(record, task)
     logger.info('initiative %s queued: %s', initiative_id, request.initiative)
     return record
 
@@ -112,13 +120,13 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
 @router.get('', response_model=list[InitiativeRecord])
 async def list_initiatives() -> list[InitiativeRecord]:
     """List all initiatives this process has seen — running, complete, or terminal."""
-    return list_records()
+    return await list_records()
 
 
 @router.get('/{initiative_id}', response_model=InitiativeRecord)
 async def get_initiative_status(initiative_id: str) -> InitiativeRecord:
     """Get current status of a queued / running / completed initiative."""
-    record = get_record(initiative_id)
+    record = await get_record(initiative_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
     return record
@@ -127,18 +135,18 @@ async def get_initiative_status(initiative_id: str) -> InitiativeRecord:
 @router.post('/{initiative_id}/cancel', response_model=InitiativeRecord)
 async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
     """Request cancellation of a running initiative. Idempotent for terminal records."""
-    record = get_record(initiative_id)
+    record = await get_record(initiative_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
 
-    cancelled = cancel_initiative_task(initiative_id)
+    cancelled = await cancel_initiative_task(initiative_id)
     if not cancelled and record.status not in {'cancelled', 'complete', 'failed'}:
         raise HTTPException(
             status_code=409,
             detail=f'Initiative {initiative_id!r} is in status {record.status!r}; cannot cancel',
         )
 
-    refreshed = get_record(initiative_id)
+    refreshed = await get_record(initiative_id)
     if refreshed is None:  # pragma: no cover — record was just confirmed above
         raise HTTPException(status_code=500, detail='Record disappeared between get and refresh')
     return refreshed

@@ -144,11 +144,14 @@ def test_endpoints_return_503_when_db_disabled(client_no_db: TestClient) -> None
 
 
 def test_create_and_list(client_with_db: TestClient) -> None:
-    resp = client_with_db.post('/initiatives/catalog', json={
-        'name': 'test-initiative-x',
-        'yaml_body': VALID_YAML,
-        'description': 'roundtrip via REST',
-    })
+    resp = client_with_db.post(
+        '/initiatives/catalog',
+        json={
+            'name': 'test-initiative-x',
+            'yaml_body': VALID_YAML,
+            'description': 'roundtrip via REST',
+        },
+    )
     assert resp.status_code == 201, resp.text
     body = resp.json()
     assert body['name'] == 'test-initiative-x'
@@ -161,20 +164,26 @@ def test_create_and_list(client_with_db: TestClient) -> None:
 
 
 def test_create_rejects_invalid_yaml(client_with_db: TestClient) -> None:
-    resp = client_with_db.post('/initiatives/catalog', json={
-        'name': 'broken',
-        'yaml_body': 'this is not valid yaml: [unclosed',
-    })
+    resp = client_with_db.post(
+        '/initiatives/catalog',
+        json={
+            'name': 'broken',
+            'yaml_body': 'this is not valid yaml: [unclosed',
+        },
+    )
     assert resp.status_code == 422
     assert 'Invalid initiative YAML' in resp.json()['detail']
 
 
 def test_create_rejects_name_mismatch(client_with_db: TestClient) -> None:
     """If the YAML's `name:` doesn't match the API-supplied name, 422."""
-    resp = client_with_db.post('/initiatives/catalog', json={
-        'name': 'api-said-this',
-        'yaml_body': VALID_YAML,  # has name: test-initiative-x inside
-    })
+    resp = client_with_db.post(
+        '/initiatives/catalog',
+        json={
+            'name': 'api-said-this',
+            'yaml_body': VALID_YAML,  # has name: test-initiative-x inside
+        },
+    )
     assert resp.status_code == 422
     assert 'name:' in resp.json()['detail']
 
@@ -197,9 +206,13 @@ def test_update_404(client_with_db: TestClient) -> None:
 
 
 def test_delete_204_and_then_404(client_with_db: TestClient) -> None:
-    client_with_db.post('/initiatives/catalog', json={
-        'name': 'test-initiative-x', 'yaml_body': VALID_YAML,
-    })
+    client_with_db.post(
+        '/initiatives/catalog',
+        json={
+            'name': 'test-initiative-x',
+            'yaml_body': VALID_YAML,
+        },
+    )
     resp = client_with_db.delete('/initiatives/catalog/test-initiative-x')
     assert resp.status_code == 204
     # Second delete: 404

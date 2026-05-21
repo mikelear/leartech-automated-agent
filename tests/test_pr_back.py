@@ -34,12 +34,12 @@ def _proc(returncode: int = 0, stdout: str = '', stderr: str = '') -> MagicMock:
 async def test_open_yaml_change_pr_runs_expected_commands() -> None:
     """Assert clone, checkout -b, add, commit, push, gh pr create are all called."""
     procs = [
-        _proc(0),                    # gh repo clone
-        _proc(0),                    # git checkout -b
-        _proc(0),                    # git add
-        _proc(0),                    # git commit
-        _proc(0),                    # git push
-        _proc(0, stdout=_PR_URL),    # gh pr create
+        _proc(0),  # gh repo clone
+        _proc(0),  # git checkout -b
+        _proc(0),  # git add
+        _proc(0),  # git commit
+        _proc(0),  # git push
+        _proc(0, stdout=_PR_URL),  # gh pr create
     ]
 
     with patch('asyncio.create_subprocess_exec', new_callable=AsyncMock, side_effect=procs) as mock_exec:
@@ -101,11 +101,11 @@ async def test_open_yaml_change_pr_parses_pr_url() -> None:
     """Feed canned gh pr create output; assert pr_url == URL and pr_number == 42."""
     url_with_newline = _PR_URL + '\n'
     procs = [
-        _proc(0),                           # gh repo clone
-        _proc(0),                           # git checkout -b
-        _proc(0),                           # git add
-        _proc(0),                           # git commit
-        _proc(0),                           # git push
+        _proc(0),  # gh repo clone
+        _proc(0),  # git checkout -b
+        _proc(0),  # git add
+        _proc(0),  # git commit
+        _proc(0),  # git push
         _proc(0, stdout=url_with_newline),  # gh pr create — trailing newline is typical
     ]
 
@@ -121,20 +121,20 @@ async def test_open_yaml_change_pr_parses_pr_url() -> None:
             pr_body=_BODY,
         )
 
-    assert result['pr_url'] == _PR_URL       # trailing newline stripped
-    assert result['pr_number'] == 42          # parsed from /pull/42
+    assert result['pr_url'] == _PR_URL  # trailing newline stripped
+    assert result['pr_number'] == 42  # parsed from /pull/42
     assert result['branch'] == _BRANCH
 
 
 async def test_open_yaml_change_pr_propagates_gh_errors() -> None:
     """Simulate gh pr create failure; assert RuntimeError raised with the stderr message."""
     procs = [
-        _proc(0),                                           # gh repo clone
-        _proc(0),                                           # git checkout -b
-        _proc(0),                                           # git add
-        _proc(0),                                           # git commit
-        _proc(0),                                           # git push
-        _proc(1, stderr='HTTP 422 Unprocessable Entity'),   # gh pr create fails
+        _proc(0),  # gh repo clone
+        _proc(0),  # git checkout -b
+        _proc(0),  # git add
+        _proc(0),  # git commit
+        _proc(0),  # git push
+        _proc(1, stderr='HTTP 422 Unprocessable Entity'),  # gh pr create fails
     ]
 
     with patch('asyncio.create_subprocess_exec', new_callable=AsyncMock, side_effect=procs):

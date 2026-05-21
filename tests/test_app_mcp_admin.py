@@ -32,40 +32,52 @@ def _clear_catalog_cache() -> Iterator[None]:
 
 
 def test_post_mcps_sdk_requires_builder() -> None:
-    resp = client.post('/mcps', json={
-        'name': 'new-sdk-mcp',
-        'type': 'sdk',
-        'description': 'Test SDK MCP without builder',
-    })
+    resp = client.post(
+        '/mcps',
+        json={
+            'name': 'new-sdk-mcp',
+            'type': 'sdk',
+            'description': 'Test SDK MCP without builder',
+        },
+    )
     assert resp.status_code == 422
 
 
 def test_post_mcps_stdio_requires_command() -> None:
-    resp = client.post('/mcps', json={
-        'name': 'new-stdio-mcp',
-        'type': 'stdio',
-        'description': 'Test stdio MCP without command',
-    })
+    resp = client.post(
+        '/mcps',
+        json={
+            'name': 'new-stdio-mcp',
+            'type': 'stdio',
+            'description': 'Test stdio MCP without command',
+        },
+    )
     assert resp.status_code == 422
 
 
 def test_post_mcps_http_sse_requires_url() -> None:
-    resp = client.post('/mcps', json={
-        'name': 'new-sse-mcp',
-        'type': 'http_sse',
-        'description': 'Test http_sse MCP without url',
-    })
+    resp = client.post(
+        '/mcps',
+        json={
+            'name': 'new-sse-mcp',
+            'type': 'http_sse',
+            'description': 'Test http_sse MCP without url',
+        },
+    )
     assert resp.status_code == 422
 
 
 def test_post_mcps_rejects_duplicate_name() -> None:
     # leartech-pipeline is already in the committed catalog
-    resp = client.post('/mcps', json={
-        'name': 'leartech-pipeline',
-        'type': 'sdk',
-        'builder': 'some.module:some_fn',
-        'description': 'Duplicate attempt',
-    })
+    resp = client.post(
+        '/mcps',
+        json={
+            'name': 'leartech-pipeline',
+            'type': 'sdk',
+            'builder': 'some.module:some_fn',
+            'description': 'Duplicate attempt',
+        },
+    )
     assert resp.status_code == 409
     assert 'leartech-pipeline' in resp.json()['detail']
 
@@ -76,12 +88,15 @@ def test_post_mcps_opens_pr_on_valid() -> None:
         new_callable=AsyncMock,
         return_value=_MOCK_PR,
     ) as mock_pr:
-        resp = client.post('/mcps', json={
-            'name': 'brand-new-mcp',
-            'type': 'sdk',
-            'builder': 'some.module:build_fn',
-            'description': 'A brand new test MCP',
-        })
+        resp = client.post(
+            '/mcps',
+            json={
+                'name': 'brand-new-mcp',
+                'type': 'sdk',
+                'builder': 'some.module:build_fn',
+                'description': 'A brand new test MCP',
+            },
+        )
 
     assert resp.status_code == 201
     body = resp.json()
@@ -113,14 +128,16 @@ def test_delete_mcps_409_if_role_uses_it() -> None:
 
 def test_delete_mcps_opens_pr_on_valid() -> None:
     # Use a synthetic catalog where 'orphan-mcp' exists but no role references it
-    synthetic_catalog = Catalog.model_validate({
-        'mcp_servers': {
-            'orphan-mcp': {'type': 'stdio', 'command': 'foo', 'description': 'unreferenced'},
-        },
-        'roles': {
-            'review_agent': {'description': 'test role', 'mcps': [], 'tools': []},
-        },
-    })
+    synthetic_catalog = Catalog.model_validate(
+        {
+            'mcp_servers': {
+                'orphan-mcp': {'type': 'stdio', 'command': 'foo', 'description': 'unreferenced'},
+            },
+            'roles': {
+                'review_agent': {'description': 'test role', 'mcps': [], 'tools': []},
+            },
+        }
+    )
     synthetic_raw: dict[str, object] = {
         'mcp_servers': {
             'orphan-mcp': {'type': 'stdio', 'command': 'foo', 'description': 'unreferenced'},

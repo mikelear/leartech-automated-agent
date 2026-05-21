@@ -51,8 +51,14 @@ async def open_yaml_change_pr(
 
         # Clone the target repo into a fresh subdirectory
         rc, _, stderr = await _run(
-            'gh', 'repo', 'clone', qualified, clone_dir,
-            '--', '--depth=1', f'--branch={base_branch}',
+            'gh',
+            'repo',
+            'clone',
+            qualified,
+            clone_dir,
+            '--',
+            '--depth=1',
+            f'--branch={base_branch}',
         )
         if rc != 0:
             raise RuntimeError(f'gh repo clone failed: {stderr.strip()}')
@@ -84,12 +90,19 @@ async def open_yaml_change_pr(
 
         # Open the PR
         rc, stdout, stderr = await _run(
-            'gh', 'pr', 'create',
-            '--repo', qualified,
-            '--base', base_branch,
-            '--head', new_branch,
-            '--title', pr_title,
-            '--body', pr_body,
+            'gh',
+            'pr',
+            'create',
+            '--repo',
+            qualified,
+            '--base',
+            base_branch,
+            '--head',
+            new_branch,
+            '--title',
+            pr_title,
+            '--body',
+            pr_body,
             cwd=clone_dir,
         )
         if rc != 0:
