@@ -88,6 +88,56 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
         return None
 
 
+def _build_crash_sticky_body(
+    *,
+    reason: str,
+    turn_count: int,
+    max_turns: int,
+    cost: float | None,
+    hint: str,
+) -> str:
+    """Render the crash-sticky markdown. The marker lets future tooling find it."""
+    cost_str = f'${cost:.4f}' if cost is not None else 'unknown'
+    return (
+        '<!-- leartech-agent-run -->\n'
+        f'## ⚠ Agent run did not complete\n\n'
+        f'**Reason**: {reason}\n\n'
+        f'**Turns**: {turn_count}/{max_turns}  •  **Cost so far**: {cost_str}\n\n'
+        f'{hint}\n'
+    )
+
+
+def _post_crash_sticky(*, qualified_repo: str, pr_number: int | None, body: str) -> None:
+    """Best-effort: post a crash sticky to the PR.
+
+    Called only from the harness's exception branches when the agent never reached
+    its own step-11 sticky. Tolerates every failure mode (no PR, no network, gh
+    auth issue) — we're already in an error path, so any secondary failure here is
+    logged to stderr and swallowed.
+    """
+    if pr_number is None:
+        click.echo('  (crash sticky skipped: no open PR resolved for this branch)', err=True)
+        return
+    try:
+        result = subprocess.run(
+            [
+                'gh', 'pr', 'comment', str(pr_number),
+                '-R', qualified_repo,
+                '--body', body,
+            ],
+            capture_output=True, text=True, check=False, timeout=15,
+        )
+        if result.returncode != 0:
+            click.echo(
+                f'  (crash sticky post failed: gh exit {result.returncode}: {result.stderr.strip()})',
+                err=True,
+            )
+        else:
+            click.echo(f'  → crash sticky posted to PR #{pr_number}', err=True)
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        click.echo(f'  (crash sticky post errored: {exc})', err=True)
+
+
 # 60 → 150 → 1000. Token cost is acceptable; rabbit-hole detection (the agent
 # burning turns on the same criterion) will land as a separate circuit-breaker
 # slice. Until then, prefer "let the agent finish" over "cap and re-fire".
@@ -214,6 +264,7 @@ async def run_initiative(
     exit_code = 0
     last_turn_count = 0
     last_cost: float | None = None
+    crash_sticky_body: str | None = None
     try:
         async for message in query(prompt=user_prompt, options=options):
             if isinstance(message, AssistantMessage):
@@ -245,6 +296,8 @@ async def run_initiative(
         # `max_turns` is reached (see issue #913) AND for genuine transport errors. We use
         # the most recent ResultMessage's `num_turns` to distinguish: if we got close to
         # the cap, it's almost certainly a cap-hit; otherwise it's a real crash.
+        # In either case the agent never reached its own step-11 sticky, so the harness
+        # posts a crash sticky itself once we've resolved the PR number below.
         if last_turn_count >= max_turns:
             click.echo(
                 click.style(
@@ -259,6 +312,17 @@ async def run_initiative(
                 err=True,
             )
             exit_code = 2
+            crash_sticky_body = _build_crash_sticky_body(
+                reason=f'hit the `max_turns` ceiling ({max_turns}).',
+                turn_count=last_turn_count,
+                max_turns=max_turns,
+                cost=last_cost,
+                hint=(
+                    'Substantive work is likely already pushed (this PR\'s commits). '
+                    'Re-fire is idempotent — the agent detects the existing branch + PR. '
+                    'For more headroom, re-run with `--max-turns 250`.'
+                ),
+            )
         else:
             click.echo(
                 click.style(
@@ -269,8 +333,24 @@ async def run_initiative(
                 err=True,
             )
             exit_code = 1
+            crash_sticky_body = _build_crash_sticky_body(
+                reason=f'SDK crashed unexpectedly: `{exc}`',
+                turn_count=last_turn_count,
+                max_turns=max_turns,
+                cost=last_cost,
+                hint=(
+                    'Substantive work may already be pushed (this PR\'s commits). '
+                    'Re-fire is idempotent — the agent detects the existing branch + PR.'
+                ),
+            )
 
     pr_number = _resolve_pr_number(primary.qualified_repo, primary.branch)
+    if crash_sticky_body is not None:
+        _post_crash_sticky(
+            qualified_repo=primary.qualified_repo,
+            pr_number=pr_number,
+            body=crash_sticky_body,
+        )
 
     return RunSummary(
         exit_code=exit_code,
