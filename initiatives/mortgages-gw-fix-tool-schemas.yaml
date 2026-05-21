@@ -26,6 +26,15 @@ description: |
   in internal/mcphandler/server.go. Unblocks Claude's compare_products call
   (and any other MCP client doing strict outbound schema validation).
 
+  Same fix should also address the runtime serialization quirk surfaced
+  2026-05-21: when a slice field has no results (e.g. search_products
+  with criteria that match nothing), the response currently returns
+  `{"products": null}` rather than `{"products": []}`. Both are
+  symptoms of the same Go-side `[]T` zero-value-is-nil pattern. The
+  jsonschema-tag or non-pointer-slice fix that yields plain `"array"`
+  in the schema should also yield `[]` in the JSON body. Verify both
+  in the regression test.
+
 repo: leartech-mortgages-gw
 branch: agent/fix-tool-schemas
 base: main
