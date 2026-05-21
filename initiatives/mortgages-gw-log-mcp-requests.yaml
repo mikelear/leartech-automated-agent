@@ -1,0 +1,154 @@
+# mortgages-gw-log-mcp-requests — surface MCP traffic in the gateway logs
+#
+# Surfaced 2026-05-21 while preparing a live demo: the gin request-logging
+# middleware doesn't see /mcp requests because the MCP handler is mounted on
+# `http.ServeMux` separately from gin. Audience watching `kubectl logs -f` sees
+# only health probes when Claude makes tool calls.
+#
+# Fix: wrap the MCP handler with a thin logging middleware that emits the same
+# `INF request method=POST path=/mcp status=N duration=D` log line shape gin
+# produces. ~10 lines of Go in cmd/server/main.go. No behaviour change.
+
+name: mortgages-gw-log-mcp-requests
+
+description: |
+  Add a request-logging middleware around the MCP handler so /mcp traffic
+  appears in the gateway logs alongside /health/* and /api/v1/* requests.
+  Currently MCP requests are silent — only the gin-routed REST endpoints
+  log. Demo-relevant for showing live tool calls landing in real time.
+
+repo: leartech-mortgages-gw
+branch: agent/log-mcp-requests
+base: main
+
+goal: |
+  Surface every /mcp request in the gateway's structured log output, in the
+  same shape as the existing gin request logger.
+
+  ## Target log line shape
+
+  Match the existing gin format (zerolog ConsoleWriter):
+
+      INF request client_ip=<ip> duration=<sec> method=POST path=/mcp status=<code>
+
+  Same level (INF), same fields, same key order. Audience watching
+  `kubectl logs -f -l app.kubernetes.io/name=leartech-mortgages-gw` should
+  see one line per MCP call indistinguishable in style from gin's lines.
+
+  ## Files to modify
+
+  ### `cmd/server/main.go`
+
+  In `run()`, the MCP handler is currently mounted on the http.ServeMux
+  alongside gin. Wrap it with a small logging middleware before mounting:
+
+      // mcpHandler := mcphandler.New()
+      mcpHandler := withRequestLogging(mcphandler.New())
+      mux.Handle("/mcp", mcpHandler)
+      mux.Handle("/mcp/", mcpHandler)
+
+  Add the middleware function in the same file (or a new internal helper —
+  pick whichever fits the file's existing organisation):
+
+      func withRequestLogging(next http.Handler) http.Handler {
+          return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+              start := time.Now()
+              rw := &statusRecorder{ResponseWriter: w, status: 200}
+              next.ServeHTTP(rw, r)
+              log.Info().
+                  Str("client_ip", clientIP(r)).
+                  Dur("duration", time.Since(start)).
+                  Str("method", r.Method).
+                  Str("path", r.URL.Path).
+                  Int("status", rw.status).
+                  Msg("request")
+          })
+      }
+
+      type statusRecorder struct {
+          http.ResponseWriter
+          status int
+      }
+
+      func (s *statusRecorder) WriteHeader(code int) {
+          s.status = code
+          s.ResponseWriter.WriteHeader(code)
+      }
+
+      // clientIP returns the best-effort caller IP. Mirror however the
+      // existing gin middleware extracts it (likely r.RemoteAddr trimmed
+      // of port, or X-Forwarded-For if behind an ingress).
+      func clientIP(r *http.Request) string { /* mirror gin's logic */ }
+
+  If a similar middleware already exists in `leartech-go-common` (likely;
+  every leartech Go service has structured request logging), use that
+  instead and adapt the wiring. Don't reinvent if a shared helper is
+  available — check `github.com/mikelear/leartech-go-common/pkg/httplog`
+  or similar packages before writing new code.
+
+  ### `cmd/server/main_test.go` (or wherever main tests live)
+
+  Add a single test:
+
+  - Construct the wrapped handler over a stub `http.Handler` that writes
+    a known status code
+  - Capture the zerolog output via a bytes.Buffer
+  - Send a synthetic httptest request
+  - Assert the log output contains `method=POST`, `path=/mcp`,
+    `status=<expected>`, and a non-zero `duration`
+
+  Single test, single purpose. Keeps the contract locked.
+
+  ## Files to NOT touch
+
+  - `internal/mcphandler/` — leave the MCP server config alone; the
+    middleware wraps from outside
+  - `internal/mockproducts/` — irrelevant
+  - `internal/handlers/`, `internal/middleware/`, `internal/tracing/` —
+    these are gin-side; not affected
+  - Dockerfile, Makefile, chart, pipelines
+
+  ## Constraints
+
+  - **Wrap, don't replace.** The MCP handler itself stays unchanged; the
+    middleware sits outside it.
+  - **Log level INF** for normal requests (matches gin pattern), **WRN or
+    ERR for non-2xx** status codes only if gin does that today — otherwise
+    keep it INF throughout for consistency.
+  - **No JSON-body logging.** Request bodies on /mcp can contain user
+    queries; logging them would be a PII/audit risk. Only log envelope:
+    method, path, status, duration, client IP.
+  - **No new dependencies.** Use zerolog (already imported) and net/http.
+  - Conventional commit: `feat(mcp): log /mcp requests via wrapping middleware`
+  - Open PR with one-paragraph description referencing the 2026-05-21
+    demo-prep finding that surfaced this.
+  - Always post `/hold` immediately after opening the PR.
+
+  ## What this is NOT
+
+  - Not a refactor of the gin middleware stack — leave that alone
+  - Not the place to add tracing on /mcp — OTel goes in a separate
+    initiative if needed
+  - Not the place to log MCP method names (`tools/call`, etc.) or tool
+    arg shape — that's a deeper observability initiative for later
+  - Not a metrics emission change — Prometheus counters / histograms are
+    separate
+
+  ## Why this initiative exists
+
+  Live demo of the mortgages-gw on 2026-05-21 showed that MCP tool calls
+  produce nothing in `kubectl logs`. The MCP handler bypasses gin's
+  request logger by design (different ServeMux mount point). For demos,
+  on-call debugging, and routine "is this thing being used" questions,
+  a `path=/mcp` line per call is the cheapest possible win.
+
+  Expected pipeline outcome: 11 PR checks green; release cuts
+  `v0.1.2-{gcp,az}` (patch bump from `feat:` — wait, `feat:` is minor;
+  if you want patch, use `chore:` or `fix:`; pick whatever matches the
+  semantic-release config in the repo).
+  Expected agent behaviour: 3-4 turns. Smallest possible middleware.
+
+gate_marks:
+  - unit
+
+max_iterations: 4
