@@ -106,8 +106,23 @@ leartechRepoRoot: /workspace
 
 # Postgres-backed initiative catalog. Mirrors auth-service's pattern:
 # - CNPG Database CR provisions the per-service DB in the shared cluster
-# - migrations-job applies 0001_initial.sql as a Helm post-install hook
-# - deployment injects DATABASE_URL from the CNPG-auto-generated app secret
+#   (leartech-staging lives in cnpg-system; Database CR sits in this
+#   namespace and references the cluster cross-namespace by name alone).
+# - The role + role password are owned by leartech-platform-postgres
+#   (its CNPG Cluster.spec.managed.roles[] entry references a Secret
+#   it materialises in cnpg-system from Vault/GSM).
+# - The DSN injected into the workload is sourced separately via the
+#   ExternalSecret below, NOT from the CNPG-auto `<cluster>-<role>-app`
+#   secret. CNPG writes that auto-secret only into cnpg-system, and K8s
+#   secrets are namespace-scoped — workloads here can't reference it.
+#   Instead we keep a parallel DSN string in Vault/GSM that ESO syncs
+#   into this namespace as `<dsn.secretName>` with key `<dsn.secretKey>`.
+# - migrations-job applies files/migrations/*.sql as a Helm post-install
+#   hook, reading the same in-namespace DSN secret.
+#
+# The Vault/GSM DSN password must match what leartech-platform-postgres
+# uses for the role (same source key in their chart). No automatic
+# rotation today — see auth-ui session's DSN guidance memo for details.
 #
 # Disabling the toggle (`postgresql.enabled: false`) makes the catalog
 # endpoints return 503 and the agent falls back to filesystem-only YAML.
@@ -119,14 +134,25 @@ postgresql:
   # this chart via the CR below.
   clusterName: leartech-staging
   databaseName: leartech_automated_agent
-  # Secret holding the connection URI for our role+DB. CNPG auto-generates
-  # this as `<clusterName>-<role>-app` with key `uri` when the Database CR
-  # is reconciled.
-  secretName: leartech-staging-leartech_automated_agent-app
-  secretKey: uri
   # post-install/post-upgrade hook applies schema migrations from
   # files/migrations/*.sql in lexical order. Idempotent (IF NOT EXISTS).
   runMigrations: true
+  # DSN secret materialised in this namespace by the ExternalSecret in
+  # templates/externalsecret-postgres-db.yaml. Both the deployment and the
+  # migrations-job read from these refs — change them and both follow.
+  dsn:
+    secretName: leartech-automated-agent-db
+    secretKey: dsn
+    # Per-cluster source paths. Active path is selected by the existing
+    # externalSecrets.{gcp,azure}.enabled toggle. The DSN itself must
+    # be pre-populated manually (see auth-ui session's bootstrap guide).
+    gcp:
+      # GSM key in `externalSecrets.gcp.projectId`. Flat string value.
+      key: automated-agent-db-dsn
+    azure:
+      # KV-v2 path. The `/data/` segment is required by ESO's vault driver.
+      key: secret/data/automated-agent/automated-agent-db
+      property: dsn
 
 jxRequirements:
   ingress:

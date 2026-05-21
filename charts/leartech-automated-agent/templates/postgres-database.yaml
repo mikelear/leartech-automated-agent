@@ -1,12 +1,15 @@
 {{/*
-CNPG Database CR — provisions the `leartech_automated_agent` database +
-role inside the shared `leartech-staging` Postgres cluster.
+CNPG Database CR — provisions the `leartech_automated_agent` database
+inside the shared `leartech-staging` CNPG cluster. The cluster itself
+lives in cnpg-system; this Database CR is cross-namespace and CNPG
+resolves it by cluster name alone.
 
-Mirrors leartech-auth-service/templates/postgres-database.yaml. CNPG
-auto-generates a `<cluster>-<role>-app` Secret with key `uri` for the
-DSN — the Deployment reads that secret to populate
-`LEARTECH_INITIATIVE_DB_DSN`. The migrations-job hook polls the same
-DSN until reachable, then applies files/migrations/*.sql.
+The role + role password are owned by leartech-platform-postgres
+(managed.roles[] on the Cluster). The DSN the workload reads is
+materialised separately by templates/externalsecret-postgres-db.yaml
+(NOT the CNPG-auto secret — see that template's comment for why).
+
+Mirrors leartech-auth-service/templates/postgres-database.yaml.
 
 Toggle: .Values.postgresql.enabled (default false) — so previews and
 clusters without CNPG don't try to provision a Database CR they can't

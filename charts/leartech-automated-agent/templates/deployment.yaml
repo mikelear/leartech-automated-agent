@@ -48,14 +48,17 @@ spec:
         - name: VERSION
           value: {{ .Chart.Version | quote }}
         {{- if .Values.postgresql.enabled }}
-        # DB-backed initiative catalog DSN — flows from the CNPG-auto-generated
-        # `<cluster>-<role>-app` secret. App startup reads this env var via
-        # app/db.is_db_enabled(); absence triggers filesystem-only mode.
+        # DB-backed initiative catalog DSN — flows from the in-namespace
+        # Secret materialised by templates/externalsecret-postgres-db.yaml
+        # (sourced from Vault/GSM, not the CNPG-auto secret which lives in
+        # cnpg-system and can't be referenced cross-namespace). App startup
+        # reads this env var via app/db.is_db_enabled(); absence triggers
+        # filesystem-only mode.
         - name: LEARTECH_INITIATIVE_DB_DSN
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.postgresql.secretName }}
-              key: {{ .Values.postgresql.secretKey }}
+              name: {{ .Values.postgresql.dsn.secretName }}
+              key: {{ .Values.postgresql.dsn.secretKey }}
         {{- end }}
         livenessProbe:
           {{- toYaml .Values.livenessProbe | nindent 10 }}

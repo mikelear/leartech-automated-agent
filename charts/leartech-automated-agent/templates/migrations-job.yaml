@@ -1,11 +1,11 @@
 {{/*
 Postgres schema migrations Helm hook.
 
-Runs as `post-install,post-upgrade` (after the Database CR has been
-applied + CNPG provisions the database + the `<cluster>-<owner>-app`
-secret is written). An init container polls the DSN until reachable;
-the main container then pipes files/migrations/*.sql through psql in
-lexical order. CREATE TABLE IF NOT EXISTS makes it idempotent.
+Runs as `post-install,post-upgrade` (after the Database CR is applied +
+CNPG provisions the database + the in-namespace DSN Secret is
+materialised by the ExternalSecret in this chart). The container polls
+the DSN until reachable, then pipes files/migrations/*.sql through psql
+in lexical order. CREATE TABLE IF NOT EXISTS makes it idempotent.
 
 Gated on .Values.postgresql.enabled AND .Values.postgresql.runMigrations
 — same toggle that flips on the DB endpoints. Disabling either skips the
@@ -48,13 +48,14 @@ spec:
       - name: psql
         image: ghcr.io/cloudnative-pg/postgresql:17.2
         env:
-        # DSN flows via the CNPG-auto-generated app secret — same secret the
-        # main Deployment reads.
+        # DSN flows via the in-namespace Secret materialised by the chart's
+        # ExternalSecret (Vault on AZ / GSM on GCP). Same secret + key the
+        # main Deployment reads — single source of truth per cluster.
         - name: DATABASE_URL
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.postgresql.secretName }}
-              key: {{ .Values.postgresql.secretKey }}
+              name: {{ .Values.postgresql.dsn.secretName }}
+              key: {{ .Values.postgresql.dsn.secretKey }}
         command: ["/bin/sh", "-c"]
         args:
         - |
