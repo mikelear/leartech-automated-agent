@@ -1,0 +1,173 @@
+# automated-agent-catalog-fire-fallback — wire POST /initiatives to the DB catalog
+#
+# Problem (surfaced 2026-05-22)
+#   The DB-backed initiative_catalog table is live and exposes full CRUD on
+#   /initiatives/catalog (GET, POST, PUT, DELETE). But POST /initiatives —
+#   the endpoint that actually FIRES a run — still resolves the YAML purely
+#   from the pod's filesystem (initiatives/*.yaml baked in at image-build
+#   time). So a YAML posted via /initiatives/catalog cannot be fired without
+#   another image build cascade.
+#
+#   This locks new-initiative authoring to "PR + release + 2x promotion +
+#   2x bootjob ≈ 30 min" instead of the API-driven flow the catalog was
+#   designed to enable. Other sessions (BA agent, webCoder, manual ops)
+#   currently can't post + fire an initiative dynamically.
+#
+# Fix
+#   Make POST /initiatives resolve the YAML by checking the DB catalog FIRST,
+#   then falling back to filesystem when the DB catalog doesn't have the
+#   name. Also seed the DB catalog from the filesystem on FastAPI startup,
+#   so the YAMLs shipped with each image are still fireable after the
+#   change. The two together turn the catalog into the live editable
+#   source of truth, with filesystem as the "starter pack" baked into
+#   each release.
+#
+# Run with: curl -X POST .../initiatives -d '{"initiative":"automated-agent-catalog-fire-fallback"}'
+
+name: automated-agent-catalog-fire-fallback
+
+description: |
+  Wire POST /initiatives to resolve YAML from the DB catalog (with
+  filesystem fallback) AND seed the catalog from filesystem on startup.
+  Single end-to-end slice — after this lands, any session can POST a
+  YAML to /initiatives/catalog and immediately fire it via /initiatives
+  by name, no image rebuild needed.
+
+repo: leartech-automated-agent
+branch: agent/catalog-fire-fallback
+base: main
+
+goal: |
+  Two paired changes:
+
+  1. **Catalog-first lookup in POST /initiatives**
+     - When a fire request arrives for initiative name X:
+       - First query the DB catalog (`initiative_catalog` table) for X
+       - If found, materialise its `yaml_body` to a temp path (e.g.
+         `/tmp/agent/<name>.yaml`) and pass that path to
+         `run_initiative` (which already accepts a Path).
+       - If not found in DB, fall back to filesystem lookup (the
+         current behaviour at `app/routers/initiatives.py:92`).
+       - If neither has it, return the same 404 as today with the
+         combined list of available names (DB catalog names UNION
+         filesystem names).
+     - DB-stored initiatives win over same-named filesystem entries —
+       confirmed scope decision. Filesystem becomes the "starter pack"
+       baked into each image release.
+
+  2. **Seed DB catalog from filesystem on startup**
+     - On FastAPI startup (after `init_engine()` succeeds), walk
+       `initiatives/*.yaml` from the pod filesystem. For each YAML:
+       - If the catalog already has an entry with that name, SKIP
+         (don't overwrite — preserves any edits made via PUT after
+         startup).
+       - If not present, INSERT the YAML body verbatim.
+     - This makes the change deploy-safe: the first pod that boots
+       under the new code self-populates the catalog from the
+       filesystem; subsequent pods on the same DB are no-ops.
+     - Skip seeding entirely when `is_db_enabled()` is false
+       (filesystem-only mode unchanged).
+
+  3. **Regression tests**
+     - `tests/test_app_initiatives.py` — add tests for:
+       - POST /initiatives with a DB-only name resolves and queues
+         the run (mock `run_initiative` to verify the right yaml_path
+         was passed).
+       - POST /initiatives with a filesystem-only name still resolves
+         (regression for the fallback path).
+       - DB-stored entry takes precedence over a same-named filesystem
+         entry.
+       - 404 path lists both DB + filesystem names when the requested
+         initiative exists in neither.
+     - `tests/test_app_startup_seed.py` (new file) — startup seeding:
+       - Empty DB + N filesystem YAMLs → N catalog rows after startup.
+       - Existing DB entries are NOT overwritten by seeding.
+       - DB-disabled mode: seeding is skipped, no errors.
+
+  ## How to apply
+
+  - `app/routers/initiatives.py` — modify the resolution path at line
+    ~92 and ~165 (the validate endpoint uses the same lookup).
+    Introduce a small helper `_resolve_yaml_path(name, db_session)`
+    that returns `Path` or `None`, used by both endpoints.
+
+  - `app/db/initiative_catalog.py` already has the CRUD helpers. Add
+    a method to read by name returning yaml_body text (likely already
+    exists — `get_initiative_by_name`).
+
+  - `app/main.py` — in the FastAPI startup hook (after the existing
+    `init_engine()` call), call a new `seed_catalog_from_filesystem()`
+    helper. Gated on `is_db_enabled()`.
+
+  - Materialisation: write the yaml_body to `/tmp/agent-catalog/<name>.yaml`
+    (mkdir-p if missing). Reuse on subsequent fires — overwrite each
+    time so an UPDATE via PUT is reflected on next fire without TTL
+    games.
+
+  ## Files to modify
+
+  - `app/routers/initiatives.py`
+  - `app/main.py`
+  - `app/db/initiative_catalog.py` (only if a get-by-name-returning-body
+    helper doesn't exist; verify before adding)
+  - `tests/test_app_initiatives.py`
+  - `tests/test_app_startup_seed.py` (new)
+
+  ## Files to NOT touch
+
+  - Schema migrations (`files/migrations/*.sql`) — table already has
+    `yaml_body TEXT`, no schema change needed
+  - The /initiatives/catalog CRUD endpoints — they already work, just
+    consume them from the runner
+  - `gate/agent/initiative.py` — `run_initiative` accepts a Path, no
+    change needed
+  - The chart — no values change, no template change
+
+  ## Constraints
+
+  - Behaviour-preserving for filesystem-only fires (the current default
+    after every image rebuild). Existing tests must continue passing.
+  - Idempotent startup seed — pod restarts must not corrupt or
+    duplicate catalog entries.
+  - No new migration — table schema already supports yaml_body.
+  - DB-disabled mode (`postgresql.enabled: false` clusters, previews,
+    local dev without Postgres) MUST still work — filesystem fallback
+    is the only path in that mode.
+  - Conventional commit: `feat(api): resolve initiatives from DB catalog with filesystem fallback`
+  - Open PR with description referencing the 2026-05-22 catalog
+    enablement and this YAML.
+  - Post `/hold` immediately after opening the PR.
+  - Pre-push lint + test must pass.
+  - Full-gate run before "Ready for client review" sticky.
+
+  ## What this is NOT
+
+  - Not a refactor of the run_initiative loop — it already takes a
+    Path, just feed it a different path source.
+  - Not a new schema migration — the table already exists with yaml_body.
+  - Not a chart change — no toggle, no new env, no new secret.
+  - Not the place to add WebSocket / SSE streaming of run output —
+    separate slice.
+  - Not the place to add initiative versioning or history — separate
+    slice.
+
+  ## Why this initiative exists
+
+  The DB-backed initiative_catalog was enabled this morning (post PR
+  #26 chart refactor + PR #27 DSN fix). The CRUD endpoints existed
+  pre-flip but had nothing reading from them. Now that the table is
+  live and writable, the runner needs to consume it — otherwise
+  every new initiative authored by future sessions (BA agent,
+  webCoder, manual ops) requires a full image-rebuild cascade just
+  to fire by name. With this slice, the bar drops to "two curl calls,
+  seconds" and the platform unlocks the dynamic initiative-authoring
+  flow it was always designed to support.
+
+  Expected pipeline outcome: all PR checks pass; release cuts patch
+  bump (likely 0.10.14). After deploy: post a tiny new YAML to
+  /initiatives/catalog and fire it without touching the repo —
+  the smoke test for the new path.
+
+  Expected agent behaviour: 4-6 turns (read initiatives.py + main.py,
+  identify the helper extraction, apply the changes, add tests, run
+  pre-push lint).
