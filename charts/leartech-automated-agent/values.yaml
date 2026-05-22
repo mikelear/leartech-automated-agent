@@ -129,6 +129,10 @@ leartechRepoRoot: /workspace
 # Use that for previews or any cluster without CNPG.
 postgresql:
   enabled: false  # flip via configs/leartech-automated-agent.yaml on clusters with CNPG
+  # DO NOT enable on preview deployments. Preview environments don't have the
+  # leartech-staging CNPG cluster, the role won't exist, and the ExternalSecret
+  # will 404 on the workload Vault/GSM path — pod CrashLoops on startup.
+  # Long-lived staging is the only place this should be true.
   # Name of the existing shared CNPG cluster (provisioned outside this chart,
   # same one auth-service connects to). Per-service Database is owned by
   # this chart via the CR below.

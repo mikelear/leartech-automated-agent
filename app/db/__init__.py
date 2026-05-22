@@ -39,20 +39,35 @@ def is_db_enabled() -> bool:
     return bool(os.environ.get(DSN_ENV))
 
 
-def _build_engine() -> AsyncEngine:
-    """Build the async engine from the env-configured DSN.
+def _normalise_dsn(dsn: str) -> str:
+    """Make a libpq-style DSN safe for asyncpg + SQLAlchemy 2.x.
 
-    The DSN should be a postgres+asyncpg:// URL. SQLAlchemy auto-detects
-    `postgresql://` and `postgres://` and rewrites them — accept either.
+    Two transforms:
+
+    - Scheme: `postgres://` / `postgresql://` → `postgresql+asyncpg://`
+    - Query param: `sslmode=X` → `ssl=X` (asyncpg rejects libpq's `sslmode`
+      keyword with `TypeError: connect() got an unexpected keyword argument
+      'sslmode'`). Standard libpq DSNs everyone documents use `sslmode=require`;
+      we accept that spelling and translate it so external tooling (psql,
+      pgbench, IDE clients) can use the same string verbatim.
     """
-    dsn = os.environ.get(DSN_ENV)
-    if not dsn:
-        raise RuntimeError(f'{DSN_ENV} is not set; cannot build engine')
-    # Normalise postgres:// → postgresql+asyncpg:// for SQLAlchemy 2.x
     if dsn.startswith('postgres://'):
         dsn = 'postgresql+asyncpg://' + dsn[len('postgres://') :]
     elif dsn.startswith('postgresql://'):
         dsn = 'postgresql+asyncpg://' + dsn[len('postgresql://') :]
+    dsn = dsn.replace('?sslmode=', '?ssl=').replace('&sslmode=', '&ssl=')
+    return dsn
+
+
+def _build_engine() -> AsyncEngine:
+    """Build the async engine from the env-configured DSN.
+
+    Accepts a libpq-style DSN; see `_normalise_dsn` for the transforms applied.
+    """
+    dsn = os.environ.get(DSN_ENV)
+    if not dsn:
+        raise RuntimeError(f'{DSN_ENV} is not set; cannot build engine')
+    dsn = _normalise_dsn(dsn)
     # pool_size/max_overflow only apply to QueuePool (Postgres). SQLite uses
     # StaticPool which rejects them — skip when running against SQLite (tests).
     kwargs: dict[str, object] = {'pool_pre_ping': True}
