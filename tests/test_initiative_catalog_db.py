@@ -159,8 +159,11 @@ def test_create_and_list(client_with_db: TestClient) -> None:
 
     list_resp = client_with_db.get('/initiatives/catalog')
     assert list_resp.status_code == 200
-    assert len(list_resp.json()) == 1
-    assert list_resp.json()[0]['name'] == 'test-initiative-x'
+    catalog = list_resp.json()
+    # Startup seeding populates the catalog with the baked-in filesystem YAMLs, so
+    # we may see more than just the one we inserted — check membership, not exact count.
+    names = [item['name'] for item in catalog]
+    assert 'test-initiative-x' in names, f'Expected test-initiative-x in catalog; got {names}'
 
 
 def test_create_rejects_invalid_yaml(client_with_db: TestClient) -> None:
