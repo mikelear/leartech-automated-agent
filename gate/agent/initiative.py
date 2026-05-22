@@ -121,11 +121,19 @@ def _post_crash_sticky(*, qualified_repo: str, pr_number: int | None, body: str)
     try:
         result = subprocess.run(
             [
-                'gh', 'pr', 'comment', str(pr_number),
-                '-R', qualified_repo,
-                '--body', body,
+                'gh',
+                'pr',
+                'comment',
+                str(pr_number),
+                '-R',
+                qualified_repo,
+                '--body',
+                body,
             ],
-            capture_output=True, text=True, check=False, timeout=15,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
         )
         if result.returncode != 0:
             click.echo(
@@ -318,7 +326,7 @@ async def run_initiative(
                 max_turns=max_turns,
                 cost=last_cost,
                 hint=(
-                    'Substantive work is likely already pushed (this PR\'s commits). '
+                    "Substantive work is likely already pushed (this PR's commits). "
                     'Re-fire is idempotent — the agent detects the existing branch + PR. '
                     'For more headroom, re-run with `--max-turns 250`.'
                 ),
@@ -339,7 +347,7 @@ async def run_initiative(
                 max_turns=max_turns,
                 cost=last_cost,
                 hint=(
-                    'Substantive work may already be pushed (this PR\'s commits). '
+                    "Substantive work may already be pushed (this PR's commits). "
                     'Re-fire is idempotent — the agent detects the existing branch + PR.'
                 ),
             )

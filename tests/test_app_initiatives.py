@@ -3,18 +3,90 @@
 The execution path (POST /initiatives → real run_initiative) is mocked
 because real execution would call the Anthropic API. We focus on the
 contract surface: validation, error shapes, list/lookup behaviour.
+
+Includes tests for the catalog-first resolution path introduced by
+feat(api): catalog-fire-fallback — DB-stored initiatives can be fired
+without an image rebuild; filesystem serves as fallback.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from unittest.mock import patch
 
+import pytest
+import pytest_asyncio
 from fastapi.testclient import TestClient
 
+from app import db as db_module
+from app.db.models import Base
 from app.main import app
 from gate.agent.initiative import RunSummary
 
 client = TestClient(app)
+
+# ─── DB-backed fixtures (for catalog-first tests) ────────────────────────────
+
+# Minimal valid YAML that the loader accepts — name must match what's used in tests.
+_DB_ONLY_YAML = """\
+name: db-only-initiative-xyz
+repo: leartech-test
+branch: agent/db-only
+base: main
+goal: Initiative that exists only in the DB catalog, not on the filesystem.
+"""
+
+_FS_YAML_NAME_IN_DB = """\
+name: {name}
+repo: leartech-test-override
+branch: agent/db-wins
+base: main
+goal: DB copy of a filesystem initiative — DB entry should win.
+"""
+
+
+@pytest_asyncio.fixture
+async def db_enabled_for_resolution(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
+    """Enable DB with an in-memory SQLite engine for testing _resolve_yaml_path directly.
+
+    Does NOT create a TestClient — we test the helper at the function level to
+    avoid the TestClient teardown / background-task / SQLite CancelledError
+    interaction that occurs when app.state.update also writes to the same
+    SQLite instance during task cancellation.
+    """
+    monkeypatch.setenv(db_module.DSN_ENV, 'sqlite+aiosqlite:///:memory:')
+    db_module._reset_for_tests()
+
+    engine = db_module.init_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    yield
+
+    await db_module.dispose_engine()
+    db_module._reset_for_tests()
+
+
+@pytest_asyncio.fixture
+async def client_with_db(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[TestClient]:
+    """TestClient wired to an in-memory SQLite DB.
+
+    Used only by tests that do NOT fire an initiative (i.e. name doesn't
+    resolve → 404 returned before creating a background task). This avoids
+    the app.state.update → SQLite CancelledError during TestClient teardown.
+    """
+    monkeypatch.setenv(db_module.DSN_ENV, 'sqlite+aiosqlite:///:memory:')
+    db_module._reset_for_tests()
+
+    engine = db_module.init_engine()
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    with TestClient(app) as c:
+        yield c
+
+    await db_module.dispose_engine()
+    db_module._reset_for_tests()
 
 
 def test_post_with_unknown_initiative_returns_404_with_available() -> None:
@@ -112,3 +184,104 @@ def test_completed_run_surfaces_pr_number_turns_cost() -> None:
     assert body['pr_number'] == 99
     assert body['turns'] == 7
     assert body['cost_usd'] == 0.4242
+
+
+# ─── Catalog-first resolution tests (feat: catalog-fire-fallback) ────────────
+# Tests 1-3 test _resolve_yaml_path directly (no HTTP / no background task) to
+# avoid the TestClient teardown / asyncio cancel interaction with SQLite.
+# Test 4 uses HTTP but does NOT fire an initiative (404 path only).
+
+
+async def test_resolve_yaml_path_db_only_returns_tmp_path(
+    db_enabled_for_resolution: None,
+) -> None:
+    """_resolve_yaml_path returns /tmp/agent-catalog/<name>.yaml for a DB-only initiative.
+
+    Verifies test_catalog_fire_fallback: DB catalog is checked first, yaml_body
+    is materialised to the tmp path, and that path is what run_initiative gets.
+    """
+    from app import db as db_m
+    from app.db.initiative_catalog import create_initiative as ci
+    from app.routers.initiatives import _resolve_yaml_path
+
+    # Seed a DB-only initiative (no corresponding filesystem file).
+    async with db_m.session() as sess:
+        await ci(sess, name='db-only-initiative-xyz', yaml_body=_DB_ONLY_YAML)
+
+    result = await _resolve_yaml_path('db-only-initiative-xyz')
+
+    assert result is not None, '_resolve_yaml_path must return a Path for a DB-stored name'
+    assert result.parent.name == 'agent-catalog', f'Expected /tmp/agent-catalog/<name>.yaml, got {result}'
+    assert result.exists(), 'Materialised YAML must be written to disk'
+    assert result.read_text() == _DB_ONLY_YAML, 'Materialised content must match DB yaml_body'
+
+
+async def test_resolve_yaml_path_filesystem_fallback(
+    db_enabled_for_resolution: None,
+) -> None:
+    """_resolve_yaml_path falls back to the filesystem when the name is not in the DB.
+
+    Regression for test_catalog_fire_fallback: the filesystem path must still
+    work when DB is enabled but has no entry for the requested name.
+    """
+    from app.routers.initiatives import _resolve_yaml_path
+
+    # Use any filesystem name that is NOT in the (empty) DB.
+    # We know 'automated-agent-catalog-fire-fallback' is on the filesystem.
+    result = await _resolve_yaml_path('automated-agent-catalog-fire-fallback')
+
+
+    assert result is not None, 'Filesystem fallback must return a Path'
+    # Path must be in the cwd/initiatives/ directory, not under /tmp/agent-catalog/
+    assert result.parent.name == 'initiatives', f'Filesystem path must be under initiatives/, got {result}'
+    assert result.exists(), 'Filesystem YAML must exist'
+
+
+async def test_resolve_yaml_path_db_wins_over_filesystem(
+    db_enabled_for_resolution: None,
+) -> None:
+    """DB entry must WIN over a same-named filesystem entry.
+
+    test_catalog_fire_fallback — DB is the live source of truth; filesystem is
+    the starter pack. When both exist, the DB-sourced path must be returned.
+    """
+    from app import db as db_m
+    from app.db.initiative_catalog import create_initiative as ci
+    from app.routers.initiatives import _resolve_yaml_path
+
+    # 'automated-agent-catalog-fire-fallback' exists on the filesystem.
+    # Seed the DB with a DIFFERENT yaml_body under the same name.
+    fs_name = 'automated-agent-catalog-fire-fallback'
+    db_yaml = _FS_YAML_NAME_IN_DB.format(name=fs_name)
+    async with db_m.session() as sess:
+        await ci(sess, name=fs_name, yaml_body=db_yaml)
+
+    result = await _resolve_yaml_path(fs_name)
+
+
+    assert result is not None
+    # DB wins → path is under /tmp/agent-catalog/ (parent directory name = 'agent-catalog')
+    assert result.parent.name == 'agent-catalog', f'DB must win; expected /tmp/agent-catalog path, got {result}'
+    # Content must be the DB version, not the filesystem version.
+    assert 'DB copy of a filesystem initiative' in result.read_text()
+
+
+def test_404_lists_both_db_and_filesystem_names(client_with_db: TestClient) -> None:
+    """404 response must list both DB and filesystem names in `available`.
+
+    test_catalog_fire_fallback — combined discovery for the not-found case.
+    """
+    # Seed one DB-only name.
+    client_with_db.post(
+        '/initiatives/catalog',
+        json={'name': 'db-only-initiative-xyz', 'yaml_body': _DB_ONLY_YAML},
+    )
+
+    resp = client_with_db.post('/initiatives', json={'initiative': 'no-such-initiative-ever'})
+    assert resp.status_code == 404
+    available = resp.json()['detail']['available']
+    assert isinstance(available, list)
+    # DB name must appear alongside filesystem names.
+    assert 'db-only-initiative-xyz' in available
+    # At least one filesystem name must also be present.
+    assert len(available) > 1, 'expected both DB and FS names in 404 available list'

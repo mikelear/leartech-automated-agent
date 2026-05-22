@@ -50,9 +50,7 @@ def test_post_crash_sticky_skips_when_no_pr() -> None:
 
 def test_post_crash_sticky_calls_gh_with_pr_and_repo() -> None:
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=0, stdout='', stderr=''
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
         _post_crash_sticky(qualified_repo='owner/repo', pr_number=42, body='hello')
         mock_run.assert_called_once()
         args = mock_run.call_args[0][0]
@@ -66,9 +64,7 @@ def test_post_crash_sticky_calls_gh_with_pr_and_repo() -> None:
 def test_post_crash_sticky_swallows_gh_failure() -> None:
     """gh exit-nonzero must not raise — we're already in an error path."""
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
-        mock_run.return_value = subprocess.CompletedProcess(
-            args=[], returncode=1, stdout='', stderr='auth required'
-        )
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout='', stderr='auth required')
         # Must not raise.
         _post_crash_sticky(qualified_repo='owner/repo', pr_number=42, body='hello')
 
