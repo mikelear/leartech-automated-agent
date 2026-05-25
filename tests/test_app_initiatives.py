@@ -230,7 +230,6 @@ async def test_resolve_yaml_path_filesystem_fallback(
     # We know 'automated-agent-catalog-fire-fallback' is on the filesystem.
     result = await _resolve_yaml_path('automated-agent-catalog-fire-fallback')
 
-
     assert result is not None, 'Filesystem fallback must return a Path'
     # Path must be in the cwd/initiatives/ directory, not under /tmp/agent-catalog/
     assert result.parent.name == 'initiatives', f'Filesystem path must be under initiatives/, got {result}'
@@ -257,7 +256,6 @@ async def test_resolve_yaml_path_db_wins_over_filesystem(
         await ci(sess, name=fs_name, yaml_body=db_yaml)
 
     result = await _resolve_yaml_path(fs_name)
-
 
     assert result is not None
     # DB wins → path is under /tmp/agent-catalog/ (parent directory name = 'agent-catalog')
