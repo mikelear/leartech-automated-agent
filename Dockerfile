@@ -1,25 +1,20 @@
-# Canonical Python service Dockerfile, modelled on leartech-ai-classifier
-# (the org's Python gold-standard) with one extra specific to this service:
-# gh CLI + ffmpeg in system deps (agent uses these via Bash MCP).
+# Canonical Python service Dockerfile, based on leartech-agent-go which itself
+# inherits from leartech-agent-base. The base images carry: ca-certificates,
+# curl, git, gh CLI, Go toolchain, and uv. We only install what's specific
+# to this service on top.
 #
 # /workspace is NOT created here. The Helm chart mounts it as an emptyDir
 # volume — standard K8s pattern for ephemeral writable scratch space, and
 # avoids the kaniko --snapshotMode=redo bug where empty dirs are lost
 # between snapshots.
 
-FROM python:3.13-slim
+FROM ghcr.io/mikelear/leartech-agent-go:0.31.1
 
+# ffmpeg is specific to this service (agent uses it via Bash for video-review
+# work). It is NOT in leartech-agent-base or leartech-agent-go, so we install
+# it here. ca-certificates, curl, git, and gh are already in the base image.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        git \
         ffmpeg \
-    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-        | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
-        > /etc/apt/sources.list.d/github-cli.list \
-    && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv

@@ -227,3 +227,37 @@ def test_real_worked_example_loads() -> None:
     assert init.branch == 'agent/home-component-spec'
     assert init.primary.branch == 'agent/home-component-spec'
     assert init.gate_marks == ['unit']
+
+
+# Optional `language` field ──────────────────────────────────────────────────
+
+
+def test_language_field_set_when_present(tmp_path: Path) -> None:
+    """Parsing a YAML with `language: go` sets the field on the loaded model."""
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        language: go
+        """,
+    )
+    init = load_initiative(path)
+    assert init.language == 'go'
+
+
+def test_language_field_defaults_to_none_when_omitted(tmp_path: Path) -> None:
+    """When `language:` is absent the field is None (not required)."""
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        """,
+    )
+    init = load_initiative(path)
+    assert init.language is None
