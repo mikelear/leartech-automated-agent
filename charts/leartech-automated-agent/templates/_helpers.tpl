@@ -30,3 +30,17 @@ app.kubernetes.io/managed-by: {{ .Release.Service }}
 app.kubernetes.io/name: {{ include "leartech-automated-agent.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
+
+{{/*
+Aliases required by the inlined leartech-helm-library helpers (_ingress.tpl).
+These delegate to the existing leartech-automated-agent.* definitions above
+so that library code calling leartech.fullname / leartech.labels works
+without duplicating logic.
+*/}}
+{{- define "leartech.fullname" -}}
+{{- include "leartech-automated-agent.fullname" . }}
+{{- end }}
+
+{{- define "leartech.labels" -}}
+{{- include "leartech-automated-agent.labels" . }}
+{{- end }}
