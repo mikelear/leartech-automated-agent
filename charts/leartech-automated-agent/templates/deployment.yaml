@@ -47,6 +47,10 @@ spec:
           value: {{ .Values.leartechRepoRoot | quote }}
         - name: VERSION
           value: {{ .Chart.Version | quote }}
+        {{- if .Values.agent.model }}
+        - name: LEARTECH_AGENT_MODEL
+          value: {{ .Values.agent.model | quote }}
+        {{- end }}
         {{- if .Values.postgresql.enabled }}
         # DB-backed initiative catalog DSN — flows from the in-namespace
         # Secret materialised by templates/externalsecret-postgres-db.yaml

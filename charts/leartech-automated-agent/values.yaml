@@ -10,6 +10,14 @@ service:
   port: 8080
   externalPort: 8080
 
+# Agent runtime config. Override `model` to switch Anthropic model
+# without a code change — `claude-opus-4-7` (default, balanced),
+# `claude-haiku-4-5` (cheap routine work), `claude-opus-4-7`
+# (complex strategic work). Empty/absent = use the in-code default
+# at `gate/agent/main.py::DEFAULT_MODEL`.
+agent:
+  model: ""
+
 # Anthropic SDK + agent loops are memory-heavy on substantial initiatives.
 # 2026-05-20: mortgages-gw-add-mcp-mock-sourcing run OOMKilled at the 1 GiB
 # limit during real code work (3 MCP tools + mock data + endpoint
