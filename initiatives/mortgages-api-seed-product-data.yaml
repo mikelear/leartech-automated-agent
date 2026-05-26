@@ -1,0 +1,154 @@
+# mortgages-api-seed-product-data — Phase 1 #3 (env-gated seed; runs in parallel)
+#
+# Seeds the products + lenders tables with real-shaped fixtures. Env-gated
+# so production gets ONLY the 10 real-lender baseline; dev/staging
+# additionally gets Mike Lear Super Mortgages for demos + smoke tests.
+#
+# Independent of #2 — can land before, after, or in parallel with the
+# read endpoints initiative.
+
+name: mortgages-api-seed-product-data
+
+description: |
+  Seed migrations populating lenders + products tables with 10 real-shaped
+  lender fixtures (HFX, Nationwide, Barclays, Santander, NatWest, HSBC,
+  TSB + variants). Env-gated extra fixture for Mike Lear Super Mortgages
+  in non-production. Replaces the role currently filled by
+  `leartech-mortgages-gw/internal/mockproducts/products.go` with database
+  rows.
+
+repo: leartech-mortgages-api
+branch: agent/seed-product-data
+base: main
+language: go
+
+goal: |
+  Migrate the existing in-memory fixture data (from `~/leartech/leartech-mortgages-gw/internal/mockproducts/products.go`)
+  into the DB as seed data. Env-gate the demo lender so production stays clean.
+
+  ## What success looks like
+
+  After this PR lands:
+
+  - On any deploy: 10 real-shaped lender products + their lender rows exist in DB
+  - On dev / jx-staging (where `MORTGAGES_API_INCLUDE_DEMO_DATA=true` is set via helmfile): an additional Mike Lear Super Mortgages product (`mlsm-res-5yr-80`) exists
+  - On jx-production: NO Mike Lear row. The smoke pack against production stops returning Mike Lear at the top of the list
+
+  ## Files to ADD
+
+  ### `migrations/<UTC-timestamp>_seed_baseline_lenders.sql` (NEW)
+
+  Goose migration that inserts the 10 baseline lender rows + their products
+  unconditionally. Use UUIDs that are reproducible (literal values, not
+  `gen_random_uuid()`, so seed is idempotent on re-run).
+
+  Each lender + product row mirrors the existing data in
+  `~/leartech/leartech-mortgages-gw/internal/mockproducts/products.go` —
+  copy verbatim from that file. The 10 baseline products:
+
+      hfx-res-2yr-60        — Halifax 2-year fixed @ 60% LTV
+      nwde-res-5yr-75       — Nationwide 5-year fixed @ 75% LTV
+      barc-res-5yr-80       — Barclays 5-year fixed @ 80% LTV
+      sant-res-5yr-85       — Santander 5-year fixed @ 85% LTV
+      nwst-res-5yr-90       — NatWest 5-year fixed @ 90% LTV
+      hsbc-res-10yr-60      — HSBC 10-year fixed @ 60% LTV
+      tsb-res-svr-75        — TSB SVR @ 75% LTV
+      hfx-btl-5yr-75        — Halifax BTL 5-year fixed @ 75% LTV
+      nwde-btl-2yr-75       — Nationwide BTL 2-year fixed @ 75% LTV
+      sant-btl-trk-80       — Santander BTL tracker @ 80% LTV
+
+  Use `INSERT INTO ... ON CONFLICT DO NOTHING` so re-running is safe.
+
+  Down migration deletes the inserted rows by id.
+
+  ### `migrations/<UTC-timestamp>_seed_demo_lender.sql` (NEW)
+
+  A SECOND migration file, env-gated to non-production. Goose doesn't have
+  env-conditional migrations natively, so the gate happens at the goose
+  invocation level:
+
+  - The chart's migrations Job already runs goose against `migrations/*.sql`
+  - Add a chart value `database.includeDemoData: false` (default) — when true,
+    the migrations Job includes this second file; when false, it excludes it
+  - Mechanism: the migrations Job's command becomes a small bash wrapper that
+    moves the demo seed file in/out of the migrations dir at boot time based
+    on env var, OR uses goose's `-allowed-versions` flag if simpler
+
+  Demo seed content: the Mike Lear Super Mortgages product currently in
+  mockproducts.go (`mlsm-res-5yr-80`, 1.00% rate, sub-2% LTV band winner).
+
+  Down migration deletes the Mike Lear lender + product rows.
+
+  ## Files to MODIFY
+
+  ### `charts/leartech-mortgages-api/values.yaml`
+  Add:
+
+      database:
+        includeDemoData: false  # set true in dev/staging override
+
+  ### `charts/leartech-mortgages-api/templates/migrations-job.yaml`
+  Modify the migrations Job to gate the demo seed file. Simplest pattern:
+
+      command:
+        - sh
+        - -c
+        - |
+          if [ "${INCLUDE_DEMO_DATA}" != "true" ]; then
+            mv /migrations/<timestamp>_seed_demo_lender.sql /tmp/skipped_demo_seed.sql || true
+          fi
+          goose -dir /migrations postgres "$DATABASE_URL" up
+      env:
+        - name: INCLUDE_DEMO_DATA
+          value: {{ .Values.database.includeDemoData | quote }}
+
+  ### Per-cluster helmfile config — coordinate gitops PR separately
+
+  In `~/leartech/jx-build-cluster-gsm`:
+  - `helmfiles/jx-staging/configs/leartech-mortgages-api.yaml` — set `database.includeDemoData: true`
+  - `helmfiles/jx-production/configs/leartech-mortgages-api.yaml` (create if missing) — set `database.includeDemoData: false` explicitly
+
+  Agent should open the gitops PR alongside (or directly after) the
+  service PR. Per the multi-repo pattern, declare the gitops repo in the
+  initiative if cross-repo handling is needed — OR call out the gitops
+  follow-up explicitly in the sticky comment so the operator opens it.
+
+  ## Files to NOT TOUCH
+
+  - `internal/products/*` — no Go code changes
+  - `internal/handlers/*` — no handler changes
+  - The placeholder example migration (`20260416000001_initial.sql`)
+
+  ## Constraints
+
+  - **Idempotent.** `ON CONFLICT DO NOTHING` on every INSERT. Re-running the
+    migration must not error and must not duplicate rows.
+  - **Reproducible UUIDs.** Use literal UUIDs in seed SQL, not `gen_random_uuid()`.
+    Generate them once (e.g., `uuidgen` for each row); commit the literal values.
+  - **Mike Lear ONLY in non-production seed.** No prod can ever return Mike Lear
+    once this PR + the gitops override land. Verify by ensuring the
+    second migration file's UUIDs do NOT appear in the production seed.
+  - **Source of truth for the 10 baseline products**: `~/leartech/leartech-mortgages-gw/internal/mockproducts/products.go`. Read it before authoring the migration; preserve product IDs, lender names, rates, LTV bands, ERCs (move to `attributes.ercs` JSONB), features (move to `attributes.features` as tag array).
+  - Conventional commit: `feat(db): seed 10 baseline lender products + env-gated demo lender`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      gofmt -l .
+      golangci-lint run ./...
+      go test ./...
+      helm template charts/leartech-mortgages-api  # confirm migrations Job command parses
+
+  ## What this is NOT
+
+  - Not the read API — `mortgages-api-add-read-endpoints` (separate initiative)
+  - Not the SDK — `leartech-go-packages-publish-mortgages-api-sdk` (after)
+  - Not the gw swap — `mortgages-gw-swap-mockproducts-for-sdk` (after)
+  - Not a lender management UI (that's Phase 3)
+
+  Expected agent behaviour: 4-5 turns. Mostly mechanical SQL transcription
+  from the existing Go fixture file.
+
+gate_marks:
+  - unit
+
+max_iterations: 5

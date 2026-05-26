@@ -1,0 +1,188 @@
+# mortgages-api-add-api-key-middleware — Phase 2 #7 (dual-path auth)
+#
+# Adds a gin middleware that handles BOTH API keys and JWTs on /api/v1/*.
+# Token prefix routes the request to the appropriate validation path;
+# downstream handlers see a unified `lender_id` (or `is_admin`) in the
+# gin context.
+
+name: mortgages-api-add-api-key-middleware
+
+description: |
+  Add a dual-path auth middleware that handles both API keys (prefix
+  `mqs_live_`/`mqs_test_`) and existing OAuth JWTs. Both paths set the
+  same downstream context values so handlers don't care which auth was
+  used. Replaces the current BearerAuth on /api/v1/* with the dual
+  middleware.
+
+repo: leartech-mortgages-api
+branch: agent/add-api-key-middleware
+base: main
+language: go
+
+goal: |
+  Wire the API-key path next to the existing JWT-validation path. Single
+  middleware, prefix-routed.
+
+  ## What success looks like
+
+  - `curl -H "Authorization: Bearer mqs_live_<valid>" .../api/v1/lenders/<my-lender-id>/...` → 200, `request.lender_id` = lender bound to the key
+  - `curl -H "Authorization: Bearer eyJ..." .../api/v1/...` → existing JWT path (unchanged behaviour)
+  - `curl -H "Authorization: Bearer mqs_live_<revoked>" .../api/v1/...` → 401 invalid_api_key
+  - `curl -H "Authorization: Bearer mqs_live_<bogus>" .../api/v1/...` → 401 invalid_api_key
+  - No Authorization header → 401 (unchanged)
+  - Wrong-scheme (Basic xyz) → 401 (unchanged)
+
+  Both auth paths populate the same gin context keys:
+    - `c.Set("lender_id", <uuid>)` (always for API key; for JWT only if claim present)
+    - `c.Set("is_admin", true)` (only for JWT with admin role claim)
+    - `c.Set("auth_method", "api_key" | "jwt")` (for downstream logging)
+
+  ## Files to ADD
+
+  ### `internal/middleware/dual_auth.go` (NEW)
+
+  ```go
+  package middleware
+
+  import (
+      "context"
+      "strings"
+      "time"
+
+      "github.com/gin-gonic/gin"
+      "github.com/google/uuid"
+
+      "github.com/mikelear/leartech-mortgages-api/internal/apikeys"
+      "github.com/mikelear/leartech-mortgages-api/internal/products"
+      // existing JWT validator imports
+  )
+
+  type DualAuth struct {
+      repo      *products.Repo
+      jwtCheck  gin.HandlerFunc  // existing leartech-go-common BearerAuth, reused
+  }
+
+  func NewDualAuth(repo *products.Repo, jwtCheck gin.HandlerFunc) *DualAuth
+
+  // Handler returns the gin middleware. Routing:
+  //   1. Read Authorization header. If absent → 401.
+  //   2. Strip "Bearer " prefix. If apikeys.HasAPIKeyPrefix(token):
+  //        a. Look up by sha256 prefix (fast)... actually, no — argon2 hashes don't have a queryable prefix.
+  //        b. Better: store the FIRST 8 chars of the raw key in lender_api_keys as a non-secret lookup column,
+  //           then argon2-verify against the matched row's full hash. Updates schema if needed.
+  //        OR: scan all non-revoked rows and try argon2-verify on each (works for low N, won't scale).
+  //        DECISION: add a `key_lookup_prefix CHAR(8)` column in this PR via a new migration — see Schema change below.
+  //        Set on the row the request.lender_id = row.lender_id; call repo.TouchLenderAPIKeyLastUsed async (don't block the request).
+  //      Otherwise (JWT-shaped):
+  //        Delegate to jwtCheck (existing BearerAuth).
+  //   3. On either success: c.Set("lender_id", ...) and c.Next()
+  //   4. On failure: c.AbortWithStatusJSON(401, {"error": ...})
+  ```
+
+  ### Schema change — `migrations/<UTC-timestamp>_add_api_key_lookup_prefix.sql` (NEW)
+
+  Add a non-secret lookup column to `lender_api_keys`:
+
+      -- +goose Up
+      -- +goose StatementBegin
+      ALTER TABLE lender_api_keys
+          ADD COLUMN key_lookup_prefix CHAR(8);
+      CREATE INDEX idx_lender_api_keys_lookup_prefix
+          ON lender_api_keys(key_lookup_prefix)
+          WHERE revoked_at IS NULL;
+      -- +goose StatementEnd
+
+      -- +goose Down
+      -- +goose StatementBegin
+      DROP INDEX IF EXISTS idx_lender_api_keys_lookup_prefix;
+      ALTER TABLE lender_api_keys DROP COLUMN IF EXISTS key_lookup_prefix;
+      -- +goose StatementEnd
+
+  The lookup_prefix is the first 8 chars of the RAW key body (not the hash) —
+  it's non-secret because the key has ~190 bits of entropy and 8 chars
+  ≈ 48 bits give attackers no useful narrowing (they'd still have to brute
+  force the remaining 142 bits and run argon2 to verify).
+
+  Update `internal/apikeys/keys.go` to add:
+
+      // LookupPrefix returns the first 8 chars of the key body (after the env prefix)
+      // suitable for non-secret storage in a queryable column.
+      func LookupPrefix(rawKey string) string
+
+  And `internal/products/repo.go` gets:
+
+      func (r *Repo) GetLenderAPIKeyByLookupPrefix(ctx context.Context, prefix string) ([]LenderAPIKey, error)
+      // Returns matching rows where revoked_at IS NULL; caller does argon2 verify
+      // against each to find the exact match. Usually 1 row, very rarely 2 (collision).
+
+  ### `internal/middleware/dual_auth_test.go` (NEW)
+  Coverage:
+  - `TestDualAuth_APIKey_HappyPath` — valid API key → sets lender_id, calls c.Next
+  - `TestDualAuth_APIKey_Revoked` — revoked_at != NULL → 401
+  - `TestDualAuth_APIKey_Unknown` — no matching prefix → 401
+  - `TestDualAuth_APIKey_PrefixCollision` — multiple rows for same prefix, verify the right argon2 match wins
+  - `TestDualAuth_JWT_DelegatesToExistingMiddleware` — valid JWT → delegates, doesn't trip API key path
+  - `TestDualAuth_NoHeader` — 401
+  - `TestDualAuth_WrongScheme` — 401
+  - `TestDualAuth_BearerEmpty` — 401
+  - `TestDualAuth_TouchLastUsed_DoesNotBlockResponse` — last_used_at update is async / non-blocking
+
+  ## Files to MODIFY
+
+  ### `internal/products/repo.go`
+  Add `GetLenderAPIKeyByLookupPrefix` (see above) and update existing
+  `CreateLenderAPIKey` to also persist the lookup_prefix.
+
+  ### `internal/apikeys/keys.go`
+  Add the `LookupPrefix(rawKey string) string` helper. Update Generate
+  documentation to note the lookup_prefix split.
+
+  ### `cmd/server/main.go`
+  Replace `authed := router.Group("/api/v1")` + the existing BearerAuth
+  with the new dual middleware:
+
+      dualAuth := middleware.NewDualAuth(repo, middleware.BearerAuth(cfg.Auth))
+      authed := router.Group("/api/v1")
+      authed.Use(dualAuth.Handler())
+
+  Keep `BearerAuth(cfg.Auth)` available so the dual middleware can delegate to it.
+
+  ## Files to NOT TOUCH
+
+  - `internal/handlers/*` — handlers already use `c.MustGet("lender_id")` (or
+    will from Phase 2 #8); the dual middleware preserves that contract
+  - The existing BearerAuth middleware — keep it, just delegate from dual
+  - Migrations from earlier initiatives — only ADD the new prefix-column migration
+
+  ## Constraints
+
+  - **Single middleware, no double-traversal.** Prefix routing in one
+    middleware, not two separate middlewares chained.
+  - **Argon2 verify is expensive** — keep API key auth at one argon2 call
+    per request (the candidate set from lookup_prefix should be 1-2 rows).
+  - **last_used_at update non-blocking** — fire-and-forget goroutine OR
+    deferred batched write. Don't make every API call wait for an UPDATE.
+  - **No JWT-claim lender_id binding in this PR** — that handler-level
+    enforcement (claim.lender_id == path.lender_id) belongs in #8 with the write endpoints.
+  - **Don't log raw keys.** Anywhere. Log the lender_id or the key_id (after lookup).
+  - Conventional commit: `feat(auth): add dual API-key + JWT auth middleware`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      gofmt -l .
+      golangci-lint run ./...
+      go test ./...
+      govulncheck ./...
+
+  ## What this is NOT
+
+  - Not the management endpoints (POST/GET/DELETE /api-keys) — that's #9.
+  - Not the write endpoints — that's #8.
+  - Not the Hydra OAuth2Client provisioning — that's #10 (gitops PR).
+
+  Expected agent behaviour: 5-7 turns. Crypto + middleware glue + a small migration.
+
+gate_marks:
+  - unit
+
+max_iterations: 7

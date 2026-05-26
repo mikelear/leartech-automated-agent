@@ -1,0 +1,171 @@
+# mortgages-api-add-read-endpoints — Phase 1 #2 (read API over the new schema)
+#
+# Consumes the schema + repo layer from `mortgages-api-add-products-schema`
+# and exposes it via HTTP. No write endpoints in this PR — those are
+# Phase 2 work. No auth wiring beyond the existing BearerAuth that
+# mortgages-api already uses on /api/v1/* — internal callers use the
+# existing service-to-service OAuth tokens; external read access (if/when
+# wanted later) gets added in a separate initiative.
+
+name: mortgages-api-add-read-endpoints
+
+description: |
+  Add read-only HTTP endpoints under /api/v1/ for the products platform:
+  GET /lenders, GET /lenders/{id}, GET /products (with query filters),
+  GET /products/{id}, GET /rates (aggregated band view). Handler layer
+  only — uses the products.Repo from the schema initiative. OpenAPI
+  annotations included.
+
+repo: leartech-mortgages-api
+branch: agent/add-read-endpoints
+base: main
+language: go
+
+goal: |
+  Expose the products + lenders schema (added in `mortgages-api-add-products-schema`)
+  via HTTP. Read-only surface only — POST/PUT/DELETE are Phase 2.
+
+  ## What success looks like
+
+  After this PR lands and deploys to staging:
+
+      curl -H "Authorization: Bearer <internal-jwt>" \
+        https://leartech-mortgages-api-jx-staging.jx.leartech.com/api/v1/products?product_class=residential
+      # → 200 OK + JSON array of products
+
+      curl -H "Authorization: Bearer <internal-jwt>" \
+        https://leartech-mortgages-api-jx-staging.jx.leartech.com/api/v1/lenders
+      # → 200 OK + JSON array of lenders
+
+      curl -H "Authorization: Bearer <internal-jwt>" \
+        https://leartech-mortgages-api-jx-staging.jx.leartech.com/api/v1/rates
+      # → 200 OK + aggregated rate bands (residential + btl, by LTV)
+
+  All endpoints require the existing BearerAuth middleware (same as
+  `/api/v1/example`). OpenAPI annotations auto-update `docs/openapi.json`
+  for the SDK generation step (next initiative).
+
+  ## Endpoint contracts
+
+  ### `GET /api/v1/lenders`
+  Query params: `active_only=true|false` (default true)
+  Returns: `200 [{lender}]`
+
+  ### `GET /api/v1/lenders/{id}`
+  Returns: `200 {lender}` or `404`
+
+  ### `GET /api/v1/products`
+  Query params (all optional, AND-joined):
+    - `lender_id=<uuid>`
+    - `product_class=residential|btl`
+    - `rate_type=fixed|tracker|variable|discount`
+    - `min_ltv_percent=<int>` (band-intersection: returns products whose `max_ltv_percent >= this`)
+    - `max_ltv_percent=<int>` (band-intersection: returns products whose `min_ltv_percent <= this`)
+    - `available_on=YYYY-MM-DD` (defaults to today)
+    - `limit=<int>` (default 100, max 500)
+    - `offset=<int>` (default 0)
+  Returns: `200 {"products": [...], "total": <int>, "offset": <int>, "limit": <int>}`
+
+  ### `GET /api/v1/products/{id}`
+  Returns: `200 {product}` or `404 {"error": "product not found"}`
+
+  ### `GET /api/v1/rates`
+  Aggregated view — group products by `product_class` + LTV band (60/75/80/85/90/95), return min initial_rate.
+  Returns: `200 {"residential": [{"ltv_percent": 60, "min_rate": 4.05, "product_count": 3}, ...], "btl": [...]}`
+
+  This endpoint mirrors what `mortgages-gw`'s `get_product_rates` MCP tool
+  currently computes from mockproducts. After this PR + the SDK swap PR,
+  the tool calls this endpoint instead of computing in-process.
+
+  ## Files to ADD
+
+  ### `internal/handlers/products.go`
+  Three handler types, each with a `RegisterRoutes(group *gin.RouterGroup)` method:
+
+      type LendersHandler struct { repo *products.Repo }
+      type ProductsHandler struct { repo *products.Repo }
+      type RatesHandler struct { repo *products.Repo }
+
+      func NewLendersHandler(repo *products.Repo) *LendersHandler
+      func NewProductsHandler(repo *products.Repo) *ProductsHandler
+      func NewRatesHandler(repo *products.Repo) *RatesHandler
+
+  Standard gin handler pattern. Each handler method:
+  1. Parses query/path params with validation
+  2. Calls the repo
+  3. Marshals response via `c.JSON(http.StatusOK, ...)`
+
+  OpenAPI annotations on every handler method (look at `internal/handlers/example.go`
+  for the swag annotation style — `@Summary`, `@Description`, `@Tags`, `@Param`,
+  `@Success`, `@Failure`, `@Router`, `@Security BearerAuth`).
+
+  ### `internal/handlers/products_test.go`
+  Table tests using the same pattern as `example_test.go`:
+  - happy path for each endpoint
+  - filter combinations on GET /products (lender_id + class, LTV band intersection)
+  - 404 on unknown id
+  - 400 on invalid filter values (bad UUID, unknown product_class enum, limit > 500)
+  - pagination round-trip (offset + limit return distinct windows)
+
+  ## Files to MODIFY
+
+  ### `cmd/server/main.go`
+  Wire the three handlers into the existing `authed` route group (the
+  one already at line ~133 with the BearerAuth middleware). One block,
+  same shape as exampleHandler:
+
+      repo := products.NewRepo(pool)
+      lendersHandler := handlers.NewLendersHandler(repo)
+      productsHandler := handlers.NewProductsHandler(repo)
+      ratesHandler := handlers.NewRatesHandler(repo)
+      lendersHandler.RegisterRoutes(authed)
+      productsHandler.RegisterRoutes(authed)
+      ratesHandler.RegisterRoutes(authed)
+
+  Pool is already passed into the example handler — reuse the same
+  pool reference.
+
+  ### `docs/` (auto-regenerated)
+  Run `make swag` (or whatever the template uses) so `docs/openapi.json`
+  picks up the new handler annotations. The CI may regenerate this
+  automatically — agent should check `make help` for the target name.
+
+  ## Files to NOT TOUCH
+
+  - `migrations/` — schema already exists from the previous initiative
+  - `internal/products/*` — repo layer is already in place
+  - `internal/middleware/*` — auth stays as-is
+  - `internal/config/config.go` — no new config keys
+  - `charts/leartech-mortgages-api/*` — no chart changes; new endpoints are auto-exposed via the existing ingress
+
+  ## Constraints
+
+  - **Read-only.** No POST/PUT/DELETE handlers; those are Phase 2.
+  - **BearerAuth on all endpoints** — match `internal/handlers/example.go`'s pattern.
+  - **Filter validation in handler.** Bad UUID → 400. Unknown enum → 400. Limit > 500 → cap at 500 (don't error).
+  - **Band-intersection semantics for LTV** — verify with explicit test cases (a 60% LTV query MUST return products whose max_ltv_percent >= 60, NOT products whose min_ltv_percent == 60).
+  - **Date handling**: use `available_on` query param parsed as `YYYY-MM-DD` UTC. Default to `time.Now().UTC().Truncate(24*time.Hour)`.
+  - **OpenAPI annotations on every handler** so the SDK generation in the next initiative captures the contracts.
+  - Conventional commit: `feat(api): add read endpoints for products, lenders, rates`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      gofmt -l .
+      golangci-lint run ./...
+      go test ./...
+      govulncheck ./...
+
+  ## What this is NOT
+
+  - Not the write API. That's `mortgages-api-add-lender-write-endpoints` (Phase 2).
+  - Not the SDK generation. That's `leartech-go-packages-publish-mortgages-api-sdk` (Phase 1 #4).
+  - Not the gw swap. That's `mortgages-gw-swap-mockproducts-for-sdk` (Phase 1 #5).
+  - Not the seed data. That's `mortgages-api-seed-product-data` (Phase 1 #3, runs independently).
+
+  Expected pipeline outcome: 11 PR checks green; release cuts minor bump.
+  Expected agent behaviour: 4-6 turns.
+
+gate_marks:
+  - unit
+
+max_iterations: 6

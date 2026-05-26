@@ -1,0 +1,141 @@
+# mortgages-api-add-lender-write-endpoints — Phase 2 #8
+#
+# POST/PUT/DELETE on /api/v1/lenders/{id}/products with lender_id-bound
+# authorisation. Admin role bypasses the binding check. Validates inbound
+# JSON against schema constraints + JSONB attribute shape.
+
+name: mortgages-api-add-lender-write-endpoints
+
+description: |
+  Add POST/PUT/DELETE under /api/v1/lenders/{lender_id}/products. Caller's
+  lender_id (from dual auth middleware) MUST match the path's lender_id
+  unless the caller has the admin role. JSONB `attributes` is validated
+  against an expected shape (ercs[], fees{}, features[], plus free-form keys).
+
+repo: leartech-mortgages-api
+branch: agent/add-lender-write-endpoints
+base: main
+language: go
+
+goal: |
+  Enable third-party lenders (and internal admins) to submit / update /
+  withdraw their products via REST.
+
+  ## What success looks like
+
+  Lender with API key for lender_id=L1 can:
+  - `POST   /api/v1/lenders/L1/products`        → 201, new product
+  - `PUT    /api/v1/lenders/L1/products/{pid}`  → 200, updated
+  - `DELETE /api/v1/lenders/L1/products/{pid}`  → 204
+  - All requests authenticated with the L1 API key
+
+  Same lender attempting L2's data:
+  - `POST   /api/v1/lenders/L2/products`        → 403 forbidden
+  - `PUT    /api/v1/lenders/L2/products/{pid}`  → 403
+  - `DELETE /api/v1/lenders/L2/products/{pid}`  → 403
+
+  Admin (JWT with admin role) can write to any lender's data.
+
+  ## Endpoint contracts
+
+  ### `POST /api/v1/lenders/{lender_id}/products`
+  Auth: API key for that lender OR admin JWT
+  Body: full Product JSON (matching the models.Product shape) minus ID/timestamps (server generates)
+  Returns: `201 {product}` with server-generated id, created_at, updated_at, submitted_by
+
+  ### `PUT /api/v1/lenders/{lender_id}/products/{product_id}`
+  Auth: same as POST
+  Body: full Product JSON (PUT = replace; no PATCH in this PR)
+  Returns: `200 {product}` with updated_at refreshed
+
+  ### `DELETE /api/v1/lenders/{lender_id}/products/{product_id}`
+  Auth: same
+  Returns: `204` no body. Implementation: hard delete (no soft-delete in MVP). Audit captured via products_history table later if compliance requires.
+
+  ## Validation rules (returned as 400 with descriptive message)
+
+  Beyond schema CHECK constraints (which the DB will enforce automatically):
+  - `initial_rate` between 0.0001 and 0.20 (0.01% – 20%)
+  - `max_ltv_percent >= min_ltv_percent` (DB enforces, but app validates first for nicer error)
+  - `max_loan_pence >= min_loan_pence` if both set
+  - `product_class IN ('residential', 'btl')`
+  - `rate_type IN ('fixed', 'tracker', 'variable', 'discount')`
+  - `attributes.ercs[]` if present: array of `{year: int 1-30, percent: float 0-20}`
+  - `attributes.fees{}` if present: object with int pence values (validate they're non-negative)
+  - `attributes.features[]` if present: array of strings, max 20 entries
+  - All other `attributes` keys: ANY shape allowed (this is the AI-consumer escape hatch)
+
+  ## Files to ADD
+
+  ### `internal/handlers/lender_products.go` (NEW)
+  Handler with POST/PUT/DELETE methods + RegisterRoutes:
+
+      type LenderProductsHandler struct {
+          repo *products.Repo
+      }
+      func NewLenderProductsHandler(repo *products.Repo) *LenderProductsHandler
+      func (h *LenderProductsHandler) RegisterRoutes(group *gin.RouterGroup)
+
+  Each handler method:
+  1. Parse path param `lender_id` (validate UUID)
+  2. Read `lender_id` + `is_admin` from gin context (set by dual middleware)
+  3. Authorisation check: if !is_admin && ctx.lender_id != path.lender_id → 403
+  4. Parse + validate body
+  5. Call repo
+  6. Return response
+
+  ### `internal/handlers/lender_products_test.go` (NEW)
+  Cover:
+  - Happy POST/PUT/DELETE for own lender via API key
+  - 403 on cross-lender attempt
+  - 200 admin override on cross-lender attempt
+  - 400 on each validation rule (rate too high, bad ercs shape, etc.)
+  - 404 on PUT/DELETE of non-existent product_id
+  - JSONB roundtrip preserves arbitrary attribute keys
+
+  ## Files to MODIFY
+
+  ### `cmd/server/main.go`
+  Wire the new handler into `authed` (same auth group).
+
+  ### `internal/products/repo.go`
+  If the existing CreateProduct / UpdateProduct don't set submitted_by, add support:
+  - submitted_by gets `api_key:<key_id>` (when called via API key) or `admin:<user>` (when called via JWT admin)
+  - Pass via context or explicit parameter
+
+  ## Files to NOT TOUCH
+
+  - `internal/middleware/dual_auth.go` — already does the auth routing
+  - `internal/products/models.go` — Product struct stays as-is
+  - `migrations/` — no schema changes in this PR
+
+  ## Constraints
+
+  - **lender_id binding enforced at handler level.** Don't rely on the DB
+    to fail the FK — fail fast with 403 BEFORE the DB call.
+  - **PUT is full replace**, not PATCH. PATCH semantics are a follow-up
+    initiative if needed.
+  - **submitted_by populated for every write** — audit who did what.
+  - **JSONB attributes validation in app code**, not DB triggers. Keeps
+    flexibility — adding new validators is a code change, not a migration.
+  - **DELETE is hard delete** in MVP. Soft-delete + history come if/when
+    compliance asks.
+  - **Idempotency**: not required in MVP. Phase 2.5 if real lenders ask for it.
+  - Conventional commit: `feat(api): add lender-bound write endpoints for products`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      gofmt -l . && golangci-lint run ./... && go test ./... && govulncheck ./...
+
+  ## What this is NOT
+
+  - Not the API-key management endpoints — that's #9
+  - Not the OAuth2Client provisioning — that's #10 (gitops)
+  - Not the admin UI lender list — that's Phase 3
+
+  Expected agent behaviour: 4-6 turns. Standard CRUD + auth-check pattern.
+
+gate_marks:
+  - unit
+
+max_iterations: 6

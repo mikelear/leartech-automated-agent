@@ -1,0 +1,87 @@
+# leartech-products-ui-add-api-key-management — Phase 3 #14
+#
+# Add the API key management page — lenders can create, list, revoke
+# their own API keys. Created-key value shown ONCE in a modal with
+# "Copy" button + warning.
+
+name: leartech-products-ui-add-api-key-management
+
+description: |
+  Page for managing API keys. Add to lender + admin nav. Lists existing
+  keys (masked previews + status), creates new ones (raw key shown ONCE
+  in a modal), revokes individual keys with confirmation. Uses the
+  endpoints from mortgages-api Phase 2 #9.
+
+repo: leartech-products-ui
+branch: agent/add-api-key-management
+base: main
+language: angular
+
+goal: |
+  Let lenders self-serve API key rotation. Admins can manage any lender's
+  keys (with a lender selector).
+
+  ## What success looks like
+
+  1. Lender clicks "API keys" in nav → /api-keys page
+  2. Sees a table: label, created_at, last_used_at, masked preview, status (active/revoked)
+  3. Clicks "New API key" → modal asks for a label → submit
+  4. Modal updates to show: the raw key value (`mqs_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`), "Copy" button, big warning: "This key will NEVER be shown again. Copy it now or you'll need to create a new one."
+  5. Close modal → table refreshes; new row appears with masked preview, no raw key
+  6. Click "Revoke" on a row → confirmation dialog → DELETE → row's status changes to "Revoked" (still shown for history)
+
+  ## Routes
+
+  - `/api-keys` — lender's keys
+  - `/admin/lenders/{id}/api-keys` — admin viewing any lender's keys
+
+  ## Components
+
+  - `ApiKeysPageComponent` — main table + "New key" CTA
+  - `CreateApiKeyModalComponent` — two-step (label input → raw key display)
+  - `ConfirmDialogComponent` — reused from #13 for revoke confirmation
+
+  ## Services
+
+  Add `ApiKeysService` wrapping the mortgages-api endpoints:
+  - `list(lenderId)` → GET /lenders/{lenderId}/api-keys
+  - `create(lenderId, label)` → POST /lenders/{lenderId}/api-keys, returns the response with raw_key
+  - `revoke(lenderId, keyId)` → DELETE /lenders/{lenderId}/api-keys/{keyId}
+
+  ## Constraints
+
+  - **Raw key shown ONCE** — never persisted to state, never sent to the
+    backend after display, never present in browser history / URLs. The
+    moment the modal closes the key is gone from memory.
+  - **Copy button**: uses `navigator.clipboard.writeText`. Show "Copied!" feedback for 2s after click.
+  - **Big visible warning** about non-recoverability before showing the key.
+  - **Self-revoke gotcha**: the create+revoke endpoints prevent a key
+    from revoking itself (returns 403). The UI doesn't know which key
+    is authenticating the current session (no way to tell from a JWT).
+    So if a revoke 403s, show: "This key cannot revoke itself. Use a different key (or admin can revoke any key for you)."
+  - **Masked preview format**: match exactly what the API returns; don't
+    re-format on the client.
+  - **No localisation, no styling polish.**
+  - Conventional commit: `feat: add API key management page`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      npm install --no-audit --no-fund
+      ng lint
+      ng test --watch=false --browsers=ChromeHeadless
+      ng build --configuration=production
+
+  ## What this is NOT
+
+  - Not the admin dashboard for cross-lender management — that's #15
+    (this PR's `/admin/lenders/{id}/api-keys` route is just exposed
+    when the user has admin role; admin lender-selection itself is in #15)
+  - Not key rotation automation
+  - Not per-key scopes / IP allow-lists (future enhancement)
+
+  Expected agent behaviour: 4-6 turns.
+
+gate_marks:
+  - unit
+
+max_iterations: 6

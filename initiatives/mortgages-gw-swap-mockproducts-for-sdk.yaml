@@ -1,0 +1,147 @@
+# mortgages-gw-swap-mockproducts-for-sdk — Phase 1 #5 (close out Phase 1)
+#
+# Replaces leartech-mortgages-gw's hardcoded `internal/mockproducts`
+# package with calls to the generated mortgages-api Go SDK. After this
+# lands, the MCP tools read from Postgres via the API rather than from
+# compiled-in fixtures. Mike Lear is then gated by the seed data + env
+# flag, not by Go code.
+
+name: mortgages-gw-swap-mockproducts-for-sdk
+
+description: |
+  Delete `internal/mockproducts/` entirely. Add a thin client wrapper that
+  calls leartech-mortgages-api via the generated SDK
+  (`github.com/mikelear/leartech-go-packages/mortgages-api`). The MCP tool
+  handlers' shape doesn't change — they just take a different source.
+
+repo: leartech-mortgages-gw
+branch: agent/swap-mockproducts-for-sdk
+base: main
+language: go
+
+goal: |
+  Replace `internal/mockproducts/` with SDK calls to mortgages-api. MCP tool
+  interface (input/output shapes) MUST NOT CHANGE — only the source flips
+  from compiled-in fixtures to a real API.
+
+  ## What success looks like
+
+  After this PR + the previous 4 initiatives are deployed:
+
+      ./demo/smoke-tests.sh
+      # → all 26 assertions pass, but the data is now sourced from
+      #   mortgages-api over HTTP (verify by tailing mortgages-api logs
+      #   while smoke runs)
+
+      kubectl -n jx-production exec ... -- ls /app | grep mockproducts
+      # → not present in the binary; the package is gone
+
+  Smoke tests must continue to pass unchanged. Same product IDs
+  (`mlsm-res-5yr-80`, `barc-res-5yr-80`, etc.) — those come from the
+  seed data initiative.
+
+  ## Files to ADD
+
+  ### `internal/productsclient/client.go` (NEW)
+  Thin wrapper over the SDK that exposes the same surface mockproducts had:
+
+      package productsclient
+
+      type Client struct {
+          sdk *mortgagesapi.Client
+      }
+
+      func New(baseURL string, tokenSource oauth2.TokenSource) (*Client, error)
+
+      // Mirror the existing mockproducts.{Find, Search, GetAllRates} signatures
+      // so the tool handlers don't have to change shape — only the import.
+      func (c *Client) Find(ctx context.Context, productID string) (*Product, bool)
+      func (c *Client) Search(ctx context.Context, criteria SearchCriteria) ([]Product, error)
+      func (c *Client) GetAllRates(ctx context.Context) (Rates, error)
+
+  The Product, SearchCriteria, ERC types: REUSE the mockproducts types if
+  practical (move them to a new top-level `internal/types` package or keep
+  them in productsclient). Either way, the MCP tool handlers' compile-time
+  surface stays unchanged.
+
+  ## Files to MODIFY
+
+  ### `internal/mcphandler/server.go`
+  - Replace `import .../mockproducts` with `import .../productsclient`
+  - The handler functions' signatures stay the same — just swap the call site
+  - Constructor takes a `*productsclient.Client` instead of using package-level fixture access
+
+  ### `cmd/server/main.go`
+  - Wire up the productsclient — pass mortgages-api URL + service-to-service OAuth token source
+  - Inject the client into mcphandler.New()
+  - Config: read MORTGAGES_API_BASE_URL from env (default to in-cluster URL `http://leartech-mortgages-api.jx-staging:8080` for staging; via configs/ for prod)
+
+  ### `internal/config/config.go`
+  Add new env config:
+
+      MortgagesAPIBaseURL string `envconfig:"MORTGAGES_API_BASE_URL" required:"true"`
+
+  ### `charts/leartech-mortgages-gw/values.yaml`
+  Add default MORTGAGES_API_BASE_URL env injection (templated from values).
+
+  ### `helmfiles/<env>/configs/leartech-mortgages-gw.yaml` (gitops repo)
+  Set the per-env URL — agent should call this out for follow-up by the
+  operator (or open the gitops PR multi-repo style).
+
+  ## Files to DELETE
+
+  ### `internal/mockproducts/` (ENTIRE PACKAGE)
+  All files: `products.go`, `products_test.go`. Mockproducts ceases to exist.
+  If any internal handler still imports it after the swap, the build will
+  catch it — fix the import.
+
+  ## Files to NOT TOUCH
+
+  - `internal/middleware/*` — auth stays as-is
+  - `internal/handlers/*` REST handlers — unaffected
+  - `demo/smoke-tests.sh` — assertions must continue to pass UNCHANGED. If
+    they break, something is wrong with the swap, not the smoke pack.
+
+  ## Constraints
+
+  - **MCP tool input/output schemas DO NOT CHANGE.** Same JSON shape, same
+    field names, same enum values. The MCP client (ChatGPT) does not see
+    this swap.
+  - **Smoke pack must remain green** against staging post-merge.
+  - **NO new mockproducts data.** All product data is now in mortgages-api's
+    DB. The gw is a stateless edge.
+  - **Service-to-service auth.** mortgages-gw → mortgages-api uses the
+    existing leartech-go-common auth.ServiceClient pattern (audience-bound
+    JWT from Hydra). DO NOT use an API key for this — internal traffic
+    stays OAuth client-credentials.
+  - **Caching**: do NOT add a cache layer in this PR. If hot-path performance
+    becomes an issue later, add it as a separate initiative.
+  - **fail-fast on API down**: if mortgages-api is unreachable, MCP tool
+    calls return a clear error (the same pattern compare_products / get_product
+    already use for not-found). Don't silently fall back to nothing.
+  - Conventional commit: `refactor(gw): swap mockproducts for mortgages-api SDK`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      gofmt -l .
+      golangci-lint run ./...
+      go test ./...   # includes mcphandler tests; they should pass with mocked client
+      govulncheck ./...
+
+  ## What this is NOT
+
+  - Not a Mike Lear removal step — Mike Lear is in/out via the seed data env flag now
+  - Not an MCP protocol change — tool catalogue and shapes are stable
+  - Not a write surface — the gw stays read-only against mortgages-api
+
+  ## Why this is the final Phase-1 initiative
+
+  After this: data lives in Postgres, mortgages-gw is a thin shim, mockproducts is dead. The ChatGPT submission is unblocked on the data side. Phase 2 (third-party submission API) can land at its own pace; Phase 3 (admin UI) is parallel.
+
+  Expected agent behaviour: 5-8 turns. The refactor touches more files
+  than the schema PR but each touch is small.
+
+gate_marks:
+  - unit
+
+max_iterations: 7

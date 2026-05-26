@@ -1,0 +1,112 @@
+# leartech-products-ui-add-lender-dashboard — Phase 3 #12
+#
+# First feature on the new UI: lender login + dashboard listing the lender's
+# own products. Read-only in this PR; product editing comes next.
+
+name: leartech-products-ui-add-lender-dashboard
+
+description: |
+  Add the lender dashboard route: log in via OAuth auth-code + PKCE,
+  read JWT, fetch GET /lenders/{my_lender_id}/products (filtered by claim's
+  lender_id), display in a table. Read-only — edit lands in #13.
+
+repo: leartech-products-ui
+branch: agent/add-lender-dashboard
+base: main
+language: angular
+
+goal: |
+  Get a lender logged in and looking at their own products.
+
+  ## What success looks like
+
+  After this PR + the OAuth2Client gitops PR + the mortgages-api endpoints are deployed:
+
+  1. Visit `https://leartech-products-ui-jx-staging.jx.leartech.com`
+  2. Click "Sign in" → redirected to leartech-auth-ui
+  3. Log in with a lender-role test user → redirected back to /dashboard
+  4. See a table of products belonging to that lender's lender_id, with columns: product code, name, class, rate type, initial rate, LTV band, status (active/expired by available_to)
+  5. Empty state if the lender has no products yet
+
+  ## Routes
+
+  - `/` — landing / "Sign in" CTA
+  - `/auth/callback` — OAuth callback handler (token exchange + redirect to /dashboard)
+  - `/dashboard` — guarded; if no token → redirect to /
+  - `/logout` — clear token, redirect to /
+
+  ## Components
+
+  - `AppComponent` — shell + nav
+  - `LandingComponent` — sign-in button
+  - `AuthCallbackComponent` — exchanges code for token, stores it, redirects
+  - `DashboardComponent` — fetches + displays products
+  - `ProductsTableComponent` — table widget; takes products as input
+
+  ## Services
+
+  - `AuthService` — OAuth auth-code + PKCE flow, token storage (httpOnly cookie via backend OR sessionStorage), token refresh
+  - `ProductsService` — wraps GET /lenders/{id}/products
+
+  ## Files to ADD / MODIFY
+
+  Standard Angular structure. Agent: read the existing
+  `leartech-auth-ui` repo (`~/leartech/leartech-auth-ui/`) for the
+  OAuth client implementation pattern; mirror it. Auth uses the
+  `products-ui-lender` OAuth2Client provisioned in Phase 2 #10.
+
+  Key files (expected):
+
+  - `src/app/services/auth.service.ts` — OAuth state machine, PKCE code verifier handling, token storage
+  - `src/app/services/products.service.ts` — typed HTTP wrapper
+  - `src/app/components/landing/landing.component.{ts,html,scss}`
+  - `src/app/components/auth-callback/auth-callback.component.ts`
+  - `src/app/components/dashboard/dashboard.component.{ts,html,scss}`
+  - `src/app/components/products-table/products-table.component.{ts,html,scss}`
+  - `src/app/guards/auth.guard.ts` — route guard for /dashboard
+  - `src/environments/environment.ts` + `environment.staging.ts` — auth-uri, client_id, products-api base URL
+
+  Add Angular Material (or whatever the template uses for tables) if not
+  already installed. Mirror existing leartech-auth-ui dependency choices.
+
+  ## Files to NOT TOUCH
+
+  - Chart files — no chart changes needed
+  - `.lighthouse/jenkins-x/*` — pipelines are fine as-is
+  - Auth services beyond what the template provides
+
+  ## Constraints
+
+  - **JWT claim binding**: `lender_id` claim from the JWT is the source
+    of truth for which products to fetch. Don't trust client-side state.
+  - **Token storage**: prefer browser session storage with refresh from
+    refresh_token, OR backend-proxy via a tiny BFF. Don't put JWTs in
+    localStorage (XSS risk).
+  - **PKCE only** — never embed a client_secret in the SPA.
+  - **Read-only in this PR** — no edit/delete UI. Buttons can be greyed
+    out / hidden; functionality comes in #13.
+  - **No internationalisation in MVP** — English only. i18n is a future story.
+  - **No design polish required.** Functional + readable. Visual design is
+    a separate concern.
+  - Conventional commit: `feat: add lender dashboard with OAuth login`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      npm install --no-audit --no-fund
+      ng lint
+      ng test --watch=false --browsers=ChromeHeadless
+      ng build --configuration=production
+
+  ## What this is NOT
+
+  - Not the product editor — that's #13
+  - Not the API key management UI — that's #14
+  - Not the admin dashboard — that's #15
+
+  Expected agent behaviour: 5-8 turns. Real Angular work; reference
+  leartech-auth-ui heavily.
+
+gate_marks:
+  - unit
+
+max_iterations: 8

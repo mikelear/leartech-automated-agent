@@ -1,0 +1,340 @@
+# mortgages-api-add-products-schema — first domino of Session 3
+#
+# Replaces the static Go fixtures in leartech-mortgages-gw's mockproducts
+# package with a real Postgres-backed data platform. This initiative is
+# *just* the schema + Go model layer + repo (DB-access) layer. HTTP
+# endpoints, seed data, and the SDK swap-over happen in subsequent
+# single-purpose initiatives.
+#
+# Schema design follows the "typed-for-filterable, JSONB-for-displayable"
+# heuristic decided after surveying mqube-product-service (whose regret was
+# being jsonb-heavy then needing to query attrs they thought were display-
+# only). Our consumer is an LLM (ChatGPT via MCP) — semi-structured data
+# is its sweet spot — so we keep the typed surface lean to what we'd ever
+# WHERE-clause against, and JSONB for everything else.
+
+name: mortgages-api-add-products-schema
+
+description: |
+  Add Postgres schema + Go model + repo layer for mortgage products in
+  leartech-mortgages-api. Schema only — HTTP endpoints land in the
+  follow-up `mortgages-api-add-read-endpoints` initiative. Three tables:
+  lenders, products (with typed columns + JSONB `attributes`), and
+  lender_api_keys (argon2-hashed key storage for Session 3 Phase 2).
+
+repo: leartech-mortgages-api
+branch: agent/add-products-schema
+base: main
+language: go
+
+goal: |
+  Lay the data foundation for the leartech mortgage products platform.
+  Schema + Go layer only — no HTTP, no JSON marshalling for clients,
+  no seed data.
+
+  ## What success looks like
+
+  After this PR lands and the migration runs:
+
+  ```sql
+  \d lenders
+  \d products
+  \d lender_api_keys
+  ```
+
+  …show the three tables with the columns specified below. The Go
+  `internal/products` package compiles, repo unit tests pass, and
+  `go test ./...` exits 0.
+
+  Subsequent initiatives consume this:
+    - `mortgages-api-add-read-endpoints` adds GET endpoints reading via the repo
+    - `mortgages-api-seed-product-data` seeds the 10 real lenders + (env-gated) Mike Lear
+    - `mortgages-api-add-lender-api-keys-schema` reuses `lender_api_keys` here, adding auth middleware
+    - `mortgages-api-add-lender-write-endpoints` reuses the repo for POST/PUT/DELETE
+
+  ## Files to ADD
+
+  ### 1. `migrations/20260526120000_add_products_schema.sql` (NEW)
+
+  Goose-format up/down migration. Schema:
+
+  ```sql
+  -- +goose Up
+  -- +goose StatementBegin
+
+  CREATE EXTENSION IF NOT EXISTS pgcrypto;  -- for gen_random_uuid()
+
+  CREATE TABLE lenders (
+      id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      slug            TEXT NOT NULL UNIQUE,
+      name            TEXT NOT NULL,
+      contact_email   TEXT,
+      active          BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE products (
+      id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      lender_id       UUID NOT NULL REFERENCES lenders(id) ON DELETE RESTRICT,
+
+      product_code            TEXT NOT NULL,
+      name                    TEXT NOT NULL,
+      product_class           TEXT NOT NULL CHECK (product_class IN ('residential', 'btl')),
+      rate_type               TEXT NOT NULL CHECK (rate_type IN ('fixed', 'tracker', 'variable', 'discount')),
+      initial_rate            NUMERIC(6,4) NOT NULL,
+      initial_period_months   INTEGER NOT NULL DEFAULT 0,
+      min_ltv_percent         INTEGER NOT NULL DEFAULT 0 CHECK (min_ltv_percent BETWEEN 0 AND 100),
+      max_ltv_percent         INTEGER NOT NULL CHECK (max_ltv_percent BETWEEN 0 AND 100),
+      min_loan_pence          BIGINT NOT NULL DEFAULT 0 CHECK (min_loan_pence >= 0),
+      max_loan_pence          BIGINT,
+      min_term_months         INTEGER NOT NULL DEFAULT 60 CHECK (min_term_months > 0),
+      max_term_months         INTEGER NOT NULL DEFAULT 480 CHECK (max_term_months > 0),
+      available_from          DATE NOT NULL DEFAULT CURRENT_DATE,
+      available_to            DATE,
+
+      attributes              JSONB NOT NULL DEFAULT '{}'::jsonb,
+
+      submitted_by            TEXT,
+      created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+
+      UNIQUE (lender_id, product_code, available_from),
+      CHECK (min_ltv_percent <= max_ltv_percent),
+      CHECK (min_term_months <= max_term_months),
+      CHECK (max_loan_pence IS NULL OR max_loan_pence >= min_loan_pence),
+      CHECK (available_to IS NULL OR available_to >= available_from)
+  );
+
+  CREATE INDEX idx_products_lender         ON products(lender_id);
+  CREATE INDEX idx_products_class_rate     ON products(product_class, rate_type);
+  CREATE INDEX idx_products_available      ON products(available_from, available_to);
+  CREATE INDEX idx_products_ltv            ON products(min_ltv_percent, max_ltv_percent);
+  CREATE INDEX idx_products_attributes_gin ON products USING GIN (attributes);
+
+  CREATE TABLE lender_api_keys (
+      id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      lender_id       UUID NOT NULL REFERENCES lenders(id) ON DELETE CASCADE,
+      key_hash        TEXT NOT NULL UNIQUE,
+      label           TEXT NOT NULL,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+      last_used_at    TIMESTAMPTZ,
+      revoked_at      TIMESTAMPTZ
+  );
+
+  CREATE INDEX idx_lender_api_keys_lender ON lender_api_keys(lender_id);
+  CREATE INDEX idx_lender_api_keys_active ON lender_api_keys(lender_id) WHERE revoked_at IS NULL;
+
+  -- +goose StatementEnd
+
+  -- +goose Down
+  -- +goose StatementBegin
+  DROP TABLE IF EXISTS lender_api_keys;
+  DROP TABLE IF EXISTS products;
+  DROP TABLE IF EXISTS lenders;
+  -- +goose StatementEnd
+  ```
+
+  ### 2. `internal/products/models.go` (NEW)
+
+  Go structs mirroring the schema. Use stdlib + pgx types.
+
+  ```go
+  package products
+
+  import (
+      "encoding/json"
+      "time"
+
+      "github.com/google/uuid"
+      "github.com/jackc/pgx/v5/pgtype"
+  )
+
+  type Lender struct {
+      ID           uuid.UUID  `json:"id"`
+      Slug         string     `json:"slug"`
+      Name         string     `json:"name"`
+      ContactEmail *string    `json:"contact_email,omitempty"`
+      Active       bool       `json:"active"`
+      CreatedAt    time.Time  `json:"created_at"`
+      UpdatedAt    time.Time  `json:"updated_at"`
+  }
+
+  type Product struct {
+      ID                  uuid.UUID       `json:"id"`
+      LenderID            uuid.UUID       `json:"lender_id"`
+      ProductCode         string          `json:"product_code"`
+      Name                string          `json:"name"`
+      ProductClass        string          `json:"product_class"`
+      RateType            string          `json:"rate_type"`
+      InitialRate         pgtype.Numeric  `json:"initial_rate"`
+      InitialPeriodMonths int             `json:"initial_period_months"`
+      MinLTVPercent       int             `json:"min_ltv_percent"`
+      MaxLTVPercent       int             `json:"max_ltv_percent"`
+      MinLoanPence        int64           `json:"min_loan_pence"`
+      MaxLoanPence        *int64          `json:"max_loan_pence,omitempty"`
+      MinTermMonths       int             `json:"min_term_months"`
+      MaxTermMonths       int             `json:"max_term_months"`
+      AvailableFrom       time.Time       `json:"available_from"`
+      AvailableTo         *time.Time      `json:"available_to,omitempty"`
+      Attributes          json.RawMessage `json:"attributes"`
+      SubmittedBy         *string         `json:"submitted_by,omitempty"`
+      CreatedAt           time.Time       `json:"created_at"`
+      UpdatedAt           time.Time       `json:"updated_at"`
+  }
+
+  type LenderAPIKey struct {
+      ID         uuid.UUID  `json:"id"`
+      LenderID   uuid.UUID  `json:"lender_id"`
+      KeyHash    string     `json:"-"`              // never serialised
+      Label      string     `json:"label"`
+      CreatedAt  time.Time  `json:"created_at"`
+      LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+      RevokedAt  *time.Time `json:"revoked_at,omitempty"`
+  }
+  ```
+
+  Notes:
+  - `Attributes` as `json.RawMessage` — passes JSONB through untouched
+  - `KeyHash` has json tag `-` so it can NEVER be serialised to a response
+  - Pointer types for nullable columns to distinguish "zero" from "unset"
+
+  ### 3. `internal/products/repo.go` (NEW)
+
+  Repo layer providing CRUD via pgxpool. Methods:
+
+  ```go
+  func NewRepo(pool *pgxpool.Pool) *Repo
+
+  func (r *Repo) GetLender(ctx context.Context, id uuid.UUID) (*Lender, error)
+  func (r *Repo) GetLenderBySlug(ctx context.Context, slug string) (*Lender, error)
+  func (r *Repo) ListLenders(ctx context.Context, activeOnly bool) ([]Lender, error)
+  func (r *Repo) CreateLender(ctx context.Context, l *Lender) error
+  func (r *Repo) UpdateLender(ctx context.Context, l *Lender) error
+
+  func (r *Repo) GetProduct(ctx context.Context, id uuid.UUID) (*Product, error)
+  func (r *Repo) ListProducts(ctx context.Context, f ListProductsFilter) ([]Product, error)
+  func (r *Repo) CreateProduct(ctx context.Context, p *Product) error
+  func (r *Repo) UpdateProduct(ctx context.Context, p *Product) error
+  func (r *Repo) DeleteProduct(ctx context.Context, id uuid.UUID) error
+
+  func (r *Repo) GetLenderAPIKeyByHash(ctx context.Context, keyHash string) (*LenderAPIKey, error)
+  func (r *Repo) ListLenderAPIKeys(ctx context.Context, lenderID uuid.UUID) ([]LenderAPIKey, error)
+  func (r *Repo) CreateLenderAPIKey(ctx context.Context, k *LenderAPIKey) error
+  func (r *Repo) RevokeLenderAPIKey(ctx context.Context, id uuid.UUID) error
+  func (r *Repo) TouchLenderAPIKeyLastUsed(ctx context.Context, id uuid.UUID) error
+  ```
+
+  Filter struct for `ListProducts`:
+
+  ```go
+  type ListProductsFilter struct {
+      LenderID       *uuid.UUID
+      ProductClass   *string         // 'residential' | 'btl'
+      RateType       *string
+      MinLTVPercent  *int            // any product whose max_ltv_percent >= this
+      MaxLTVPercent  *int            // any product whose min_ltv_percent <= this
+      AvailableOn    *time.Time      // products where available_from <= X AND (available_to IS NULL OR available_to >= X)
+      Limit          int             // 0 = default 100
+      Offset         int
+  }
+  ```
+
+  Build queries with `squirrel` if it's already in go.mod, otherwise plain
+  parametrised SQL using `pool.Query/QueryRow`. NO string concatenation
+  for filters — always parameter binding.
+
+  ### 4. `internal/products/repo_test.go` (NEW)
+
+  Mirror the test pattern used in `internal/handlers/example_test.go` (use
+  the same mock-pool / testcontainers / sqlmock approach already
+  established — check what `example_test.go` does and follow that
+  convention; do NOT introduce a different test infra). At minimum,
+  cover:
+
+  - `TestRepo_CreateLender_Roundtrip`
+  - `TestRepo_GetLenderBySlug_NotFound`
+  - `TestRepo_CreateProduct_Roundtrip`
+  - `TestRepo_ListProducts_FilterByClass`
+  - `TestRepo_ListProducts_FilterByLTV` — verifies the band-intersection semantics
+  - `TestRepo_CreateLenderAPIKey_Roundtrip`
+  - `TestRepo_GetLenderAPIKeyByHash_ReturnsLenderID`
+
+  If `example_test.go` uses pgxmock, use the same. If it uses
+  testcontainers/postgres, use the same. The agent should NOT add a new
+  testing dependency — match what's already there.
+
+  ## Files to NOT TOUCH
+
+  - `cmd/server/main.go` — no HTTP wiring in this PR
+  - `internal/handlers/*` — handlers come in the next initiative
+  - `internal/config/config.go` — DB DSN is already configured
+  - `migrations/20260416000001_initial.sql` — leave the placeholder for now; a later cleanup initiative can drop the `example` table
+  - `charts/leartech-mortgages-api/*` — no chart changes needed; the existing migrations Job runs goose against the new file automatically
+  - `docs/` — openapi gen runs against the handler annotations; with no new endpoints, no doc changes
+
+  ## Constraints
+
+  - **Pure data layer.** No HTTP endpoints, no MCP wiring, no Hydra
+    interaction. Pure SQL + Go structs + repo CRUD.
+  - **goose format strictly.** Filename `<UTC-timestamp>_<descriptive-name>.sql`,
+    Up + Down sections, StatementBegin/End around multi-statement bodies.
+  - **No new dependencies** unless `pgtype` / `uuid` / `squirrel` aren't
+    already in go.mod. Check first; reuse what's there.
+  - **Match the test pattern** already in `internal/handlers/example_test.go` —
+    don't introduce a different DB-test approach.
+  - **All CHECK constraints in the schema.** Don't move validation to the
+    Go layer that the DB can enforce.
+  - **Index everything that ListProducts filters on.** Lender, class, rate_type,
+    LTV bands, dates. JSONB attributes get a GIN index for future jsonb-path
+    queries.
+  - **Argon2 hashing is NOT in this PR.** `lender_api_keys.key_hash` stores
+    a TEXT — the actual argon2 work lands in
+    `mortgages-api-add-lender-api-keys-schema` (Phase 2). This initiative
+    just creates the table shape.
+  - Conventional commit: `feat(db): add products + lenders + lender_api_keys schema`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation (per the calibration lesson)
+
+  Before pushing the branch:
+
+      gofmt -l .                # must be empty
+      golangci-lint run ./...   # all green
+      go test ./...             # all green
+      govulncheck ./...         # if available
+
+  ## What this is NOT
+
+  - Not the read API. That's `mortgages-api-add-read-endpoints`.
+  - Not the write API. That's `mortgages-api-add-lender-write-endpoints`.
+  - Not the API-key auth middleware. That's `mortgages-api-add-api-key-middleware`.
+  - Not the seed data. That's `mortgages-api-seed-product-data` (with
+    env-gating to keep Mike Lear out of production).
+  - Not a refactor of mortgages-gw — the swap from mockproducts to the
+    SDK is `mortgages-gw-swap-mockproducts-for-sdk` and lands after the
+    SDK is published.
+  - Not the chart migrations Job wiring. The existing helm chart's
+    migrations Job already runs goose against `migrations/*.sql`; this
+    PR's file is picked up automatically.
+
+  ## Why this is split from the read API
+
+  Two small PRs vs one large PR:
+  - Schema design + repo + tests is one self-contained concern that's easy
+    to review (no HTTP noise).
+  - Read endpoints + openapi annotations + handler tests is a second
+    concern with its own review surface.
+  - Independent merge means schema can land + run in staging before
+    endpoints come online — gives us a window to spot migration issues
+    without a half-broken API.
+
+  Expected pipeline outcome: 11 PR checks green; release cuts a minor
+  bump (new feature).
+  Expected agent behaviour: 4-6 turns. Mechanical schema + repo work
+  with tests.
+
+gate_marks:
+  - unit
+
+max_iterations: 6

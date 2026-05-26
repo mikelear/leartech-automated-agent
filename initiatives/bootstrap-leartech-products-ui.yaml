@@ -1,0 +1,147 @@
+# bootstrap-leartech-products-ui — Phase 3 #11 (multi-repo)
+#
+# Bootstraps the leartech-products-ui Angular repo from
+# leartech-angular-service-template. Pushes the initial cloned content
+# to the empty repo at mikelear/leartech-products-ui, AND opens a PR
+# against jx-build-cluster-gsm to register it in source-config +
+# pre-create the helmfile configs files (per the
+# new-repo-pre-create-gitops-config lesson).
+
+name: bootstrap-leartech-products-ui
+
+description: |
+  Clone the leartech-angular-service-template into the empty repo
+  `mikelear/leartech-products-ui`, rebrand (name, descriptions, paths),
+  push as the initial main commit. Open a coordinated gitops PR on
+  jx-build-cluster-gsm registering the new repo in source-config and
+  pre-creating helmfiles/jx-staging/configs/leartech-products-ui.yaml.
+
+repos:
+  - repo: leartech-products-ui
+    branch: main
+    base: main
+  - repo: jx-build-cluster-gsm
+    branch: agent/register-leartech-products-ui
+    base: main
+
+language: angular
+
+goal: |
+  Take an empty GitHub repo (`mikelear/leartech-products-ui`, created
+  2026-05-26) and populate it from the canonical Angular service
+  template. Coordinate the gitops registration so jx-promote works on
+  the first release.
+
+  ## What success looks like
+
+  After this lands:
+
+  - `git clone https://github.com/mikelear/leartech-products-ui` returns
+    a fully-rebranded service template — Chart.yaml, package.json,
+    angular.json, etc. all say `leartech-products-ui`, not
+    `leartech-angular-service-template`
+  - `mikelear/jx-build-cluster-gsm` has the new service registered in
+    `.lighthouse/jenkins-x/source-config.yaml` (under whichever spec
+    structure the existing entries use)
+  - `mikelear/jx-build-cluster-gsm/helmfiles/jx-staging/configs/leartech-products-ui.yaml`
+    exists (even if empty + comment placeholder) so the first jx-promote
+    PR doesn't tank because of the missing-config-file bug
+  - First CI pipeline on the new repo runs and goes green (or red, but
+    only for substantive code reasons — not "infrastructure not wired")
+
+  ## Investigate before changing files
+
+  Read `~/leartech/leartech-angular-service-template` end-to-end. Identify:
+  - Files containing `leartech-angular-service-template` literal (Chart.yaml, package.json, etc.)
+  - Directory names containing it (`charts/leartech-angular-service-template/`)
+  - Module references in TypeScript
+  - CI / pipeline files in `.lighthouse/`
+  - Any `_helpers.tpl` chart references
+
+  Read existing entries in `~/leartech/jx-build-cluster-gsm/.lighthouse/jenkins-x/source-config.yaml` (or `source-config.yml`)
+  to understand the registration shape.
+
+  ## Files to ADD (in `mikelear/leartech-products-ui`)
+
+  Mirror the template's full file set, with `leartech-angular-service-template` → `leartech-products-ui` substituted in:
+  - File contents (package.json, angular.json, Chart.yaml, _helpers.tpl, etc.)
+  - File names (chart directory `charts/leartech-products-ui/`)
+  - Module references (e.g. `import ... from '@leartech/...'` is fine if the npm scope stays the same)
+
+  Description / display-name fields: `"Mortgage products admin UI — lender self-service + internal admin"`
+
+  ## Files to ADD (in `mikelear/jx-build-cluster-gsm`)
+
+  ### `helmfiles/jx-staging/configs/leartech-products-ui.yaml` (NEW)
+  Placeholder with a comment:
+
+  ```yaml
+  # leartech-products-ui — staging override
+  #
+  # No environment-specific overrides yet. The chart's defaults work fine
+  # in staging. Add keys here as the service grows.
+  ```
+
+  ### `helmfiles/jx-production/configs/leartech-products-ui.yaml` (NEW)
+  Similar placeholder for production (per the lesson that says pre-create
+  even when empty).
+
+  ## Files to MODIFY (in `mikelear/jx-build-cluster-gsm`)
+
+  ### `.lighthouse/jenkins-x/source-config.yaml` (or `source-config.yml`)
+  Append `leartech-products-ui` to the appropriate spec structure (mirror
+  the shape used by `leartech-auth-ui` — it's the closest existing analog).
+
+  ## Files to NOT TOUCH
+
+  - Other source-config entries (don't refactor)
+  - Existing helmfiles entries
+  - The angular-service-template repo itself — that's the source, leave it pristine
+
+  ## Constraints
+
+  - **Identifier substitution must be complete.** A grep for `leartech-angular-service-template`
+    in the new repo should return ZERO results after the bootstrap.
+    Use `git grep` to verify before pushing.
+  - **NO functional code changes** beyond rebranding. Login screen, basic
+    routing, health-check page — all come unchanged from the template.
+    Each subsequent initiative (#12-15) adds the actual features.
+  - **First commit is "chore: initial commit from leartech-angular-service-template"**
+    or similar — leave Conventional Commits room for the actual features
+    in subsequent PRs.
+  - **The gitops PR is COORDINATED with the service-repo push** — service
+    repo lands first (so the helmfile target exists), gitops PR opens
+    immediately after.
+  - **Match the existing source-config entry shape** for an Angular
+    service. `leartech-auth-ui` is the closest reference; mirror its
+    structure exactly.
+  - Always post `/hold` immediately after opening both PRs.
+
+  ## Pre-push validation
+
+  In `leartech-products-ui` after bootstrap:
+      npm install --no-audit --no-fund
+      ng lint || (npx ng lint || true)  # tolerate template's existing lint warnings if any
+      ng test --watch=false --browsers=ChromeHeadless
+      # If toolchain unavailable in image, note it in sticky
+
+  In `jx-build-cluster-gsm`:
+      helm lint charts/jx-staging-resources/  # if any chart references need updating
+      # source-config has its own validator — usually nothing to run locally
+
+  ## What this is NOT
+
+  - Not the lender dashboard — Phase 3 #12
+  - Not the product editor — Phase 3 #13
+  - Not the API key management UI — Phase 3 #14
+  - Not the admin dashboard — Phase 3 #15
+  - Not a public hostname wiring (Tier-2 ingress) — that's a follow-up
+    after the UI has real features
+
+  Expected agent behaviour: 5-8 turns. Mostly mechanical substitution +
+  one coordinated gitops PR.
+
+gate_marks:
+  - unit
+
+max_iterations: 8

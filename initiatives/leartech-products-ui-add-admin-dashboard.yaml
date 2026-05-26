@@ -1,0 +1,123 @@
+# leartech-products-ui-add-admin-dashboard — Phase 3 #15
+#
+# Admin-only views: list all lenders + their products. Lender provisioning
+# (admin creates lender accounts). Cross-lender product editing.
+
+name: leartech-products-ui-add-admin-dashboard
+
+description: |
+  Add admin-only routes: list of all lenders, drill into any lender's
+  products, create / edit / disable lender accounts. Reuses the
+  ProductFormComponent and ApiKeysPageComponent from earlier initiatives;
+  the difference is admin can edit on behalf of any lender.
+
+repo: leartech-products-ui
+branch: agent/add-admin-dashboard
+base: main
+language: angular
+
+goal: |
+  Internal admin surface for managing the whole platform.
+
+  ## What success looks like
+
+  Admin signs in (admin role JWT claim from `products-ui-admin` OAuth2Client).
+  Sees additional nav entries: "Lenders" + "All products".
+
+  - `/admin/lenders` — table of all lenders (id, slug, name, contact_email, active, product_count)
+  - Click "+ New lender" → modal form → POST creates lender account
+  - Click a lender row → `/admin/lenders/{id}` — that lender's dashboard (products + API keys, same views as lender's own but pre-filtered to that lender)
+  - From there, "Edit", "Delete", "Disable", "New product", "Manage keys" all work — admin bypasses the lender_id binding check (server enforces this via JWT admin role)
+  - `/admin/products` — table of ALL products across ALL lenders (with lender column + filter)
+
+  ## Routes
+
+  - `/admin/lenders` — admin lender list
+  - `/admin/lenders/{id}` — lender detail view (reuses dashboard components)
+  - `/admin/lenders/{id}/products/new` and `/edit` (reuses ProductFormComponent)
+  - `/admin/lenders/{id}/api-keys` (reuses ApiKeysPageComponent)
+  - `/admin/products` — cross-lender product list with filters
+  - `/admin/lenders/new` — new lender form (admin-only)
+
+  All `/admin/*` routes guarded by `AdminGuard` which checks `is_admin` claim.
+
+  ## Components
+
+  - `AdminLendersListComponent`
+  - `AdminLenderDetailComponent` — wraps DashboardComponent with a lender_id override
+  - `NewLenderFormComponent` — slug, name, contact_email, active
+  - `AdminProductsListComponent` — cross-lender table with lender filter
+  - `AdminGuard` — route guard, redirects non-admins to /dashboard
+
+  ## Services
+
+  Update `LendersService` to add:
+  - `listAll()` → GET /lenders (admin endpoint; lender users won't have permission)
+  - `create(lender)` → POST /lenders (admin only)
+  - `update(id, lender)` → PUT /lenders/{id}
+  - `disable(id)` → PUT /lenders/{id} with active=false
+
+  Reuse ProductsService.list with a lender_id filter for admin views.
+
+  ## Backend dependencies
+
+  Admin endpoints on mortgages-api: `POST /lenders`, `PUT /lenders/{id}`. These
+  exist implicitly via the write-endpoints initiative (#8) where admin role
+  bypasses lender_id binding — but the LENDER CREATE endpoint specifically
+  is not in #8 (which was about products).
+
+  **Sub-deliverable**: this initiative ALSO opens a small PR on
+  leartech-mortgages-api adding `POST /api/v1/lenders` and `PUT /api/v1/lenders/{id}`
+  (admin-only) if they're not already present. Agent should check and add
+  if missing. Branch: same name as this initiative; PR title:
+  `feat(api): add admin lender CRUD endpoints`.
+
+  Alternative: split into a separate initiative `mortgages-api-add-admin-lender-endpoints`
+  if cleaner. Agent's call based on actual scope assessed.
+
+  ## Constraints
+
+  - **AdminGuard MUST check the JWT claim**, not a local "is admin" flag
+  - **All admin endpoints' authz is enforced server-side** — the UI is a
+    convenience, not a security boundary
+  - **Cross-lender edits**: admin can edit any product. The form's lender_id
+    is set from the route param, not the JWT claim
+  - **No bulk operations in MVP** (no "delete all expired products" etc.)
+  - **No audit log UI** — admin can see what's there, but not who-changed-what
+    (that requires the products_history table, not yet implemented)
+  - **Match existing styling** from earlier UI initiatives
+  - Conventional commit: `feat: add admin dashboard for cross-lender management`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      npm install --no-audit --no-fund
+      ng lint
+      ng test --watch=false --browsers=ChromeHeadless
+      ng build --configuration=production
+      # And in the API repo if the sub-deliverable was needed:
+      gofmt -l . && golangci-lint run ./... && go test ./...
+
+  ## What this is NOT
+
+  - Not the public Tier-2 ingress for the UI (`lenders.leartech.com` etc.)
+    — that's a separate gitops PR following the `adding-public-domains` rule
+  - Not lender self-registration (admin provisions all lender accounts in MVP)
+  - Not analytics / reporting
+
+  This closes out Session 3. After this lands:
+  - Real data in Postgres (Phase 1)
+  - Third-party API submission with API keys (Phase 2)
+  - Admin + lender UI for manual management (Phase 3)
+  - mortgages-gw reads from the live data source via SDK
+
+  ChatGPT submission is now genuinely unblocked on the data side.
+  Remaining for submission: Session 1 (auth wire-up — first PR landed)
+  and Session 4 (compliance + submission assets).
+
+  Expected agent behaviour: 6-9 turns. Mostly route + component
+  composition reusing earlier work.
+
+gate_marks:
+  - unit
+
+max_iterations: 9

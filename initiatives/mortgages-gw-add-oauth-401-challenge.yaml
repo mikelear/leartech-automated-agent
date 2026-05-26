@@ -1,0 +1,267 @@
+# mortgages-gw-add-oauth-401-challenge — wire-protocol OAuth 2.1 challenge on /mcp
+#
+# Session 1 of the ChatGPT App Directory submission plan. The MCP submission
+# spec requires the server to return 401 + WWW-Authenticate when no bearer is
+# presented, so ChatGPT knows where to run its OAuth 2.1 + PKCE flow against.
+# This initiative adds ONLY the challenge wire protocol — actual JWT validation
+# lands in a follow-up (mortgages-gw-validate-jwt). Splitting keeps both PRs
+# small, single-purpose, and independently reviewable.
+#
+# Flag-gated so deploying this PR alone doesn't break staging smoke tests:
+# env var OAUTH_CHALLENGE_ENABLED defaults to false (= passthrough = today's
+# behaviour). The flag flips to true (via helmfile configs/) once the
+# follow-up JWT-validation initiative also lands. This is the same shape used
+# for FLEET_TEST_ENABLED in the chart.
+
+name: mortgages-gw-add-oauth-401-challenge
+
+description: |
+  Add an OAuth 2.1 unauthenticated challenge on /mcp. When OAUTH_CHALLENGE_ENABLED=true
+  and the request has no/malformed Authorization header, return 401 with
+  WWW-Authenticate per RFC 6750 + RFC 8707 + MCP transport spec. Flag-gated
+  so deploying this alone is safe — staging keeps passing through with the
+  flag off.
+
+repo: leartech-mortgages-gw
+branch: agent/add-oauth-401-challenge
+base: main
+language: go
+
+goal: |
+  Add a flag-gated OAuth 2.1 unauthenticated challenge to the /mcp endpoint
+  in `leartech-mortgages-gw`. Wire protocol only — no JWT cryptographic
+  validation in this PR (that lands in mortgages-gw-validate-jwt next).
+
+  ## What success looks like
+
+  With OAUTH_CHALLENGE_ENABLED=true:
+
+      $ curl -sI https://localhost:8080/mcp -X POST -d '{}'
+      HTTP/1.1 401 Unauthorized
+      WWW-Authenticate: Bearer realm="leartech-mortgages-gw", authorization_uri="https://auth.leartech.com/oauth2/authorize", resource="https://api.mortgagesourcing.com", scope="mortgages:journey"
+      Content-Type: application/json
+      ...
+
+  With OAUTH_CHALLENGE_ENABLED=true and a bearer present (ANY value — no
+  validation yet):
+
+      $ curl -sI https://localhost:8080/mcp -X POST -H "Authorization: Bearer x" -d '{}'
+      HTTP/1.1 200 OK   ← or whatever the MCP handler normally returns
+
+  With OAUTH_CHALLENGE_ENABLED=false (default): all requests pass through
+  unchanged (today's behaviour preserved).
+
+  ## Files to add
+
+  ### `internal/middleware/oauth_challenge.go` (NEW)
+
+  Package-level constants:
+
+      const (
+          challengeScope = "mortgages:journey"
+          challengeRealm = "leartech-mortgages-gw"
+      )
+
+  Config struct + constructor:
+
+      type OAuth401ChallengeConfig struct {
+          Enabled          bool   // OAUTH_CHALLENGE_ENABLED
+          AuthorizationURI string // OAUTH_AUTHORIZATION_URI — Hydra authorize endpoint
+          Resource         string // OAUTH_RESOURCE — RFC 8707 audience binding
+      }
+
+  Middleware factory that returns a `func(http.Handler) http.Handler`:
+
+      func OAuth401Challenge(cfg OAuth401ChallengeConfig) func(http.Handler) http.Handler {
+          return func(next http.Handler) http.Handler {
+              return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+                  if !cfg.Enabled {
+                      next.ServeHTTP(w, r)
+                      return
+                  }
+                  // Check Authorization header.
+                  authz := r.Header.Get("Authorization")
+                  hasBearer := strings.HasPrefix(authz, "Bearer ") && len(strings.TrimSpace(authz[len("Bearer "):])) > 0
+                  if !hasBearer {
+                      writeChallenge(w, cfg, authz)
+                      return
+                  }
+                  // Bearer present — pass through. NO validation here; that's the next initiative.
+                  next.ServeHTTP(w, r)
+              })
+          }
+      }
+
+  Helper `writeChallenge(w, cfg, authz)`:
+
+  - Builds the `WWW-Authenticate: Bearer realm="...", authorization_uri="...",
+    resource="...", scope="..."` header.
+  - When `authz != ""` (i.e., a header was present but malformed — wrong
+    scheme, or "Bearer" with empty token), additionally append
+    `error="invalid_token", error_description="..."` per RFC 6750 §3.1.
+    When `authz == ""` (no header at all), OMIT the error code per RFC
+    6750 §3 ("the server SHOULD NOT include an error code … when the
+    request did not include any authentication information").
+  - Writes status 401 and a minimal JSON-RPC error body:
+    `{"jsonrpc":"2.0","error":{"code":-32001,"message":"authentication required"},"id":null}`
+
+  ### `internal/middleware/oauth_challenge_test.go` (NEW)
+
+  Table tests using `httptest.NewRecorder` + a dummy `next` handler that
+  records whether it was invoked. Covers:
+
+  - `Enabled_false_passthrough_no_header` — flag off, no auth, next handler invoked, no 401
+  - `Enabled_false_passthrough_with_header` — flag off, bearer present, next handler invoked
+  - `Enabled_true_no_header_returns_401_without_error_code` — challenge fires, WWW-Authenticate present, NO `error=` field
+  - `Enabled_true_wrong_scheme_returns_401_with_error_code` — `Authorization: Basic xyz` → 401 with `error="invalid_token"`
+  - `Enabled_true_empty_bearer_returns_401_with_error_code` — `Authorization: Bearer ` (whitespace only) → 401 with `error="invalid_token"`
+  - `Enabled_true_valid_looking_bearer_passes_through` — `Authorization: Bearer eyJ...` → next handler invoked (no validation yet)
+  - `Enabled_true_response_body_is_jsonrpc_error` — 401 response body parses as JSON-RPC with the right code/message
+  - `Enabled_true_www_authenticate_includes_all_fields` — header contains realm, authorization_uri, resource, scope
+
+  Use a fixed test config:
+
+      cfg := OAuth401ChallengeConfig{
+          Enabled:          true,
+          AuthorizationURI: "https://test-auth.example/oauth2/authorize",
+          Resource:         "https://test-api.example",
+      }
+
+  ## Files to modify
+
+  ### `internal/config/config.go`
+
+  Add a new struct field group (mirror the existing `Auth` and
+  `FleetTestEnabled` style):
+
+      type Config struct {
+          // ... existing fields ...
+
+          // OAuth401Challenge gates the wire-protocol OAuth 2.1 challenge on
+          // /mcp. Off by default — stays disabled in staging until the JWT
+          // validation initiative also lands. Production flips ENABLED=true
+          // via helmfile configs/leartech-mortgages-gw.yaml.
+          OAuth401Challenge OAuth401ChallengeEnvConfig `envconfig:"OAUTH_CHALLENGE"`
+      }
+
+      type OAuth401ChallengeEnvConfig struct {
+          Enabled          bool   `envconfig:"ENABLED" default:"false"`
+          AuthorizationURI string `envconfig:"AUTHORIZATION_URI" default:"https://auth.leartech.com/oauth2/authorize"`
+          Resource         string `envconfig:"RESOURCE" default:"https://api.mortgagesourcing.com"`
+      }
+
+  Env vars: `OAUTH_CHALLENGE_ENABLED`, `OAUTH_CHALLENGE_AUTHORIZATION_URI`,
+  `OAUTH_CHALLENGE_RESOURCE`.
+
+  ### `cmd/server/main.go`
+
+  Around the existing `mux.Handle("/mcp", mcpH)` lines (~150-153), wrap
+  `mcpH` with the new middleware BEFORE mounting:
+
+      // BEFORE
+      mcpH := mcphandler.New()
+      mux := http.NewServeMux()
+      mux.Handle("/mcp", mcpH)
+      mux.Handle("/mcp/", mcpH)
+
+      // AFTER
+      mcpH := mcphandler.New()
+      // Wrap with the OAuth 2.1 unauthenticated challenge — passthrough
+      // when OAUTH_CHALLENGE_ENABLED=false (default).
+      mcpChallenged := middleware.OAuth401Challenge(middleware.OAuth401ChallengeConfig{
+          Enabled:          cfg.OAuth401Challenge.Enabled,
+          AuthorizationURI: cfg.OAuth401Challenge.AuthorizationURI,
+          Resource:         cfg.OAuth401Challenge.Resource,
+      })(mcpH)
+      mux := http.NewServeMux()
+      mux.Handle("/mcp", mcpChallenged)
+      mux.Handle("/mcp/", mcpChallenged)
+
+  Add a log line so operators can see the flag state at boot:
+
+      log.Info().
+          Bool("oauth_challenge_enabled", cfg.OAuth401Challenge.Enabled).
+          Str("authorization_uri", cfg.OAuth401Challenge.AuthorizationURI).
+          Str("resource", cfg.OAuth401Challenge.Resource).
+          Msg("/mcp OAuth challenge wired")
+
+  ## Files to NOT touch
+
+  - `internal/middleware/auth.go` — the leartech-go-common bearer middleware
+    that guards REST endpoints. Stays unchanged; this is a separate concern.
+  - `internal/mcphandler/*` — the MCP handler internals. The challenge wraps
+    the handler externally; no MCP-level changes.
+  - `internal/handlers/*` — REST handlers. Untouched.
+  - `charts/leartech-mortgages-gw/values.yaml` and templates — adding chart
+    keys for OAUTH_CHALLENGE_* is a follow-up. The env vars work via
+    standard chart `env:` injection today.
+  - `demo/smoke-tests.sh` — no smoke test updates here. The flag is off by
+    default so smoke continues to pass against staging unchanged.
+
+  ## Constraints
+
+  - **Wire protocol only.** Do NOT add JWT parsing, JWKS, signature
+    verification, or anything that touches the leartech-go-common
+    `pkg/auth` library. Any `Bearer <anything>` passes through.
+  - **Flag default MUST be false.** Staging cannot break on merge —
+    smoke tests run against staging and the flag stays off there until
+    the follow-up initiative.
+  - **RFC 6750 §3 compliance**: when the request has NO Authorization
+    header at all, the WWW-Authenticate response MUST NOT include
+    `error=` or `error_description=`. When malformed, it MUST include
+    them.
+  - **Response body**: JSON-RPC-shaped error (the spec the MCP transport
+    expects), not a plain text body. Code `-32001`.
+  - **No new dependencies.** Use the stdlib (`net/http`, `strings`,
+    `fmt`). No external libraries for header serialisation.
+  - Conventional commit: `feat(mcp): add flag-gated OAuth 2.1 401 challenge on /mcp`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation (per the calibration lesson)
+
+  Before pushing the branch, run from the repo root:
+
+      gofmt -l .                # fail if output is non-empty
+      golangci-lint run ./...   # all green
+      go test ./...             # all green
+      govulncheck ./...         # if available; warn-only
+
+  Fix anything that fails locally before pushing. If `golangci-lint` or
+  `govulncheck` are missing from the image, note it in the sticky comment.
+
+  ## What this is NOT
+
+  - Not the JWT-validation initiative. That's `mortgages-gw-validate-jwt`
+    (follow-up).
+  - Not the auth-resources OAuth2Client provisioning. That lands in
+    `auth-resources-add-mortgages-mcp-oauth2client` (separate, gitops repo).
+  - Not Dynamic Client Registration. That's an optional later step.
+  - Not a step-up auth check. That was deferred for ChatGPT submission
+    per the submission plan.
+  - Not a refactor of internal/middleware/auth.go. The two middlewares
+    serve different surfaces (REST vs MCP) and coexist.
+
+  ## Why split from JWT validation
+
+  Two reasons:
+
+  1. **Reviewability**: 401-challenge wire format is a 50-line middleware
+     with table tests. JWT validation pulls in JWKS fetching, key rotation,
+     audience matching, signature verification, time skew handling — easily
+     200+ lines and a separate set of failure modes. Splitting halves the
+     review surface.
+
+  2. **Incremental deployment safety**: with the flag off, this PR is a
+     no-op in staging — zero risk of breaking the smoke pack. When the
+     JWT initiative lands, both flip on together via the helmfile
+     configs/ override. If the JWT validation has issues, the flag flips
+     back off independently.
+
+  Expected pipeline outcome: 11 PR checks green; release cuts a patch
+  bump on mortgages-gw.
+  Expected agent behaviour: 3-5 turns. Wire-protocol scope only.
+
+gate_marks:
+  - unit
+
+max_iterations: 5

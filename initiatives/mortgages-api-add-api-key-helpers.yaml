@@ -1,0 +1,140 @@
+# mortgages-api-add-api-key-helpers — Phase 2 #6 (Go utility code only)
+#
+# Adds argon2id hashing + key generator helpers in a new
+# `internal/apikeys` package. NO schema (the table exists from #1),
+# NO middleware (that's #7), NO endpoints (#9). Pure Go utility code so
+# subsequent initiatives can use it.
+
+name: mortgages-api-add-api-key-helpers
+
+description: |
+  Add argon2id hashing + random key generator helpers in a new package
+  `internal/apikeys`. The schema table `lender_api_keys.key_hash`
+  already exists from `mortgages-api-add-products-schema`; this PR adds
+  the Go side that produces and verifies those hashes.
+
+repo: leartech-mortgages-api
+branch: agent/add-api-key-helpers
+base: main
+language: go
+
+goal: |
+  Lay the cryptographic groundwork for the API-key auth model. Pure
+  helper functions — no HTTP, no DB, no middleware.
+
+  ## What success looks like
+
+  Other code in the repo can:
+
+      key := apikeys.Generate(apikeys.EnvLive)
+      // key == "mqs_live_aBcDefGhIjKlMnOpQrStUvWxYz012345"
+
+      hash, err := apikeys.Hash(key)
+      // hash is argon2id-encoded string suitable for DB storage
+
+      ok, err := apikeys.Verify(key, hash)
+      // ok == true
+
+      env, body, err := apikeys.Parse(key)
+      // env == apikeys.EnvLive, body == "aBcDefGhIjKlMnOpQrStUvWxYz012345"
+
+  ## Files to ADD
+
+  ### `internal/apikeys/keys.go` (NEW)
+
+  ```go
+  // Package apikeys generates, hashes, and verifies lender API keys
+  // for leartech-mortgages-api.
+  //
+  // Key format: <prefix>_<env>_<random>
+  //   prefix:  "mqs"  (mortgage quote sourcing)
+  //   env:     "live" | "test"
+  //   random:  32 chars base62 (urlsafe), ~190 bits entropy
+  //
+  // Storage: only argon2id(key) is persisted. Raw key shown once at
+  // generation; never logged or stored.
+  package apikeys
+
+  type Env string
+
+  const (
+      EnvLive Env = "live"
+      EnvTest Env = "test"
+  )
+
+  // Generate returns a new raw API key. The caller is responsible for
+  // hashing + storage. The raw key is returned ONCE and must be shown
+  // to the user in the same response; it cannot be recovered.
+  func Generate(env Env) string
+
+  // Parse splits a raw key into (env, body) parts. Returns an error
+  // if the prefix is wrong or the format is malformed.
+  func Parse(rawKey string) (Env, string, error)
+
+  // Hash takes a raw key and returns an argon2id-encoded string
+  // suitable for storage in lender_api_keys.key_hash.
+  // Uses the recommended OWASP argon2id parameters as of 2026:
+  //   memory: 64 MiB, iterations: 3, parallelism: 4, salt: 16 bytes, key: 32 bytes
+  func Hash(rawKey string) (string, error)
+
+  // Verify checks a raw key against a stored hash. Returns true iff
+  // the key matches. Constant-time comparison.
+  func Verify(rawKey, encodedHash string) (bool, error)
+
+  // HasAPIKeyPrefix returns true if s starts with `mqs_live_` or
+  // `mqs_test_`. Used by the auth middleware (Phase 2 #7) to route
+  // bearer tokens to the API-key path vs the JWT path.
+  func HasAPIKeyPrefix(s string) bool
+  ```
+
+  ### `internal/apikeys/keys_test.go` (NEW)
+  Table tests covering:
+  - `TestGenerate_LiveProducesValidFormat` — Generate(EnvLive) returns "mqs_live_<32 base62>"
+  - `TestGenerate_TestProducesValidFormat` — same for EnvTest
+  - `TestGenerate_UniquePerCall` — 10 generations all distinct
+  - `TestParse_HappyPath` — Generate then Parse round-trips
+  - `TestParse_RejectsMalformed` — wrong prefix, wrong length, bad chars
+  - `TestHash_VerifyRoundtrip` — Hash then Verify returns true
+  - `TestVerify_RejectsWrongKey` — different keys hash differently; verify rejects
+  - `TestVerify_ConstantTime` — assert via `subtle.ConstantTimeCompare` is used (or document via comment)
+  - `TestHasAPIKeyPrefix` — "mqs_live_..." → true, "mqs_test_..." → true, "eyJ..." → false, "" → false
+
+  ## Files to NOT TOUCH
+
+  - `migrations/` — table already exists
+  - `internal/products/*` — repo layer untouched
+  - `internal/handlers/*` — no handlers yet
+  - `internal/middleware/*` — middleware comes next (#7)
+  - `cmd/server/main.go` — no wiring
+
+  ## Constraints
+
+  - **Pure Go, no DB, no HTTP.** This is a utility package.
+  - **argon2id**, not bcrypt or scrypt. OWASP 2026 parameters.
+  - **Constant-time comparison** in Verify.
+  - **base62 random source** — use `crypto/rand` (not `math/rand`). 32 chars = ~190 bits entropy.
+  - **No new dependencies** if `golang.org/x/crypto/argon2` is already in go.mod (it usually is via leartech-go-common). Check first.
+  - **No logging of raw keys** anywhere. If the package needs to log, log only the hash prefix or the key id.
+  - **HasAPIKeyPrefix is the ROUTING primitive** — used by Phase 2 #7's middleware. Make sure it's cheap (no allocations, single-string compare).
+  - Conventional commit: `feat(apikeys): add argon2id hash + generate helpers`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      gofmt -l .
+      golangci-lint run ./...
+      go test ./internal/apikeys/...
+      go test ./...
+      govulncheck ./...
+
+  ## What this is NOT
+
+  - Not the middleware. That's `mortgages-api-add-api-key-middleware` (#7).
+  - Not the management endpoints. That's `mortgages-api-add-api-key-management-endpoints` (#9).
+  - Not the write API. That's `mortgages-api-add-lender-write-endpoints` (#8).
+
+  Expected agent behaviour: 3-4 turns. Small, well-bounded utility code.
+
+gate_marks:
+  - unit
+
+max_iterations: 4

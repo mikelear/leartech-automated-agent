@@ -1,0 +1,134 @@
+# auth-resources-add-mortgages-api-oauth2clients — Phase 2 #10 (gitops)
+#
+# Provisions Hydra OAuth2Client CRs for mortgages-api: the internal
+# service-to-service client (mortgages-gw → mortgages-api), the admin UI
+# auth-code client, and the lender UI auth-code client (with PKCE).
+
+name: auth-resources-add-mortgages-api-oauth2clients
+
+description: |
+  Add OAuth2Client custom resources to the central `auth-resources`
+  chart (in `jx-build-cluster-gsm`) for mortgages-api: the internal
+  service client (client-credentials grant, audience-bound JWTs for
+  mortgages-gw → mortgages-api), and two auth-code+PKCE clients for the
+  upcoming admin UI (lender role + admin role).
+
+repo: jx-build-cluster-gsm
+branch: agent/add-mortgages-api-oauth2clients
+base: main
+
+goal: |
+  Provision the OAuth2Client resources Hydra needs so:
+  (a) mortgages-gw can call mortgages-api with a valid JWT
+  (b) the admin UI can run OAuth auth-code + PKCE for lender and admin users
+
+  ## What success looks like
+
+  After this PR lands and the boot job reconciles:
+
+      kubectl -n jx-staging get oauth2clients
+      # → includes mortgages-api-service, products-ui-lender, products-ui-admin
+
+      kubectl -n jx-production get oauth2clients
+      # → same three
+
+  Hydra's admin API also serves them and they can be inspected.
+
+  ## Files to ADD
+
+  ### `charts/auth-resources/templates/mortgages-api-service-oauth2client.yaml` (NEW)
+  Internal service-to-service client (client-credentials grant). Used by
+  mortgages-gw to mint JWTs with audience `leartech-mortgages-api`.
+
+  ```yaml
+  apiVersion: hydra.ory.sh/v1alpha1
+  kind: OAuth2Client
+  metadata:
+    name: mortgages-api-service
+    namespace: jx
+    labels:
+      gitops.jenkins-x.io/pipeline: 'namespaces'
+  spec:
+    grantTypes:
+      - client_credentials
+    scope: "mortgages:read mortgages:write"
+    audience:
+      - leartech-mortgages-api
+    tokenEndpointAuthMethod: client_secret_post
+    secretName: mortgages-api-service-oauth-creds
+  ```
+
+  Secret materialised via the chart's existing ExternalSecret pattern;
+  follow the shape used by `leartech-auth-service`'s existing clients in
+  the same chart.
+
+  ### `charts/auth-resources/templates/products-ui-lender-oauth2client.yaml` (NEW)
+  Lender-role auth-code + PKCE client. Used by leartech-products-ui
+  when lender users log in.
+
+  ```yaml
+  apiVersion: hydra.ory.sh/v1alpha1
+  kind: OAuth2Client
+  metadata:
+    name: products-ui-lender
+    namespace: jx
+  spec:
+    grantTypes:
+      - authorization_code
+      - refresh_token
+    responseTypes:
+      - code
+    scope: "openid offline_access mortgages:write"
+    audience:
+      - leartech-mortgages-api
+    redirectUris:
+      - "https://lenders.leartech.com/auth/callback"            # production placeholder
+      - "https://leartech-products-ui-jx-staging.jx.leartech.com/auth/callback"  # staging
+    tokenEndpointAuthMethod: none   # PKCE only, no client secret
+    secretName: products-ui-lender-config   # contains client_id + (none) for secret
+  ```
+
+  ### `charts/auth-resources/templates/products-ui-admin-oauth2client.yaml` (NEW)
+  Same shape as products-ui-lender but with `scope: openid offline_access mortgages:admin`
+  and a separate client_id. Admin role bypasses lender_id binding in the
+  mortgages-api handlers (see Phase 2 #8).
+
+  ## Files to NOT TOUCH
+
+  - Existing OAuth2Clients in this chart (don't refactor while adding new ones)
+  - leartech-auth-service repo (Hydra config is separate)
+
+  ## Constraints
+
+  - **Match the shape** of existing OAuth2Client CRs in `charts/auth-resources/templates/`.
+    The agent should READ an existing one (e.g. for `leartech-auth-ui`) and mirror its
+    structure including labels, annotations, secret references.
+  - **Audience bound to `leartech-mortgages-api`** on all three. RFC 8707 binding
+    is what the API's JWT validator checks.
+  - **No PKCE secret** for the UI clients (they're SPAs; tokenEndpointAuthMethod: none).
+  - **Lender vs admin scope split** — `mortgages:write` for lenders (own data),
+    `mortgages:admin` for admins (any lender's data).
+  - **Redirect URI for prod**: `https://lenders.leartech.com/auth/callback` placeholder.
+    If the actual public hostname is decided later (e.g. lenders.mortgagesourcing.com),
+    a follow-up gitops PR adjusts it. The staging URL works regardless.
+  - Conventional commit: `feat(auth): add OAuth2Clients for mortgages-api + products-ui`
+
+  ## Pre-push validation
+      helm template charts/auth-resources | grep -A 20 mortgages-api-service
+      helm template charts/auth-resources | grep -A 20 products-ui-lender
+      helm template charts/auth-resources | grep -A 20 products-ui-admin
+      # All three should render valid OAuth2Client manifests
+
+  ## What this is NOT
+
+  - Not API-key infrastructure — that's mortgages-api Phase 2 work (#6-9)
+  - Not the UI itself — that's Phase 3
+  - Not OIDC issuer config — Hydra issuer config lives elsewhere
+
+  Expected agent behaviour: 3-4 turns. Pattern-mirroring work; agent reads
+  an existing OAuth2Client + adapts.
+
+gate_marks:
+  - unit
+
+max_iterations: 4

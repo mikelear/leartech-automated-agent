@@ -1,0 +1,119 @@
+# leartech-go-packages-publish-mortgages-api-sdk — Phase 1 #4 (SDK generation)
+#
+# Adds a `mortgages-api/` subdirectory to `mikelear/leartech-go-packages`
+# populated by openapi-generator (ogen) from mortgages-api's openapi.json.
+# Once published, mortgages-gw can `go get` the SDK and replace its
+# mockproducts package.
+#
+# Pattern reference: the existing `rustservicetemplate` subdir at
+# github.com/mikelear/leartech-go-packages/rustservicetemplate already
+# follows this shape — mortgages-gw imports it via go.mod. Investigate
+# how it was set up and replicate for mortgages-api.
+
+name: leartech-go-packages-publish-mortgages-api-sdk
+
+description: |
+  Generate the Go SDK for leartech-mortgages-api from its openapi.json
+  and publish to `mikelear/leartech-go-packages/mortgages-api/`. Pattern
+  follows the existing `rustservicetemplate` subdir already published
+  there. Once landed, `go get github.com/mikelear/leartech-go-packages/mortgages-api@latest`
+  works for consumers.
+
+repo: leartech-go-packages
+branch: agent/publish-mortgages-api-sdk
+base: main
+language: go
+
+goal: |
+  Add the generated mortgages-api Go SDK to the central leartech-go-packages
+  monorepo. Follow the existing pattern used by `rustservicetemplate`.
+
+  ## What success looks like
+
+  After this PR lands:
+
+      mkdir /tmp/test && cd /tmp/test
+      go mod init testpkg
+      go get github.com/mikelear/leartech-go-packages/mortgages-api@latest
+      # → resolves to the latest version with the new SDK
+
+  And mortgages-gw can later import:
+
+      import mortgagesapi "github.com/mikelear/leartech-go-packages/mortgages-api"
+      client, err := mortgagesapi.NewClient("https://...")
+
+  ## Investigate first
+
+  Before writing code, READ how `rustservicetemplate` was published:
+  - Check the leartech-go-packages repo layout
+  - Look at `rustservicetemplate/`'s structure (go.mod, generated client files, README)
+  - Look at the Makefile / CI / any generator config in leartech-go-packages root
+  - Check the source service `leartech-rust-service-template` for the openapi.json + any SDK-publishing automation it has
+
+  If there's a script like `make generate-sdk SVC=mortgages-api`, use that.
+  If publication is automated by a separate CI workflow elsewhere (e.g.
+  `leartech-openapi-generation` is a service that does this), then the
+  work shifts to whatever registration step that service needs.
+
+  ## Files to ADD (most likely shape)
+
+  Under `mortgages-api/`:
+
+      mortgages-api/
+        go.mod          # module github.com/mikelear/leartech-go-packages/mortgages-api
+        go.sum
+        README.md       # usage snippet
+        client.go       # generated from openapi.json
+        types.go        # generated types
+        ... other generated files per ogen output
+
+  Source openapi.json: fetched from
+  `https://leartech-mortgages-api-jx-staging.jx.leartech.com/openapi.json`
+  (or the local file at `~/leartech/leartech-mortgages-api/docs/openapi.json`
+  if accessible from the runner — prefer local source if available so this
+  doesn't depend on staging being up).
+
+  Generator: ogen (matches the rest of the leartech go ecosystem).
+
+  ## Files to MODIFY
+
+  - Root `README.md` or `MAINTAINERS.md` of leartech-go-packages — append `mortgages-api` to the list of published SDKs
+  - Any CI config that lists which services to (re)generate — add `mortgages-api`
+
+  ## Files to NOT TOUCH
+
+  - `rustservicetemplate/` and any other existing SDK subdirs — don't refactor while adding a new one
+  - The `leartech-rust-service-template` source repo
+  - mortgages-api itself — that work happened in the previous initiative; this PR consumes its openapi.json
+
+  ## Constraints
+
+  - **Generator must be ogen**, matching the rustservicetemplate pattern.
+  - **Module path**: `github.com/mikelear/leartech-go-packages/mortgages-api`
+  - **Match the existing publication mechanism** — if there's a `make` target or CI workflow, use it rather than running ogen ad-hoc
+  - **Verify the SDK compiles** as a standalone Go module before pushing (`cd mortgages-api && go build ./...`)
+  - Conventional commit: `feat: publish mortgages-api Go SDK`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      cd mortgages-api && gofmt -l .
+      cd mortgages-api && go build ./...
+      cd mortgages-api && go test ./...  # if generator emits tests
+
+  ## What this is NOT
+
+  - Not the gw swap — that's the next initiative (mortgages-gw-swap-mockproducts-for-sdk)
+  - Not auth client wiring — that lives in the consumer
+  - Not a redesign of leartech-go-packages — just adds a new subdir following the existing pattern
+
+  ## Why this is separate from the previous
+
+  - SDK generation logically separate from the API definition (different repos, different lifecycles)
+  - Generation is mechanical once the openapi.json is right; isolating it lets the agent focus
+
+  Expected agent behaviour: 4-7 turns. First turn is investigation (read existing pattern), rest is mechanical generation.
+
+gate_marks:
+  - unit
+
+max_iterations: 7

@@ -1,0 +1,120 @@
+# leartech-products-ui-add-product-editor — Phase 3 #13
+#
+# Add the create/edit form for products. Typed fields for the queryable
+# columns; JSON editor (textarea or codemirror) for the JSONB attributes.
+# Wires POST/PUT/DELETE.
+
+name: leartech-products-ui-add-product-editor
+
+description: |
+  Add the New / Edit product flow. Form with typed fields for the
+  filterable schema columns (lender, product_code, name, class, rate_type,
+  initial_rate, LTV bands, term, dates) + a JSON editor for the
+  `attributes` JSONB blob (ercs, fees, features, eligibility, lender_quirks
+  — whatever shape the lender wants to submit).
+
+repo: leartech-products-ui
+branch: agent/add-product-editor
+base: main
+language: angular
+
+goal: |
+  Make products writeable from the UI for lenders (own data) and admins
+  (anyone's data).
+
+  ## What success looks like
+
+  Lender clicks "New product" on /dashboard → /products/new form → fills it
+  in → submit → POST succeeds → redirect to /dashboard with the new row showing.
+
+  Lender clicks "Edit" on an existing row → /products/{id}/edit (pre-filled)
+  → change → submit → PUT succeeds → redirect.
+
+  Lender clicks "Delete" → confirmation dialog → DELETE succeeds → row
+  disappears from /dashboard.
+
+  ## Routes
+
+  - `/products/new` — empty form (guarded)
+  - `/products/{id}/edit` — pre-filled form (guarded; 404 if product not owned by claim's lender_id and caller is not admin)
+
+  ## Components
+
+  - `ProductFormComponent` — reactive form, validators matching the API's validation rules (rate 0.01-20%, LTV 0-100, ranges sane, etc.)
+  - `JsonbAttributesEditorComponent` — split view: structured fields for known attributes (ercs[], fees{}, features[]) + raw JSON editor for arbitrary keys
+  - `ConfirmDialogComponent` — generic confirmation for delete
+
+  ## Services
+
+  Update `ProductsService` with create / update / delete methods using
+  the API surface from Phase 2 #8.
+
+  ## JSONB editor design
+
+  Inside `attributes`, the form provides three structured sub-editors:
+  - **ERCs** — repeating row of `{year, percent}` with add/remove
+  - **Fees** — fixed-key object: arrangement_pence, valuation_pence, exit_pence, other_pence (numeric inputs)
+  - **Features** — chip / tag input (adds/removes string tags)
+
+  Plus a "raw JSON" view (toggle) showing the full `attributes` blob with
+  syntax highlighting (codemirror or similar). Edits in the structured
+  fields sync to the raw view and vice versa.
+
+  Lender quirks / eligibility / marketing copy: free-text textareas that
+  go directly into `attributes.eligibility`, `attributes.lender_quirks`,
+  `attributes.marketing_copy`. Any OTHER keys the lender types in via
+  the raw view are passed through to the API unchanged (server validates
+  the structured keys; ignores extras).
+
+  ## Files to ADD / MODIFY
+
+  Standard Angular component + service structure. Build on the
+  ProductsService scaffold from #12.
+
+  Use `@angular/forms` reactive forms with validators matching the API's
+  documented constraints (rate range, LTV range, term range, etc.).
+
+  Form-level validation messages show under the field; submit button is
+  disabled until valid; API error responses (400 validation errors) are
+  shown as toasts / banners with the message returned by the server.
+
+  ## Files to NOT TOUCH
+
+  - The dashboard route — it stays as in #12; just gains the "New /
+    Edit / Delete" buttons that route to this PR's new pages
+  - Auth service — JWT handling stays the same
+  - Chart / pipelines
+
+  ## Constraints
+
+  - **Reactive forms only** (no template-driven).
+  - **Match validators to the API contract** — fail-fast in the UI, but
+    don't trust client validation; the server is the source of truth.
+  - **JSONB editor must accept arbitrary keys** — the API allows novel
+    attributes for AI consumption; the UI must not block them.
+  - **Confirm before destructive actions** (delete).
+  - **Cross-lender access**: the form's lender_id is derived from JWT
+    claim for lenders; admin can choose lender from a dropdown (admin-only UI affordance).
+  - **No localisation, no styling polish** — same as #12.
+  - Conventional commit: `feat: add product create/edit/delete with JSONB editor`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      npm install --no-audit --no-fund
+      ng lint
+      ng test --watch=false --browsers=ChromeHeadless
+      ng build --configuration=production
+
+  ## What this is NOT
+
+  - Not API key management — #14
+  - Not admin dashboard — #15
+  - Not lender self-registration (admin provisions lenders in MVP)
+
+  Expected agent behaviour: 6-9 turns. Reactive form + custom JSON editor
+  are the bulk of the work.
+
+gate_marks:
+  - unit
+
+max_iterations: 9

@@ -1,0 +1,141 @@
+# mortgages-api-add-api-key-management-endpoints — Phase 2 #9
+#
+# POST/GET/DELETE under /api/v1/lenders/{id}/api-keys. POST returns
+# the raw key value EXACTLY ONCE; subsequent reads never expose it.
+# Used by the admin UI (Phase 3) for lender self-service key rotation.
+
+name: mortgages-api-add-api-key-management-endpoints
+
+description: |
+  Add CRUD endpoints for lender API keys. POST returns the raw key ONCE
+  in the response body; GET lists masked previews; DELETE revokes by
+  setting revoked_at. Lender role + own lender_id binding, admin override.
+
+repo: leartech-mortgages-api
+branch: agent/add-api-key-management
+base: main
+language: go
+
+goal: |
+  Let lenders (and admins) create / list / revoke API keys via REST.
+
+  ## What success looks like
+
+      POST /api/v1/lenders/{lender_id}/api-keys
+      Body: {"label": "production cron job"}
+      → 201 {
+          "id": "<uuid>",
+          "label": "production cron job",
+          "raw_key": "mqs_live_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",   ← shown ONCE
+          "created_at": "...",
+          "masked_preview": "mqs_live_xxxxxxxx....abcd"
+        }
+
+      GET /api/v1/lenders/{lender_id}/api-keys
+      → 200 [
+          {"id": ..., "label": ..., "created_at": ..., "last_used_at": ..., "masked_preview": ..., "revoked_at": null}
+        ]
+        # NO raw_key field ever returned after the initial POST
+
+      DELETE /api/v1/lenders/{lender_id}/api-keys/{key_id}
+      → 204; sets revoked_at = now() (idempotent — re-call returns 204)
+
+  ## Endpoint contracts
+
+  ### `POST /api/v1/lenders/{lender_id}/api-keys`
+  Auth: API key for that lender OR admin JWT
+  Body: `{"label": "string ≤100 chars"}`
+  Server:
+  1. `key := apikeys.Generate(apikeys.EnvLive)` (or EnvTest if cluster is jx-staging)
+  2. `hash, _ := apikeys.Hash(key)`
+  3. `lookup_prefix := apikeys.LookupPrefix(key)`
+  4. `repo.CreateLenderAPIKey(...)` with hash + lookup_prefix
+  5. Return the raw key in `raw_key`, plus the row metadata
+  Returns: `201 LenderAPIKeyCreated`
+
+  ### `GET /api/v1/lenders/{lender_id}/api-keys`
+  Auth: same. Lists all keys for the lender (including revoked).
+  Returns: `200 [LenderAPIKeyView]` where LenderAPIKeyView has masked_preview but no raw_key.
+  Masked preview shape: `mqs_<env>_<first 8 chars>....<last 4 chars>` (the last 4 are NOT in DB
+  unless we store them; alternative: just show `mqs_<env>_<first 8 chars>....****` — pick this
+  simpler form).
+
+  ### `DELETE /api/v1/lenders/{lender_id}/api-keys/{key_id}`
+  Auth: same. Sets revoked_at = now() if not already set.
+  Returns: `204` (idempotent; re-call on already-revoked = 204)
+
+  ## Self-key protection
+
+  A key MUST NOT be able to revoke itself or its peer keys via the API.
+  Reason: prevents an attacker with a stolen key from rotating itself
+  away. Implementation: if the auth method is "api_key" AND the
+  to-be-revoked key_id matches the calling key's id, return 403. Admin
+  JWT bypasses this (humans can revoke any key).
+
+  Alternative: ALL revocation requires admin JWT OR a different lender
+  key (i.e., lenders rotating their own keys must have at least two
+  keys, one of which authenticates the revocation call). This is the
+  Stripe model — cleaner but less ergonomic.
+
+  Decision: implement the SELF-PROTECTION variant (key can't revoke
+  itself; peer keys CAN revoke each other). It's a middle ground that
+  prevents the worst attack (stolen key auto-rotating) without forcing
+  lenders to maintain two keys.
+
+  ## Files to ADD
+
+  ### `internal/handlers/api_keys.go` (NEW)
+  Handler + RegisterRoutes pattern. Three methods (POST/GET/DELETE).
+
+  ### `internal/handlers/api_keys_test.go` (NEW)
+  - Happy POST/GET/DELETE for own lender
+  - Cross-lender → 403
+  - Admin can do all of it
+  - Self-revocation by the calling key → 403
+  - Peer key revocation → 204
+  - Masked preview never contains the full random body
+  - Re-DELETE on revoked key → 204 (idempotent)
+
+  ## Files to MODIFY
+
+  ### `cmd/server/main.go`
+  Wire the new handler into `authed`.
+
+  ### `internal/products/repo.go`
+  If not already present from the middleware initiative: ensure
+  `ListLenderAPIKeys` returns ALL keys (including revoked) so the UI
+  can show revoked-key history. Add `revoked_only` filter if useful.
+
+  ## Files to NOT TOUCH
+
+  - `internal/apikeys/*` — helpers are stable, just consumed here
+  - `internal/middleware/*` — auth is unchanged
+  - Migrations — schema is in place
+
+  ## Constraints
+
+  - **Raw key returned ONLY in POST response.** GET and any logs never
+    contain the raw key value.
+  - **Mask format consistent**: `mqs_<env>_<first 8>....****`
+  - **Self-revocation forbidden** as specified above.
+  - **Label is a free-text string** capped at 100 chars; no other validation.
+  - **No rate-limit on POST in this PR.** If abuse becomes a concern later,
+    add a rate-limit middleware initiative.
+  - Conventional commit: `feat(api): add lender API-key management endpoints`
+  - Always post `/hold` immediately after opening the PR.
+
+  ## Pre-push validation
+      gofmt -l . && golangci-lint run ./... && go test ./... && govulncheck ./...
+
+  ## What this is NOT
+
+  - Not the OAuth2Client provisioning (admin / lender UI OAuth) — that's #10
+  - Not the UI screens — Phase 3
+  - Not a Hydra integration — these are API keys, not OAuth clients
+
+  Expected agent behaviour: 4-5 turns.
+
+gate_marks:
+  - unit
+
+max_iterations: 6
