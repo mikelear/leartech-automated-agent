@@ -146,12 +146,16 @@ def _post_crash_sticky(*, qualified_repo: str, pr_number: int | None, body: str)
         click.echo(f'  (crash sticky post errored: {exc})', err=True)
 
 
-# 60 → 150 → 1000. Token cost is acceptable; rabbit-hole detection (the agent
-# burning turns on the same criterion) will land as a separate circuit-breaker
-# slice. Until then, prefer "let the agent finish" over "cap and re-fire".
-# See `agent-sdk-crash-during-long-initiative` lesson — the SDK-cap-hit bug
-# becomes effectively unreachable at this level for any realistic initiative.
-DEFAULT_INITIATIVE_MAX_TURNS = 1000
+# 60 → 150 → 1000 → 200. Re-baselined 2026-05-26 after the Phase 1 cascade hit
+# the Anthropic org-level rate limit (20M prompt bytes/hour on Sonnet 4.6).
+# Observed actual usage: agent-base + py + ng finished in 30, 30-something,
+# and 30 turns respectively (~$0.50-$1 each). Even substantial initiatives
+# (catalog-fire-fallback at 134 turns, OAuth challenge at 107) stayed well
+# under 200. The 1000 cap was a "safety net against rabbit-holes" — at our
+# new Haiku-default + tighter quotas, 200 is a more honest safety net that
+# also caps any runaway burn quickly. Override per-run via `--max-turns N`
+# for genuinely larger initiatives.
+DEFAULT_INITIATIVE_MAX_TURNS = 200
 
 # Standard write-mode toolkit. Bash gives `git`, `gh`, `npm`, etc.; the rest are file ops.
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']

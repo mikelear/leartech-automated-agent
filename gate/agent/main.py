@@ -31,8 +31,19 @@ from gate.mcp_servers import (
     build_pr_context_server,
 )
 
-DEFAULT_MODEL = 'claude-sonnet-4-6'
+DEFAULT_MODEL = 'claude-haiku-4-5'
 DEFAULT_MAX_TURNS = 20
+
+# Why Haiku 4.5 (not Sonnet 4.6 or Opus 4.7):
+# - Routine initiative work (scaffolding, mechanical edits, gate-iteration) doesn't
+#   need Sonnet/Opus reasoning quality. Real-world test 2026-05-25/26: agent-base,
+#   agent-py, agent-ng cascade landed cleanly on this kind of mechanical work.
+# - Haiku is ~10x cheaper and lives in a much larger rate-limit bucket (Sonnet-4.6
+#   org cap hit 20M prompt bytes/hour during back-to-back Phase 1 firings 2026-05-26).
+# - Anything genuinely strategic (architecture proposals, deep refactor planning)
+#   should pass an explicit `--model claude-opus-4-7` or set LEARTECH_AGENT_MODEL.
+# Override per-run via the click `--model` flag or env var. See
+# project_job_per_run_roadmap.md Phase 4 for per-initiative routing.
 
 # MCP tool names follow the convention `mcp__<server-name>__<tool-name>`.
 MCP_ALLOWED_TOOLS = [

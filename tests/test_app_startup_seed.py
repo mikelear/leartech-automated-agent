@@ -133,9 +133,11 @@ def test_seed_skipped_when_db_disabled(tmp_path: Path, monkeypatch: pytest.Monke
     monkeypatch.chdir(tmp_path)
 
     # Must complete without error even though no DB engine is configured.
+    # asyncio.get_event_loop() raises RuntimeError in Python 3.14 when no loop
+    # is bound to the thread (deprecated since 3.12). Use asyncio.run() instead.
     import asyncio
 
-    asyncio.get_event_loop().run_until_complete(seed_catalog_from_filesystem())
+    asyncio.run(seed_catalog_from_filesystem())
 
     # Confirm DB still uninitialised.
     assert db_module.session_factory_or_none() is None
