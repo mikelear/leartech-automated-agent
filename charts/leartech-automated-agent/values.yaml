@@ -8,6 +8,7 @@ image:
 service:
   type: ClusterIP
   port: 8080
+  externalPort: 8080
 
 # Anthropic SDK + agent loops are memory-heavy on substantial initiatives.
 # 2026-05-20: mortgages-gw-add-mcp-mock-sourcing run OOMKilled at the 1 GiB
@@ -48,6 +49,9 @@ ingress:
   enabled: false
   host: ""
   tlsSecretName: ""
+  annotations: {}
+  labels: {}
+  pathType: ImplementationSpecific
 
 # Secrets — deployment references existing K8s Secret names; ExternalSecrets
 # materialise them per-cluster using the auth-service pattern (same chart,
