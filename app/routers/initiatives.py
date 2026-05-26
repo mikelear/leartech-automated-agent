@@ -146,7 +146,16 @@ async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
         )
         logger.info('initiative %s finished with exit_code=%d', initiative_id, summary.exit_code)
     except asyncio.CancelledError:
-        await update(initiative_id, status='cancelled', finished_at=now())
+        # Best-effort: if the engine is gone (pod shutdown raced with cancellation),
+        # the next pod's orphan-detection on startup will mark this run terminal —
+        # don't crash here.
+        try:
+            await update(initiative_id, status='cancelled', finished_at=now())
+        except RuntimeError as exc:
+            logger.warning(
+                'cancel-cleanup skipped — DB engine already disposed (will be marked orphaned on next pod start): %s',
+                exc,
+            )
         logger.info('initiative %s cancelled', initiative_id)
         raise
     except Exception as exc:  # noqa: BLE001 — we want to surface any agent failure to the consumer
