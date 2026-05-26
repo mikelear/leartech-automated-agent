@@ -283,3 +283,59 @@ def test_404_lists_both_db_and_filesystem_names(client_with_db: TestClient) -> N
     assert 'db-only-initiative-xyz' in available
     # At least one filesystem name must also be present.
     assert len(available) > 1, 'expected both DB and FS names in 404 available list'
+
+
+async def test_cancel_cleanup_tolerates_db_engine_disposal(
+    db_enabled_for_resolution: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancel cleanup must tolerate DB engine being disposed during pod shutdown.
+
+    Regression for the observed issue during run fcbbc53f2650 (2026-05-26):
+    when FastAPI shutdown disposes the DB engine before asyncio cancellation
+    completes, the update() call in the CancelledError handler fails with
+    RuntimeError. The fix wraps the update in try/except to tolerate this.
+
+    The test simulates the race: a background task is cancelled while the
+    engine is disposed. The cancel cleanup path should log a warning and
+    not raise.
+    """
+    import asyncio
+    from pathlib import Path
+    from unittest.mock import patch
+
+    from app import db as db_m
+    from app.routers.initiatives import _run_and_track
+    from app.state import new_id
+
+    # Set up a mock initiative record in memory.
+    initiative_id = new_id()
+
+    # Create a background task that will be cancelled.
+    # We mock run_initiative to sleep indefinitely so the task doesn't complete.
+    async def fake_run_initiative(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(float('inf'))
+
+    yaml_path = Path('/tmp/dummy.yaml')  # noqa: S108 — test only, path not created
+    with patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative):
+        task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
+
+        # Give the task a moment to enter running state.
+        await asyncio.sleep(0.01)
+
+        # Dispose the DB engine to simulate the pod shutdown race.
+        await db_m.dispose_engine()
+
+        # Now cancel the task. This triggers the CancelledError handler.
+        # Without the fix, this would raise RuntimeError from update().
+        # With the fix, it should log a warning and re-raise CancelledError cleanly.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    # Assert the warning was logged with the expected substring.
+    assert any(
+        'DB engine already disposed' in record.message
+        for record in caplog.records
+        if record.levelname == 'WARNING'
+    ), f'Expected warning "DB engine already disposed" in logs. Got: {caplog.messages}'
