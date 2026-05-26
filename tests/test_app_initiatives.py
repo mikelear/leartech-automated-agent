@@ -335,7 +335,5 @@ async def test_cancel_cleanup_tolerates_db_engine_disposal(
 
     # Assert the warning was logged with the expected substring.
     assert any(
-        'DB engine already disposed' in record.message
-        for record in caplog.records
-        if record.levelname == 'WARNING'
+        'DB engine already disposed' in record.message for record in caplog.records if record.levelname == 'WARNING'
     ), f'Expected warning "DB engine already disposed" in logs. Got: {caplog.messages}'

@@ -31,19 +31,26 @@ from gate.mcp_servers import (
     build_pr_context_server,
 )
 
-DEFAULT_MODEL = 'claude-haiku-4-5'
+DEFAULT_MODEL = os.environ.get('LEARTECH_AGENT_MODEL', 'claude-opus-4-7')
 DEFAULT_MAX_TURNS = 20
 
-# Why Haiku 4.5 (not Sonnet 4.6 or Opus 4.7):
-# - Routine initiative work (scaffolding, mechanical edits, gate-iteration) doesn't
-#   need Sonnet/Opus reasoning quality. Real-world test 2026-05-25/26: agent-base,
-#   agent-py, agent-ng cascade landed cleanly on this kind of mechanical work.
-# - Haiku is ~10x cheaper and lives in a much larger rate-limit bucket (Sonnet-4.6
-#   org cap hit 20M prompt bytes/hour during back-to-back Phase 1 firings 2026-05-26).
-# - Anything genuinely strategic (architecture proposals, deep refactor planning)
-#   should pass an explicit `--model claude-opus-4-7` or set LEARTECH_AGENT_MODEL.
-# Override per-run via the click `--model` flag or env var. See
-# project_job_per_run_roadmap.md Phase 4 for per-initiative routing.
+# DEFAULT_MODEL is env-var-configurable to enable cluster-side model overrides
+# without code changes. The in-code default is Opus 4.7 — suitable for complex
+# strategic initiatives (agent self-modification, architecture work, deep refactors).
+#
+# Rationale for Opus as default: PR #33 switched to Haiku 4.5 as a Tier-1 rate-limit
+# tune but encountered reasoning-accuracy regressions (false negatives on test counts).
+# For upcoming Path C initiatives (control-plane refactor, language routing, job-per-run
+# redesign), the cost of Opus is justified by reasoning quality.
+#
+# Override via env var for cost-sensitive periods:
+#   LEARTECH_AGENT_MODEL=claude-haiku-4-5  (cheap, ~10x reduction)
+#   LEARTECH_AGENT_MODEL=claude-sonnet-4-6 (balanced cost/quality)
+#
+# Clusters set this via their GitOps configs/leartech-automated-agent.yaml (see
+# this initiative and PR #33 for context). Per-run overrides via click --model flag
+# also available. See project_job_per_run_roadmap.md Phase 4 for per-initiative
+# routing design.
 
 # MCP tool names follow the convention `mcp__<server-name>__<tool-name>`.
 MCP_ALLOWED_TOOLS = [
