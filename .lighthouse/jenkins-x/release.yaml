@@ -25,6 +25,31 @@ spec:
         steps:
         - name: ""
           resources: {}
+        # Phase D.1: publish leartech-agent-runtime alongside the API image,
+        # tagged with the same VERSION the catalog release task computed.
+        # Kaniko credentials are mounted at the task level by the catalog,
+        # so this step picks them up without extra wiring.
+        - name: build-runtime-image
+          image: gcr.io/kaniko-project/executor:debug
+          command:
+          - /busybox/sh
+          args:
+          - -c
+          - |
+            set -e
+            VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0-snapshot")
+            echo "=== Building leartech-agent-runtime:${VERSION} ==="
+            /kaniko/executor \
+              --dockerfile=Dockerfile.runtime \
+              --context=/workspace/source \
+              --destination=ghcr.io/mikelear/leartech-agent-runtime:${VERSION} \
+              --build-arg=BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.30.1 \
+              --cache=true
+          workingDir: /workspace/source
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
   podTemplate:
     tolerations:
     - key: sku

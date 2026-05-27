@@ -49,6 +49,30 @@ spec:
             uv run coverage report
         - name: build-container-build
           resources: {}
+        # Phase D.1: smoke-test Dockerfile.runtime on PR. We can't FROM
+        # ghcr.io/mikelear/leartech-agent-base from inside a PR (no ghcr.io
+        # pull auth on PR runs), so we override BASE_IMAGE=python:3.13-slim
+        # to validate the COPY/RUN structure. Kaniko --no-push skips registry
+        # auth entirely. Release builds use the real agent-base.
+        - name: build-runtime-image-smoke
+          image: gcr.io/kaniko-project/executor:debug
+          command:
+          - /busybox/sh
+          args:
+          - -c
+          - |
+            set -e
+            echo "=== Smoke-building Dockerfile.runtime (no push) ==="
+            /kaniko/executor \
+              --dockerfile=Dockerfile.runtime \
+              --context=/workspace/source \
+              --no-push \
+              --build-arg=BASE_IMAGE=python:3.13-slim
+          workingDir: /workspace/source
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
         - name: promote-jx-preview
           resources: {}
   podTemplate:
