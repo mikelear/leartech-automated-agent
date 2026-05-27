@@ -312,16 +312,22 @@ async def test_cancel_cleanup_tolerates_db_engine_disposal(
     initiative_id = new_id()
 
     # Create a background task that will be cancelled.
-    # We mock run_initiative to sleep indefinitely so the task doesn't complete.
+    # `started` synchronises deterministically with the task entering
+    # run_initiative — replaces the previous `asyncio.sleep(0.01)` race
+    # which flaked on contention-pressed nodes (GCP release tb8t6, 6kkjj
+    # 2026-05-27) when 10ms wasn't enough for the task to schedule.
+    started = asyncio.Event()
+
     async def fake_run_initiative(*_args: object, **_kwargs: object) -> object:
+        started.set()
         await asyncio.sleep(float('inf'))
 
     yaml_path = Path('/tmp/dummy.yaml')  # noqa: S108 — test only, path not created
     with patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative):
         task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
 
-        # Give the task a moment to enter running state.
-        await asyncio.sleep(0.01)
+        # Wait deterministically for the task to enter running state.
+        await started.wait()
 
         # Dispose the DB engine to simulate the pod shutdown race.
         await db_m.dispose_engine()
@@ -372,7 +378,12 @@ async def test_cancel_cleanup_tolerates_db_programming_error(
 
     initiative_id = new_id()
 
+    # `started` synchronises deterministically with the task entering
+    # run_initiative — same flake fix as the sibling test.
+    started = asyncio.Event()
+
     async def fake_run_initiative(*_args: object, **_kwargs: object) -> object:
+        started.set()
         await asyncio.sleep(float('inf'))
 
     async def fake_update(_id: str, **fields: object) -> None:
@@ -394,8 +405,8 @@ async def test_cancel_cleanup_tolerates_db_programming_error(
     ):
         task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
 
-        # Let the task enter running state before we cancel.
-        await asyncio.sleep(0.01)
+        # Wait deterministically for the task to enter running state.
+        await started.wait()
 
         # Cancel — _run_and_track's CancelledError handler will invoke update(),
         # which now raises SQLiteProgrammingError. The broadened catch must
