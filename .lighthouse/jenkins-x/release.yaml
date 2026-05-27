@@ -50,6 +50,7 @@ spec:
           script: |
             #!/busybox/sh
             set -e
+            set -o pipefail
             VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0-snapshot")
             echo "=== Building leartech-agent-runtime:${VERSION} ==="
 
