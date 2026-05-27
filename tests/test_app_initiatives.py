@@ -337,3 +337,76 @@ async def test_cancel_cleanup_tolerates_db_engine_disposal(
     assert any(
         'DB engine already disposed' in record.message for record in caplog.records if record.levelname == 'WARNING'
     ), f'Expected warning "DB engine already disposed" in logs. Got: {caplog.messages}'
+
+
+async def test_cancel_cleanup_tolerates_db_programming_error(
+    db_enabled_for_resolution: None,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Cancel cleanup must tolerate ProgrammingError on closed engine.
+
+    Regression for GCP release tb8t6 (2026-05-27): under cluster contention,
+    FastAPI shutdown disposes the engine such that the cancel-cleanup's
+    update() raises sqlite3.ProgrammingError (wrapped by SQLAlchemy as
+    sqlalchemy.exc.ProgrammingError) instead of RuntimeError. Both surfaces
+    must be tolerated — see PR #35 for the RuntimeError case.
+
+    AZ release rwkch on identical code passed the same release pipeline,
+    confirming the failure is contention-exposed rather than a code bug.
+    Under cluster pressure the engine disposal interleaves DIFFERENTLY:
+    the engine connection is closed mid-cleanup rather than the session
+    factory being cleared, exposing a different exception surface.
+
+    The test deterministically forces the closed-engine surface by patching
+    update() to raise sqlite3.ProgrammingError. Outcome must mirror the
+    sibling test: warning logged, CancelledError re-raised cleanly, no
+    crash propagating out of _run_and_track.
+    """
+    import asyncio
+    from pathlib import Path
+    from sqlite3 import ProgrammingError as SQLiteProgrammingError
+    from unittest.mock import patch
+
+    from app.routers.initiatives import _run_and_track
+    from app.state import new_id
+
+    initiative_id = new_id()
+
+    async def fake_run_initiative(*_args: object, **_kwargs: object) -> object:
+        await asyncio.sleep(float('inf'))
+
+    async def fake_update(_id: str, **fields: object) -> None:
+        # Only the cancel-cleanup update should fail — the initial 'running'
+        # status update must succeed so we deterministically reach the
+        # CancelledError handler. Mirrors the in-cluster surface: when the
+        # engine pool's connection is closed mid-operation, sqlite3 raises
+        # ProgrammingError (and SQLAlchemy wraps it as
+        # sqlalchemy.exc.ProgrammingError). The catch tuple covers both;
+        # raising the raw sqlite3 variant here exercises the
+        # SQLiteProgrammingError leg of the tuple directly.
+        if fields.get('status') == 'cancelled':
+            raise SQLiteProgrammingError('Cannot operate on a closed database.')
+
+    yaml_path = Path('/tmp/dummy.yaml')  # noqa: S108 — test only, path not created
+    with (
+        patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative),
+        patch('app.routers.initiatives.update', side_effect=fake_update),
+    ):
+        task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
+
+        # Let the task enter running state before we cancel.
+        await asyncio.sleep(0.01)
+
+        # Cancel — _run_and_track's CancelledError handler will invoke update(),
+        # which now raises SQLiteProgrammingError. The broadened catch must
+        # swallow it and re-raise CancelledError cleanly.
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    # Warning must be logged. Substring 'DB engine already disposed' is the
+    # stable contract — same message structure as PR #35's log line, just
+    # surfaced for a different underlying exception class.
+    assert any(
+        'DB engine already disposed' in record.message for record in caplog.records if record.levelname == 'WARNING'
+    ), f'Expected warning "DB engine already disposed" in logs. Got: {caplog.messages}'
