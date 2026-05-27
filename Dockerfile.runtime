@@ -1,0 +1,36 @@
+# leartech-agent-runtime — Path C Phase D.1
+# Agent code + Python deps on top of leartech-agent-base.
+# Per-language variants FROM this image and add their toolchain.
+# API server image also FROMs this image (eventually) and adds uvicorn.
+
+ARG BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.30.1
+FROM $BASE_IMAGE
+
+LABEL org.opencontainers.image.source="https://github.com/mikelear/leartech-automated-agent" \
+      org.opencontainers.image.description="Agent runtime layer: Python deps + gate/app code on leartech-agent-base"
+
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+
+RUN groupadd -r agent && useradd -r -g agent -u 1000 agent \
+    && mkdir -p /home/agent \
+    && chown agent:agent /home/agent
+
+WORKDIR /app
+
+COPY --chown=agent:agent pyproject.toml uv.lock* ./
+COPY --chown=agent:agent app/ app/
+COPY --chown=agent:agent gate/ gate/
+COPY --chown=agent:agent initiatives/ initiatives/
+COPY --chown=agent:agent README.md ./
+
+ENV UV_FROZEN=true
+RUN uv sync --frozen --no-cache --no-dev 2>/dev/null || uv sync --no-cache --no-dev
+
+ENV UV_CACHE_DIR=/tmp/uv-cache
+ENV LEARTECH_REPO_ROOT=/workspace
+ENV PATH="/app/.venv/bin:$PATH"
+
+USER agent
+
+# No ENTRYPOINT — this image is a base for variants. They set their own.
+# No EXPOSE — this image is a base; variants/API expose ports.
