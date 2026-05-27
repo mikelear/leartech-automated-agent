@@ -21,9 +21,11 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from sqlite3 import ProgrammingError as SQLiteProgrammingError
 
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import ProgrammingError as SAProgrammingError
 
 from app.db import is_db_enabled
 from app.db import session as db_session
@@ -148,10 +150,13 @@ async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
     except asyncio.CancelledError:
         # Best-effort: if the engine is gone (pod shutdown raced with cancellation),
         # the next pod's orphan-detection on startup will mark this run terminal —
-        # don't crash here.
+        # don't crash here. Two disposal surfaces are tolerated:
+        #   * RuntimeError — session factory was cleared (PR #35).
+        #   * (SA|SQLite)ProgrammingError — engine connection is closed mid-cleanup
+        #     under cluster contention (GCP release tb8t6, 2026-05-27).
         try:
             await update(initiative_id, status='cancelled', finished_at=now())
-        except RuntimeError as exc:
+        except (RuntimeError, SAProgrammingError, SQLiteProgrammingError) as exc:
             logger.warning(
                 'cancel-cleanup skipped — DB engine already disposed (will be marked orphaned on next pod start): %s',
                 exc,
