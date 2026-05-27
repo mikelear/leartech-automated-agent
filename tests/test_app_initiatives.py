@@ -12,6 +12,7 @@ without an image rebuild; filesystem serves as fallback.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from typing import NoReturn
 from unittest.mock import patch
 
 import pytest
@@ -318,9 +319,10 @@ async def test_cancel_cleanup_tolerates_db_engine_disposal(
     # 2026-05-27) when 10ms wasn't enough for the task to schedule.
     started = asyncio.Event()
 
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> object:
+    async def fake_run_initiative(*_args: object, **_kwargs: object) -> NoReturn:
         started.set()
         await asyncio.sleep(float('inf'))
+        raise AssertionError('unreachable: sleep(inf) only exits via cancellation')
 
     yaml_path = Path('/tmp/dummy.yaml')  # noqa: S108 — test only, path not created
     with patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative):
@@ -382,9 +384,10 @@ async def test_cancel_cleanup_tolerates_db_programming_error(
     # run_initiative — same flake fix as the sibling test.
     started = asyncio.Event()
 
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> object:
+    async def fake_run_initiative(*_args: object, **_kwargs: object) -> NoReturn:
         started.set()
         await asyncio.sleep(float('inf'))
+        raise AssertionError('unreachable: sleep(inf) only exits via cancellation')
 
     async def fake_update(_id: str, **fields: object) -> None:
         # Only the cancel-cleanup update should fail — the initial 'running'
