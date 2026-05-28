@@ -175,6 +175,51 @@ def _default_repo_root(repo_name: str) -> Path:
     return Path('~/leartech').expanduser() / repo_short
 
 
+def _clone_repo(*, qualified_repo: str, cwd: Path) -> int:
+    """Clone `qualified_repo` (e.g. `mikelear/leartech-automated-agent`) into `cwd`.
+
+    Uses direct `git clone` over HTTPS with the GH_TOKEN as a basic-auth user
+    (`x-access-token:<token>@github.com/...`). This is GitHub's documented
+    git-over-HTTPS auth format and — critically — hits NO GitHub API; just the
+    git wire protocol. That makes the clone immune to the 5000pts/h GraphQL
+    rate-limit bucket that `gh repo clone` consumed.
+
+    Returns 0 on success, non-zero on failure. The token is never logged: we
+    redact it from any echoed stderr before surfacing.
+    """
+    gh_token = os.environ.get('GH_TOKEN')
+    if not gh_token:
+        click.echo(
+            f'Repo checkout not found at {cwd} and GH_TOKEN is not set — cannot clone. '
+            f'Either clone manually (`git clone https://github.com/{qualified_repo}.git {cwd}`) '
+            f'or set GH_TOKEN.',
+            err=True,
+        )
+        return 2
+    click.echo(
+        click.style(f'→ cloning {qualified_repo} → {cwd}', fg='cyan'),
+        err=True,
+    )
+    cwd.parent.mkdir(parents=True, exist_ok=True)
+    url = f'https://x-access-token:{gh_token}@github.com/{qualified_repo}.git'
+    result = subprocess.run(
+        ['git', 'clone', '--depth', '1', url, str(cwd)],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    if result.returncode != 0:
+        # Defensive: redact the token from any error output before echoing.
+        redacted_stderr = result.stderr.replace(gh_token, '***REDACTED***')
+        click.echo(
+            f'Clone failed (exit {result.returncode}):\n{redacted_stderr}',
+            err=True,
+        )
+        return 2
+    return 0
+
+
 async def run_initiative(
     initiative_path: Path,
     *,
@@ -213,34 +258,15 @@ async def run_initiative(
     cwd = repo_root or _default_repo_root(primary.qualified_repo)
     if not cwd.exists():
         # Cluster mode: the consumer repo isn't pre-mounted, so clone it from GitHub
-        # on demand. `gh` is baked into the image and honours GH_TOKEN natively.
+        # on demand. We use direct `git clone` over HTTPS (with GH_TOKEN injected
+        # into the URL) rather than `gh repo clone`, because `gh` resolves the
+        # clone URL via the GitHub GraphQL API — which shares a 5000pts/h bucket
+        # with operator-side `gh` usage. Direct git protocol hits no API.
         # Laptop mode normally has the repo at ~/leartech/<repo>/ already, so this
         # branch only fires on a fresh dev machine or the deployed pod.
-        if not os.environ.get('GH_TOKEN'):
-            click.echo(
-                f'Repo checkout not found at {cwd} and GH_TOKEN is not set — cannot clone. '
-                f'Either clone manually (`gh repo clone {primary.qualified_repo} {cwd}`) '
-                f'or set GH_TOKEN.',
-                err=True,
-            )
-            return RunSummary(exit_code=2)
-        click.echo(
-            click.style(f'→ cloning {primary.qualified_repo} → {cwd}', fg='cyan'),
-            err=True,
-        )
-        cwd.parent.mkdir(parents=True, exist_ok=True)
-        result = subprocess.run(
-            ['gh', 'repo', 'clone', primary.qualified_repo, str(cwd)],
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if result.returncode != 0:
-            click.echo(
-                f'Clone failed (exit {result.returncode}):\n{result.stderr}',
-                err=True,
-            )
-            return RunSummary(exit_code=2)
+        clone_exit = _clone_repo(qualified_repo=primary.qualified_repo, cwd=cwd)
+        if clone_exit != 0:
+            return RunSummary(exit_code=clone_exit)
 
     calibrations = render_for('initiative_agent')
     system_prompt = f'{calibrations}\n\n---\n\n{INITIATIVE_SYSTEM_PROMPT}' if calibrations else INITIATIVE_SYSTEM_PROMPT
