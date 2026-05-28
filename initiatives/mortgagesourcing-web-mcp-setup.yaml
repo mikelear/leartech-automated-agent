@@ -1,0 +1,91 @@
+# Phase 2: advertise the leartech-mortgages MCP server + setup page (Layer 4).
+# Instantiates _templates/mcp-advertise.yaml. THE differentiator.
+# Run with: make initiative INITIATIVE=mortgagesourcing-web-mcp-setup
+
+name: mortgagesourcing-web-mcp-setup
+
+description: |
+  Advertise the leartech-mortgages MCP server on www.mortgagesourcing.com: a
+  human setup page at /connect (ChatGPT / Claude Desktop / Cursor connector
+  config + tool list + example prompts), a machine descriptor at
+  /.well-known/mcp.json, and an llms.txt MCP pointer. This lets AI clients
+  SOURCE LIVE, not just read the site. Tools are currently Tier 0 (anonymous).
+
+repo: leartech-mortgagesourcing-web
+branch: agent/mcp-setup
+base: main
+language: angular
+
+goal: |
+  Make the leartech-mortgages MCP server discoverable + usable from AI clients.
+  Assumes prerendering + llms.txt exist. Read an existing page component first.
+
+  ## Facts to use (do not invent tools)
+  - MCP server name: leartech-mortgages
+  - Endpoint (Streamable HTTP, type "http"): https://api.mortgagesourcing.com/mcp
+    (this is the public production endpoint behind the *.mortgagesourcing.com
+    wildcard cert — the same one submitted to the ChatGPT App Directory)
+  - Auth: Tier 0 (anonymous — no token required for these read-only tools; an
+    OAuth 2.1 challenge is being added flag-gated, so note sign-in "coming soon")
+  - Tools (all ReadOnly):
+    - search_products — search the catalogue by loan amount, property value,
+      term, product type, rate type, fix length; returns up to 10 ranked by
+      5-year total cost.
+    - compare_products — compare 2-5 products by ID side-by-side.
+    - get_product_rates — cheapest rates for common shapes (2yr/5yr/10yr fixed,
+      tracker, SVR) across 60/75/80/85/90% LTV bands.
+    - get_product — full detail for one product by ID.
+
+  ## 1. Setup page — `src/app/connect/connect.component.{ts,html}` at /connect
+  - `<h1>`: "Connect an AI client to Mortgage Sourcing". TL;DR block.
+  - Copy-paste connector config blocks:
+    - ChatGPT: Settings -> Connectors -> Add -> URL
+      https://api.mortgagesourcing.com/mcp
+    - Claude Desktop (`claude_desktop_config.json`):
+      {"mcpServers":{"leartech-mortgages":{"type":"http","url":"https://api.mortgagesourcing.com/mcp"}}}
+    - Cursor / generic `.mcp.json`: same mcpServers block.
+  - A `<table>` of the 4 tools (name | what it does | key params).
+  - Example prompts to paste, e.g.: "Find the cheapest 5-year fixed mortgage for
+    a £320k loan on a £400k house, 25-year term, residential." then "Compare the
+    top 3 in detail."
+  - Note: Tier 0 / no sign-in; data is currently illustrative mock product data.
+  - data-testid: connect-page, connect-heading, connect-config-claude,
+    connect-config-chatgpt, connect-config-cursor, connect-tools-table.
+
+  ## 2. Machine descriptor — `public/.well-known/mcp.json`
+  - {"name":"leartech-mortgages","type":"http",
+     "url":"https://api.mortgagesourcing.com/mcp",
+     "description":"UK mortgage sourcing tools (Tier 0, read-only).",
+     "tools":[{"name":"search_products","description":"..."},
+              {"name":"compare_products","description":"..."},
+              {"name":"get_product_rates","description":"..."},
+              {"name":"get_product","description":"..."}]}
+
+  ## 3. llms.txt — fill the `## MCP` section
+      ## MCP
+      Mortgage Sourcing exposes a Model Context Protocol server so AI clients
+      can source UK mortgages live.
+      - Endpoint (Streamable HTTP): https://api.mortgagesourcing.com/mcp
+      - Setup: https://www.mortgagesourcing.com/connect
+      - Tools: search_products, compare_products, get_product_rates, get_product
+
+  ## 4. Map + JSON-LD
+  - Add /connect to public/sitemap.xml; ensure it prerenders.
+  - TechArticle + BreadcrumbList JSON-LD on /connect (with dates).
+
+  ## Constraints
+  - `npm install --legacy-peer-deps`. No secrets/tokens (Tier 0 needs none).
+  - List ONLY the four real tools. Use the public production endpoint
+    https://api.mortgagesourcing.com/mcp exactly as given above.
+  - Don't touch `.lighthouse/jenkins-x/` or the chart.
+  - `git add <specific files only>`. Conventional commit
+    `feat(mcp): advertise leartech-mortgages MCP server + /connect page`. Post
+    /hold after opening the PR.
+
+  ## What this is NOT
+  - Not building/changing the MCP server (that's leartech-mortgages-gw).
+  - Not embedding an LLM or chat widget. Not exposing higher-than-Tier-0 tools.
+
+gate_marks: []
+
+max_iterations: 7

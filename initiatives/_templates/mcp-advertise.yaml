@@ -1,0 +1,77 @@
+# TEMPLATE: Advertise an MCP server on a site (Layer 4 — Actionable).
+# Copy to initiatives/<service>-mcp-setup.yaml and replace the <PLACEHOLDERS>.
+# Assumes ai-discoverable-baseline.yaml has enabled prerendering + llms.txt.
+# Implements hub/shared-rules/ai-discoverable-websites.md Layer 4.
+
+name: <SERVICE>-mcp-setup
+
+description: |
+  Advertise the <MCP_NAME> MCP server on <SERVICE>: a human setup page, a
+  machine-discoverable /.well-known descriptor, and an llms.txt pointer, so AI
+  clients can connect and call the live tools — not just read the site.
+
+repo: <SERVICE>                              # e.g. leartech-mortgagesourcing-web
+branch: agent/mcp-setup
+base: main
+language: angular
+
+goal: |
+  Make the <MCP_NAME> MCP server (Streamable HTTP at <MCP_URL>) discoverable
+  and usable from AI clients. Read an existing page component first to match
+  local conventions.
+
+  ## Inputs to template in
+  - MCP server name: <MCP_NAME>            # e.g. leartech-mortgages
+  - MCP endpoint URL: <MCP_URL>            # e.g. https://...gw-jx-staging.az.leartech.com/mcp
+  - Transport: Streamable HTTP (type "http")
+  - Auth tier: <AUTH>                      # e.g. Tier 0 anonymous (no auth)
+  - Tools: <TOOLS>                         # name + one-line description each
+
+  ## 1. Human setup page — `src/app/connect/connect.component.{ts,html}` at /connect
+  - One `<h1>` ("Connect an AI client to <MCP_NAME>"), TL;DR block.
+  - Copy-paste connector config blocks for:
+    - ChatGPT (Settings -> Connectors -> add <MCP_URL>)
+    - Claude Desktop (`claude_desktop_config.json` mcpServers block, type http, url <MCP_URL>)
+    - Cursor / generic `.mcp.json` (mcpServers block)
+  - A `<table>` of the <TOOLS> (tool name | what it does | key params).
+  - 2-3 example natural-language prompts a user can paste to exercise the tools.
+  - Note the auth tier (<AUTH>) and what is/ isn't available without sign-in.
+  - data-testid anchors: connect-page, connect-heading, connect-config-claude,
+    connect-config-chatgpt, connect-tools-table.
+
+  ## 2. Machine descriptor — `public/.well-known/mcp.json`
+  - A JSON descriptor advertising the server for agents discovering it from the
+    domain: { "name": "<MCP_NAME>", "type": "http", "url": "<MCP_URL>",
+    "description": "...", "tools": [ {name, description}, ... ] }.
+  - public/ is served at root, so this lands at /.well-known/mcp.json.
+
+  ## 3. llms.txt pointer (Layer 3/4) — edit `public/llms.txt`
+  - Add/replace an `## MCP` section:
+      ## MCP
+      This site exposes a Model Context Protocol server so AI clients can
+      source <DOMAIN_NOUN> live.
+      - Endpoint (Streamable HTTP): <MCP_URL>
+      - Setup: https://<DOMAIN>/connect
+      - Tools: <comma-separated tool names>
+
+  ## 4. Map updates
+  - Add `/connect` to `public/sitemap.xml`; ensure it's prerendered.
+  - Add JSON-LD `TechArticle` + `BreadcrumbList` to /connect (Layer 2/5, with dates).
+
+  ## Constraints
+  - Use `npm install --legacy-peer-deps` for any npm operations.
+  - Do NOT hardcode secrets/tokens. Tier-0 servers need none; for higher tiers,
+    link the auth docs rather than embedding credentials.
+  - Don't invent tools — list only the tools the server actually exposes.
+  - `git add <specific files only>`. Conventional commit
+    `feat(mcp): advertise <MCP_NAME> MCP server + setup page`. Post /hold after PR.
+
+  ## What this is NOT
+  - Not building or changing the MCP server itself (that lives in <MCP_REPO>).
+  - Not embedding an LLM or a chat widget — this advertises the server for the
+    user's own AI client.
+  - Not exposing higher-than-Tier-0 tools publicly.
+
+gate_marks: []
+
+max_iterations: 7

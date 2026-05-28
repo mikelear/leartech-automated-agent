@@ -1,0 +1,69 @@
+# Phase 2: live sourcing demo page (search + compare), FinancialProduct JSON-LD.
+# Run with: make initiative INITIATIVE=mortgagesourcing-web-live-demo
+
+name: mortgagesourcing-web-live-demo
+
+description: |
+  Add an interactive sourcing demo at /demo that lets a human run a product
+  search + comparison against the leartech-mortgages gateway, mirroring what an
+  AI client does via MCP. Renders illustrative product results with
+  FinancialProduct JSON-LD. Clearly labelled as illustrative mock data.
+
+repo: leartech-mortgagesourcing-web
+branch: agent/live-demo
+base: main
+language: angular
+
+goal: |
+  Add a sourcing demo page at `/demo`. Read existing components + the runtime
+  config wiring (`/api.conf.json` ConfigMap) first.
+
+  ## Data source
+  - The gateway exposes a REST surface at `/api/v1/*` alongside `/mcp` on
+    leartech-mortgages-gw. Use the REST surface for the browser demo (the
+    browser is not an MCP client). Base URL comes from runtime config
+    (`api.conf.json`), defaulting to
+    https://api.mortgagesourcing.com . If a usable REST
+    search endpoint is not yet available, fall back to a small bundled
+    illustrative fixture set (clearly marked) so the page is never empty —
+    prerendering must still emit a populated, crawlable page.
+
+  ## Page (`src/app/demo/demo.component.{ts,html}`)
+  - `<h1>`: "Source a mortgage". A criteria form: loan amount (£), property
+    value (£), term (years), product type, rate type, fix length.
+  - Results: a ranked `<table>` of products (lender, product, initial rate %,
+    fix length, max LTV, arrangement fee, 5-year total cost) with a compare
+    action for 2-5 rows.
+  - A persistent banner: "Illustrative data for demonstration — not advice."
+  - A callout linking /connect: "Prefer to do this in ChatGPT or Claude? Connect
+    our MCP server."
+  - data-testid: demo-page, demo-form, demo-results-table, demo-compare,
+    demo-illustrative-banner.
+
+  ## Prerender + JSON-LD
+  - Prerender the page with a default example result set (so crawlers see
+    populated content). Add `FinancialProduct` JSON-LD for the example
+    products (lender as `provider`, `interestRate`, `loanTerm`, `feesAndCommissionsSpecification`),
+    each marked illustrative; plus BreadcrumbList.
+
+  ## Meta + map
+  - Unique title/description/canonical + OG. Add /demo to sitemap.xml + a bullet
+    in llms.txt `## Pages`.
+
+  ## Constraints
+  - `npm install --legacy-peer-deps`. Use the runtime ConfigMap pattern for the
+    API base URL — do NOT bake environment URLs into the bundle.
+  - Handle API errors gracefully (show the illustrative fixtures, never a blank
+    page or stack trace).
+  - Don't touch `.lighthouse/jenkins-x/` or health probes.
+  - `git add <specific files only>`. Conventional commit
+    `feat(demo): add live sourcing demo page`. Post /hold after PR.
+
+  ## What this is NOT
+  - Not real financial advice; not a real application/decision flow.
+  - Not an MCP client in the browser (MCP is for the user's AI client — /connect).
+  - Not auth/account features.
+
+gate_marks: []
+
+max_iterations: 9

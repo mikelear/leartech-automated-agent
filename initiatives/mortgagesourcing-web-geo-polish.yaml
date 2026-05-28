@@ -1,0 +1,61 @@
+# Phase 2 (run LAST): GEO/AEO polish + publish the standard on the site.
+# llms-full.txt, markdown alternates, trust/provenance, and a /standard page.
+# Run with: make initiative INITIATIVE=mortgagesourcing-web-geo-polish
+
+name: mortgagesourcing-web-geo-polish
+
+description: |
+  Finish the AI-discoverability work on www.mortgagesourcing.com: add
+  /llms-full.txt, markdown alternates for key pages, trust/provenance (About
+  page, dates, sameAs), and publish the AI Discoverability Stack standard
+  itself on the site (eating its own dog food). Completes Layers 3 + 5.
+
+repo: leartech-mortgagesourcing-web
+branch: agent/geo-polish
+base: main
+language: angular
+
+goal: |
+  Assumes baseline + home + how-sourcing-works + connect + demo pages exist.
+
+  ## 1. /llms-full.txt (Layer 3)
+  - `public/llms-full.txt`: the full prose content of the site's key pages
+    (home, how-sourcing-works, connect, demo, standard, about) concatenated as
+    one markdown document, each section headed by its page title + URL.
+
+  ## 2. Markdown alternates (Layer 3)
+  - Serve clean markdown alternates for the key content pages, e.g.
+    `public/how-sourcing-works.md` and `public/standard.md`, mirroring the page
+    content as markdown.
+
+  ## 3. About / trust (Layer 5) — `src/app/about/about.component.{ts,html}` at /about
+  - Who runs the site, contact, and an `Organization` JSON-LD with `sameAs`.
+  - Ensure every content page carries visible datePublished/dateModified and
+    that figures show an explicit "as of <date>".
+  - data-testid: about-page, about-heading, about-org.
+
+  ## 4. Publish the standard (dog-fooding) — `/standard`
+  - `src/app/standard/standard.component.{ts,html}`: a public, prerendered
+    summary of the AI Discoverability Stack (the five layers: Crawlable,
+    Structured, Mapped, Actionable/MCP, Trusted) — the same standard this site
+    implements. Keep it faithful to hub/shared-rules/ai-discoverable-websites.md.
+    Add TechArticle + BreadcrumbList JSON-LD with dates.
+
+  ## 5. Map updates
+  - Add /about and /standard to sitemap.xml and llms.txt `## Pages`.
+
+  ## Constraints
+  - `npm install --legacy-peer-deps`. Keep markdown alternates in sync with the
+    page content (they are generated/curated copies, not a CMS).
+  - Don't touch `.lighthouse/jenkins-x/` or the chart.
+  - `git add <specific files only>`. Conventional commit
+    `feat(geo): llms-full, markdown alternates, about + standard pages`. Post
+    /hold after PR.
+
+  ## What this is NOT
+  - Not a build-time markdown-rendering framework — curated static files are the
+    deliverable. Not a blog/CMS. Not new product features.
+
+gate_marks: []
+
+max_iterations: 8
