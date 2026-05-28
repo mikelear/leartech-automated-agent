@@ -24,21 +24,31 @@ spec:
     trigger: "(?m)^/ai-feedback"
     rerun_command: "/ai-feedback"
     source: "ai-review/feedback.yaml"
+  # TEMPORARY (2026-05-28 D-phase arch sprint): security-scan, image-scan,
+  # and dynamic-security-scan set to always_run: false to reduce cluster
+  # contention. Still fire via `/test <name>` on demand. Release pipeline
+  # still runs them. Restore to always_run: true when sprint completes.
   - name: security-scan
     context: "security-scan"
-    always_run: true
+    always_run: false
     optional: true
     source: "security-scan/pullrequest.yaml"
+    trigger: "(?m)^/test( all| security-scan)"
+    rerun_command: "/test security-scan"
   - name: image-scan
     context: "image-scan"
-    always_run: true
+    always_run: false
     optional: true
     source: "security-scan/image-scan.yaml"
+    trigger: "(?m)^/test( all| image-scan)"
+    rerun_command: "/test image-scan"
   - name: dynamic-security-scan
     context: "dynamic-scan"
-    always_run: true
+    always_run: false
     optional: true
     source: "security-scan/dynamic/pullrequest.yaml"
+    trigger: "(?m)^/test( all| dynamic-scan)"
+    rerun_command: "/test dynamic-scan"
   postsubmits:
   - name: release
     context: "release"
