@@ -41,6 +41,19 @@ spec:
         - containerPort: {{ .Values.service.port }}
           protocol: TCP
         env:
+        # Downward API — agent's job_runner.py reads POD_NAMESPACE to know
+        # which namespace to spawn Jobs into (D.4's Job-per-run path).
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        # D.4 runtime selector: 'asyncio' (default) keeps the in-process
+        # task path; 'job' spawns a K8s Job per initiative. Empty/unset
+        # falls back to 'asyncio' in code at app/routers/initiatives.py.
+        {{- if .Values.agent.runtime }}
+        - name: LEARTECH_INITIATIVE_RUNTIME
+          value: {{ .Values.agent.runtime | quote }}
+        {{- end }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:

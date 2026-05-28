@@ -253,7 +253,10 @@ async def test_spawn_calls_load_incluster_config() -> None:
         patch('gate.agent.job_runner.ApiClient') as mock_api_client_cls,
         patch('gate.agent.job_runner.client') as mock_client_mod,
     ):
-        mock_config.load_incluster_config = AsyncMock()
+        # kubernetes_asyncio's load_incluster_config is synchronous —
+        # MagicMock (not AsyncMock). AsyncMock hid a real bug in D.3 where
+        # the call site awaited it; fixed in PR #50.
+        mock_config.load_incluster_config = MagicMock()
         # ApiClient is used as `async with ApiClient() as api: ...` —
         # mock the async context manager.
         api_client_instance = MagicMock()
@@ -271,7 +274,7 @@ async def test_spawn_calls_load_incluster_config() -> None:
             env={},
         )
 
-    mock_config.load_incluster_config.assert_awaited_once()
+    mock_config.load_incluster_config.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -285,7 +288,10 @@ async def test_spawn_submits_manifest_to_batch_v1() -> None:
         patch('gate.agent.job_runner.ApiClient') as mock_api_client_cls,
         patch('gate.agent.job_runner.client') as mock_client_mod,
     ):
-        mock_config.load_incluster_config = AsyncMock()
+        # kubernetes_asyncio's load_incluster_config is synchronous —
+        # MagicMock (not AsyncMock). AsyncMock hid a real bug in D.3 where
+        # the call site awaited it; fixed in PR #50.
+        mock_config.load_incluster_config = MagicMock()
         api_client_instance = MagicMock()
         mock_api_client_cls.return_value.__aenter__ = AsyncMock(return_value=api_client_instance)
         mock_api_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
@@ -332,7 +338,10 @@ async def test_spawn_uses_default_service_account_when_unspecified() -> None:
         patch('gate.agent.job_runner.ApiClient') as mock_api_client_cls,
         patch('gate.agent.job_runner.client') as mock_client_mod,
     ):
-        mock_config.load_incluster_config = AsyncMock()
+        # kubernetes_asyncio's load_incluster_config is synchronous —
+        # MagicMock (not AsyncMock). AsyncMock hid a real bug in D.3 where
+        # the call site awaited it; fixed in PR #50.
+        mock_config.load_incluster_config = MagicMock()
         mock_api_client_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
         mock_api_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
         batch = MagicMock()
@@ -359,7 +368,10 @@ async def test_spawn_uses_default_resources_when_unspecified() -> None:
         patch('gate.agent.job_runner.ApiClient') as mock_api_client_cls,
         patch('gate.agent.job_runner.client') as mock_client_mod,
     ):
-        mock_config.load_incluster_config = AsyncMock()
+        # kubernetes_asyncio's load_incluster_config is synchronous —
+        # MagicMock (not AsyncMock). AsyncMock hid a real bug in D.3 where
+        # the call site awaited it; fixed in PR #50.
+        mock_config.load_incluster_config = MagicMock()
         mock_api_client_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
         mock_api_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
         batch = MagicMock()
@@ -390,7 +402,10 @@ async def test_spawn_propagates_409_conflict_unchanged() -> None:
         patch('gate.agent.job_runner.ApiClient') as mock_api_client_cls,
         patch('gate.agent.job_runner.client') as mock_client_mod,
     ):
-        mock_config.load_incluster_config = AsyncMock()
+        # kubernetes_asyncio's load_incluster_config is synchronous —
+        # MagicMock (not AsyncMock). AsyncMock hid a real bug in D.3 where
+        # the call site awaited it; fixed in PR #50.
+        mock_config.load_incluster_config = MagicMock()
         mock_api_client_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
         mock_api_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
         batch = MagicMock()
