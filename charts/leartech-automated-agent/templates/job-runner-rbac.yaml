@@ -1,0 +1,55 @@
+{{- if .Values.jobs.enabled }}
+# Role granting the namespace-scoped permissions needed by:
+#  1. The API pod to spawn initiative Jobs (batch/jobs create+get+list+watch+delete).
+#  2. Spawned Job pods to read their own Pod state and logs.
+#  3. Future MCP tools that query Tekton PipelineRuns/TaskRuns directly
+#     instead of going through the GitHub Statuses API (per Mike's 2026-05-28
+#     framing on pulling back GitHub API usage during D-phase).
+#
+# Scope deliberately stays namespace-local — no ClusterRole. Cross-namespace
+# Tekton queries (auth-ui's preview namespace etc.) need a separate
+# cross-namespace strategy not in scope for D.2.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "leartech-automated-agent.fullname" . }}-job-runner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "leartech-automated-agent.labels" . | nindent 4 }}
+    leartech.io/component: job-runner
+rules:
+- apiGroups: ["batch"]
+  resources: ["jobs"]
+  verbs: ["create", "get", "list", "watch", "delete"]
+- apiGroups: [""]
+  resources: ["pods", "pods/log"]
+  verbs: ["get", "list", "watch"]
+# Tekton read for future MCP tools (B.2-equivalent kubectl-based monitoring).
+# Read-only — we never mutate PipelineRuns from the agent.
+- apiGroups: ["tekton.dev"]
+  resources: ["pipelineruns", "taskruns"]
+  verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "leartech-automated-agent.fullname" . }}-job-runner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "leartech-automated-agent.labels" . | nindent 4 }}
+    leartech.io/component: job-runner
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "leartech-automated-agent.fullname" . }}-job-runner
+subjects:
+# Initiative Job pods (when D.3+ spawns Jobs) — used for self-pod / log
+# inspection from inside the running agent.
+- kind: ServiceAccount
+  name: {{ include "leartech-automated-agent.fullname" . }}-job-runner
+  namespace: {{ .Release.Namespace }}
+# API pod — needs `batch/jobs create` to spawn initiative Jobs.
+- kind: ServiceAccount
+  name: {{ include "leartech-automated-agent.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}

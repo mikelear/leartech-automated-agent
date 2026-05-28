@@ -170,6 +170,39 @@ postgresql:
       key: secret/data/automated-agent/automated-agent-db
       property: dsn
 
+# Phase D.2 — Job-per-run infrastructure. Enables the chart to render:
+#   - ServiceAccount `<fullname>-job-runner` (spawned Job pods)
+#   - ServiceAccount `<fullname>` (API pod — wired into deployment.yaml)
+#   - Role + RoleBinding granting batch/jobs + pods + tekton.dev read
+#   - Named template `leartech-automated-agent.job-spec` consumed by
+#     job_runner.py (Phase D.3+) at Job-spawn time
+#
+# Disable on clusters that haven't migrated to Job-per-run yet — the chart
+# stays backwards-compatible (no SA, deployment uses default SA, no Jobs).
+jobs:
+  enabled: true
+  # Override the SA used by spawned Job pods. Empty means default to
+  # `<fullname>-job-runner` (rendered by job-runner-serviceaccount.yaml).
+  serviceAccountName: ""
+  # Image used by spawned Job pods. Empty means D.3's job_runner.py
+  # defaults to the API pod's own image (same release SHA), keeping
+  # cluster-side and Job-side code in lock-step.
+  defaultImage: ""
+  # Default resources injected into the Job pod spec at spawn time.
+  # Higher than API-pod defaults because initiative runs include Anthropic
+  # SDK loops with substantial memory peaks (see resources comment above).
+  resources:
+    requests:
+      cpu: 500m
+      memory: 1Gi
+    limits:
+      cpu: 4
+      memory: 8Gi
+  # Garbage-collect Jobs (and their Pods) this many seconds after they
+  # reach a terminal state. 24 h gives humans a comfortable window to read
+  # logs after a failed run before K8s cleans up.
+  ttlSecondsAfterFinished: 86400
+
 jxRequirements:
   ingress:
     domain: ""
