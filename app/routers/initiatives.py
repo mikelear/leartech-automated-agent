@@ -198,6 +198,19 @@ async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
     await update(initiative_id, status='running')
     try:
         summary = await run_initiative(yaml_path)
+        # Re-fetch the record so we can preserve pr_repo through the
+        # completion update. pr_repo is set at register time from
+        # loaded.primary.qualified_repo, but the primary fix lives in
+        # app.state.register (now passes it to create_run at INSERT). This
+        # is a belt-and-braces preservation: if some future code path
+        # nulls pr_repo or starts the row without it, the completion
+        # update still carries the in-memory value through. Do NOT drop
+        # this — the self_retrospect hook needs pr_repo + pr_number on
+        # the final record to file Issues (regression on run
+        # 44120e445abd 2026-05-28: pr_repo arrived None and every run
+        # skipped retrospect).
+        current = await get_record(initiative_id)
+        pr_repo = current.pr_repo if current is not None else None
         await update(
             initiative_id,
             status='complete' if summary.exit_code == 0 else 'failed',
@@ -205,6 +218,7 @@ async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
             turns=summary.turns,
             cost_usd=summary.cost_usd,
             pr_number=summary.pr_number,
+            pr_repo=pr_repo,
         )
         logger.info('initiative %s finished with exit_code=%d', initiative_id, summary.exit_code)
         # Post-success retrospective — non-blocking, best-effort. See

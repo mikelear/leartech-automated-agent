@@ -163,6 +163,12 @@ def test_completed_run_surfaces_pr_number_turns_cost() -> None:
     Regression guard: the original handler discarded everything except exit_code,
     so `GET /initiatives/{id}` showed pr_number=null even after the agent opened
     the PR. The fix returns a RunSummary and the handler unpacks the fields.
+
+    Also guards pr_repo preservation through the completion update — the
+    2026-05-28 self_retrospect skip regression came from pr_repo being lost
+    between register() and the final GET. The completion update in
+    ``_run_and_track`` re-fetches the record and explicitly carries pr_repo
+    through; this assertion locks that behaviour in.
     """
     listed = client.post('/initiatives', json={'initiative': 'does-not-exist-xyz'})
     target = listed.json()['detail']['available'][0]
@@ -185,6 +191,13 @@ def test_completed_run_surfaces_pr_number_turns_cost() -> None:
     assert body['pr_number'] == 99
     assert body['turns'] == 7
     assert body['cost_usd'] == 0.4242
+    # pr_repo was set at register() time from loaded.primary.qualified_repo
+    # — must still be present after the completion update.
+    assert body['pr_repo'] is not None, (
+        'pr_repo must survive the completion update; the self_retrospect '
+        'hook depends on it being on the final record (regression on run '
+        '44120e445abd 2026-05-28).'
+    )
 
 
 # ─── Catalog-first resolution tests (feat: catalog-fire-fallback) ────────────

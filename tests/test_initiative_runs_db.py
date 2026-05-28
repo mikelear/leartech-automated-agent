@@ -269,6 +269,51 @@ async def test_state_register_writes_to_db(db_enabled: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_state_register_persists_pr_repo_to_db(db_enabled: None) -> None:
+    """Regression: pr_repo must be persisted to the DB at register() time.
+
+    The self_retrospect hook in ``app.routers.initiatives._run_self_retrospect``
+    requires pr_repo + pr_number on the final record. Before the 2026-05-28
+    fix, ``register()`` only passed cluster/created_by into ``create_run()``
+    so the DB row started with ``pr_repo=NULL``. After a pod restart the
+    in-memory record was gone and only the DB row survived — pr_repo
+    arrived None on every run and the retrospect hook skipped them all
+    (observed live on run ``44120e445abd``).
+
+    This test guards the INSERT path: register() must carry pr_repo through
+    to create_run() so the DB row has it from the start, before any
+    completion update.
+    """
+
+    async def noop() -> int:
+        return 0
+
+    run_id = new_id()
+    task = asyncio.create_task(noop())
+    rec = InitiativeRecord(
+        id=run_id,
+        initiative='pr-repo-persist-test',
+        status='queued',
+        started_at=now(),
+        pr_repo='mikelear/leartech-automated-agent',
+    )
+    await register(rec, task)
+    await task
+
+    # Clear in-memory cache so we PROVE the DB row carries pr_repo
+    # (simulates a pod restart between INSERT and any subsequent read).
+    state_module._records.clear()
+
+    async with db_module.session() as s:
+        db_rec = await get_run(s, run_id)
+    assert db_rec is not None
+    assert db_rec.pr_repo == 'mikelear/leartech-automated-agent', (
+        'pr_repo must be persisted to the DB at INSERT time, not deferred to '
+        'the completion update — otherwise a pod restart loses it.'
+    )
+
+
+@pytest.mark.asyncio
 async def test_state_get_reads_from_db(db_enabled: None) -> None:
     async def noop() -> int:
         return 0

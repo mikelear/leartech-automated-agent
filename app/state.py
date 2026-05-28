@@ -102,6 +102,13 @@ async def register(record: InitiativeRecord, task: asyncio.Task[Any]) -> None:
                 started_at=record.started_at,
                 cluster=record.cluster,
                 created_by=record.created_by,
+                # pr_repo is known at register time (set by the router from
+                # loaded.primary.qualified_repo). Persisting it at INSERT
+                # rather than waiting for the completion update means a pod
+                # restart mid-run still leaves the DB row with a usable
+                # pr_repo for self_retrospect — fixes the skip-every-run
+                # regression observed on run 44120e445abd (2026-05-28).
+                pr_repo=record.pr_repo,
             )
 
 
