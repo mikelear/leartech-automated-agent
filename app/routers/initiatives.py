@@ -396,6 +396,9 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
                 'fieldRef metadata.namespace.',
             )
         try:
+            # Inline the YAML body so the Job pod doesn't need DB access
+            # to resolve the initiative. yaml_path was just loaded above so
+            # the read is essentially free (filesystem cache hot).
             job_name, _ns = await spawn_initiative_job(
                 initiative_name=request.initiative,
                 run_id=initiative_id,
@@ -403,6 +406,7 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
                 namespace=namespace,
                 env=_initiative_env(),
                 secret_refs=_initiative_secret_refs(),
+                yaml_body=yaml_path.read_text(),
             )
         except Exception as exc:  # noqa: BLE001 — surface spawn failures as 502 so the consumer sees them
             logger.exception('Job spawn failed for initiative %s', initiative_id)

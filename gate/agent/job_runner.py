@@ -60,6 +60,7 @@ def _build_job_manifest(
     env: dict[str, str],
     secret_refs: dict[str, dict[str, str]],
     resources: dict[str, dict[str, str]],
+    yaml_body: str,
     ttl_seconds_after_finished: int = DEFAULT_TTL_SECONDS_AFTER_FINISHED,
 ) -> dict[str, Any]:
     """Construct the V1Job dict submitted to batch/v1.
@@ -67,6 +68,13 @@ def _build_job_manifest(
     Mirrors `_job-template.tpl` field-for-field; see that template's
     leading comment for input semantics. The structural test
     `test_job_runner_manifest_matches_chart_shape` enforces parity.
+
+    The initiative YAML body is injected via `LEARTECH_INITIATIVE_YAML`
+    env var. The container's command writes it to /tmp/initiative.yaml
+    then execs `python -m gate.agent.initiative <path>` — matching the
+    agent CLI's positional INITIATIVE_PATH argument. Inlining the YAML
+    body avoids needing the Job pod to query the catalog DB (which would
+    require forwarding the DSN secret and waiting on Postgres at startup).
     """
     labels = {
         'leartech.io/initiative': initiative,
@@ -76,6 +84,10 @@ def _build_job_manifest(
 
     # env entries: plain `value` form for env, `valueFrom.secretKeyRef` for secret_refs.
     env_list: list[dict[str, Any]] = [{'name': name, 'value': value} for name, value in env.items()]
+    # Inline the YAML body so the Job pod can resolve the initiative
+    # without DB access. Keep this last so it sorts predictably at the
+    # tail of the env list in test assertions.
+    env_list.append({'name': 'LEARTECH_INITIATIVE_YAML', 'value': yaml_body})
     for name, ref in secret_refs.items():
         env_list.append(
             {
@@ -110,8 +122,16 @@ def _build_job_manifest(
                             'name': 'agent',
                             'image': image,
                             'imagePullPolicy': 'Always',
-                            'command': ['python', '-m', 'gate.agent.initiative'],
-                            'args': ['--initiative', initiative, '--run-id', run_id],
+                            # sh -c bootstrap writes the inlined YAML to /tmp/initiative.yaml
+                            # then execs the agent CLI with the positional path it expects.
+                            # `printf '%s'` (not echo) preserves the YAML verbatim including
+                            # leading dashes + multiline blocks. `exec` keeps PID 1 as python
+                            # so K8s sees Job completion when the agent exits.
+                            'command': ['sh', '-c'],
+                            'args': [
+                                'printf "%s" "$LEARTECH_INITIATIVE_YAML" > /tmp/initiative.yaml '
+                                '&& exec python -m gate.agent.initiative /tmp/initiative.yaml'
+                            ],
                             'securityContext': {
                                 'runAsNonRoot': True,
                                 'runAsUser': 1000,
@@ -135,6 +155,7 @@ async def spawn_initiative_job(
     image: str,
     namespace: str,
     env: dict[str, str],
+    yaml_body: str,
     secret_refs: dict[str, dict[str, str]] | None = None,
     service_account: str = DEFAULT_SERVICE_ACCOUNT,
     resources: dict[str, dict[str, str]] | None = None,
@@ -171,6 +192,7 @@ async def spawn_initiative_job(
             env=env,
             secret_refs=secret_refs or {},
             resources=resources or _default_resources(),
+            yaml_body=yaml_body,
             ttl_seconds_after_finished=ttl_seconds_after_finished,
         )
         resp = await batch.create_namespaced_job(namespace=namespace, body=manifest)

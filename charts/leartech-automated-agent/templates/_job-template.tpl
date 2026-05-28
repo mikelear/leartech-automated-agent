@@ -55,12 +55,14 @@ spec:
       - name: agent
         image: {{ .image }}
         imagePullPolicy: Always
-        command: ["python", "-m", "gate.agent.initiative"]
+        # sh -c bootstrap writes the inlined YAML to /tmp/initiative.yaml
+        # then execs the agent CLI with the positional INITIATIVE_PATH it
+        # expects (`gate.agent.initiative` is a click.argument, not options).
+        # The YAML body comes in via LEARTECH_INITIATIVE_YAML env var which
+        # job_runner.py appends to .env at spawn time.
+        command: ["sh", "-c"]
         args:
-        - "--initiative"
-        - "{{ .initiative }}"
-        - "--run-id"
-        - "{{ .runId }}"
+        - 'printf "%s" "$LEARTECH_INITIATIVE_YAML" > /tmp/initiative.yaml && exec python -m gate.agent.initiative /tmp/initiative.yaml'
         securityContext:
           runAsNonRoot: true
           runAsUser: 1000
