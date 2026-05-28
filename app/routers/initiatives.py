@@ -46,6 +46,13 @@ from app.state import (
     get as get_record,
 )
 from gate.agent.initiative import run_initiative
+from gate.agent.self_retrospect import (
+    fetch_ai_review_verdict,
+    fetch_gate_state,
+    fetch_pr_diff,
+    file_issue_with_findings,
+    retrospect_after_ready,
+)
 from gate.initiatives.loader import load_initiative
 
 logger = logging.getLogger(__name__)
@@ -133,6 +140,59 @@ class StartInitiativeRequest(BaseModel):
     initiative: str = Field(..., description='Initiative YAML name (without .yaml)')
 
 
+async def _run_self_retrospect(initiative_id: str) -> None:
+    """Post-success retrospective: ask the LLM what we should have caught locally.
+
+    Gated by ``LEARTECH_AGENT_SELF_RETROSPECT`` (default ``true``; set to
+    ``false`` to disable per-cluster via chart values). Non-blocking —
+    any failure here is swallowed because the PR is already
+    merge-eligible; the retrospective is enrichment, not part of the
+    success criterion.
+
+    Reads the final state of the run record (post-update) to recover
+    pr_repo + pr_number, then calls into ``gate.agent.self_retrospect``.
+    """
+    if os.environ.get('LEARTECH_AGENT_SELF_RETROSPECT', 'true').lower() != 'true':
+        logger.info('self_retrospect disabled via LEARTECH_AGENT_SELF_RETROSPECT — skipping')
+        return
+
+    record = await get_record(initiative_id)
+    if record is None or record.pr_repo is None or record.pr_number is None:
+        logger.info(
+            'self_retrospect skipped for %s: pr_repo/pr_number not set (record=%s)',
+            initiative_id,
+            record,
+        )
+        return
+
+    pr_diff = await fetch_pr_diff(record.pr_repo, record.pr_number)
+    if not pr_diff:
+        logger.info('self_retrospect skipped for %s: empty PR diff', initiative_id)
+        return
+
+    ai_review = await fetch_ai_review_verdict(record.pr_repo, record.pr_number)
+    gate_state = await fetch_gate_state(record.pr_repo, record.pr_number)
+
+    findings = await retrospect_after_ready(
+        pr_repo=record.pr_repo,
+        pr_number=record.pr_number,
+        pr_diff=pr_diff,
+        ai_review_verdict=ai_review,
+        final_gate_state=gate_state,
+    )
+    if not findings:
+        logger.info('self_retrospect for %s: no actionable findings', initiative_id)
+        return
+
+    issue_url = await file_issue_with_findings(
+        pr_repo=record.pr_repo,
+        pr_number=record.pr_number,
+        findings=findings,
+    )
+    if issue_url:
+        logger.info('self_retrospect filed Issue for %s: %s', initiative_id, issue_url)
+
+
 async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
     """Background task body — runs the initiative, updates state on completion."""
     await update(initiative_id, status='running')
@@ -147,6 +207,24 @@ async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
             pr_number=summary.pr_number,
         )
         logger.info('initiative %s finished with exit_code=%d', initiative_id, summary.exit_code)
+        # Post-success retrospective — non-blocking, best-effort. See
+        # gate/agent/self_retrospect.py for the rationale (PR #46/#1
+        # incident 2026-05-28).
+        #
+        # The success status was written above, so we must NOT let a
+        # cancellation in the retrospect propagate to the outer
+        # CancelledError handler — that would re-mark this 'complete'
+        # run as 'cancelled' just because TestClient/pod teardown
+        # interrupted the enrichment. Swallow CancelledError here
+        # (the only place this exception to "always re-raise" is OK,
+        # because the run itself already succeeded).
+        if summary.exit_code == 0:
+            try:
+                await _run_self_retrospect(initiative_id)
+            except asyncio.CancelledError:
+                logger.info('self_retrospect cancelled for %s — status already complete', initiative_id)
+            except Exception as exc:  # noqa: BLE001 — must never affect main flow
+                logger.warning('self_retrospect failed (non-blocking) for %s: %s', initiative_id, exc)
     except asyncio.CancelledError:
         # Best-effort: if the engine is gone (pod shutdown raced with cancellation),
         # the next pod's orphan-detection on startup will mark this run terminal —
