@@ -14,6 +14,14 @@ spec:
       labels:
         {{- include "leartech-automated-agent.selectorLabels" . | nindent 8 }}
     spec:
+      {{- if .Values.jobs.enabled }}
+      # Use the dedicated API ServiceAccount so the RoleBinding in
+      # templates/job-runner-rbac.yaml grants `batch/jobs create` to THIS
+      # pod (Phase D.3+ Job-per-run spawn primitive). Without this line the
+      # pod would fall back to the namespace `default` SA, which the
+      # RoleBinding does not target.
+      serviceAccountName: {{ include "leartech-automated-agent.fullname" . }}
+      {{- end }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
