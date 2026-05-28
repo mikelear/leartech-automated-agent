@@ -52,6 +52,7 @@ def _baseline_manifest(**overrides: Any) -> dict[str, Any]:
         'env': {'LEARTECH_REPO_ROOT': '/workspace'},
         'secret_refs': {},
         'resources': _default_resources(),
+        'yaml_body': 'name: demo-feature\n',
     }
     defaults.update(overrides)
     return _build_job_manifest(**defaults)
@@ -171,14 +172,34 @@ def test_manifest_pod_security_context_is_non_root() -> None:
     assert csec['capabilities']['drop'] == ['ALL']
 
 
-def test_manifest_command_invokes_initiative_module() -> None:
-    """The pod entrypoint is `python -m gate.agent.initiative` with
-    `--initiative <name> --run-id <id>` — that's the documented entry
-    point for the agent (see `gate.agent.initiative.main`)."""
+def test_manifest_command_writes_yaml_then_execs_initiative_cli() -> None:
+    """The pod entrypoint is a sh -c bootstrap that writes the inlined YAML
+    body (from LEARTECH_INITIATIVE_YAML env) to /tmp/initiative.yaml and
+    execs `python -m gate.agent.initiative <path>`. The agent CLI takes a
+    POSITIONAL initiative_path (click.argument), NOT --initiative/--run-id
+    options — a wrong shape here is what made the first AZ spawn fail."""
     m = _baseline_manifest(initiative='demo-feature', run_id='run-abc123')
     container = m['spec']['template']['spec']['containers'][0]
-    assert container['command'] == ['python', '-m', 'gate.agent.initiative']
-    assert container['args'] == ['--initiative', 'demo-feature', '--run-id', 'run-abc123']
+    assert container['command'] == ['sh', '-c']
+    assert container['args'] == [
+        'printf "%s" "$LEARTECH_INITIATIVE_YAML" > /tmp/initiative.yaml '
+        '&& exec python -m gate.agent.initiative /tmp/initiative.yaml'
+    ]
+
+
+def test_manifest_includes_inlined_yaml_env_var() -> None:
+    """The YAML body flows into the Job pod via LEARTECH_INITIATIVE_YAML;
+    the sh bootstrap reads it. Verifies the value lands verbatim — preserving
+    leading dashes + multiline blocks (printf '%s' is responsible for that,
+    but the env value must arrive unchanged)."""
+    body = 'name: demo-feature\ndescription: |\n  Two lines\n  with content.\n'
+    m = _baseline_manifest(yaml_body=body)
+    env = m['spec']['template']['spec']['containers'][0]['env']
+    env_by_name = {e['name']: e for e in env}
+    assert env_by_name['LEARTECH_INITIATIVE_YAML'] == {
+        'name': 'LEARTECH_INITIATIVE_YAML',
+        'value': body,
+    }
 
 
 def test_manifest_uses_service_account_and_restart_never() -> None:
@@ -208,6 +229,7 @@ def test_manifest_ttl_can_be_overridden() -> None:
         env={},
         secret_refs={},
         resources=_default_resources(),
+        yaml_body='name: i\n',
         ttl_seconds_after_finished=3600,
     )
     assert m['spec']['ttlSecondsAfterFinished'] == 3600
@@ -272,6 +294,7 @@ async def test_spawn_calls_load_incluster_config() -> None:
             image='ghcr.io/foo:1',
             namespace='jx-staging',
             env={},
+            yaml_body='name: demo\n',
         )
 
     mock_config.load_incluster_config.assert_called_once()
@@ -306,6 +329,7 @@ async def test_spawn_submits_manifest_to_batch_v1() -> None:
             namespace='jx-prod',
             env={'FOO': 'bar'},
             secret_refs={'CLAUDE_API_KEY': {'secret': 'ai-review-api-keys', 'key': 'CLAUDE_API_KEY'}},
+            yaml_body='name: demo\n',
         )
 
     # Return contract: (job_name, namespace) reflects the API server response.
@@ -326,7 +350,9 @@ async def test_spawn_submits_manifest_to_batch_v1() -> None:
     assert body['spec']['template']['spec']['containers'][0]['image'] == 'ghcr.io/foo:9'
     env = body['spec']['template']['spec']['containers'][0]['env']
     env_names = {e['name'] for e in env}
-    assert env_names == {'FOO', 'CLAUDE_API_KEY'}
+    # LEARTECH_INITIATIVE_YAML is appended by the builder so the Job pod
+    # can resolve the initiative without DB access. See _build_job_manifest.
+    assert env_names == {'FOO', 'CLAUDE_API_KEY', 'LEARTECH_INITIATIVE_YAML'}
 
 
 @pytest.mark.asyncio
@@ -354,6 +380,7 @@ async def test_spawn_uses_default_service_account_when_unspecified() -> None:
             image='img',
             namespace='ns',
             env={},
+            yaml_body='name: demo\n',
         )
 
     body = batch.create_namespaced_job.await_args.kwargs['body']
@@ -384,6 +411,7 @@ async def test_spawn_uses_default_resources_when_unspecified() -> None:
             image='img',
             namespace='ns',
             env={},
+            yaml_body='name: demo\n',
         )
 
     body = batch.create_namespaced_job.await_args.kwargs['body']
@@ -419,6 +447,7 @@ async def test_spawn_propagates_409_conflict_unchanged() -> None:
                 image='img',
                 namespace='ns',
                 env={},
+                yaml_body='name: demo\n',
             )
 
     assert exc_info.value.status == 409
