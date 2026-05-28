@@ -70,11 +70,21 @@ async def create_run(
     started_at: datetime,
     cluster: str | None = None,
     created_by: str | None = None,
+    pr_repo: str | None = None,
 ) -> InitiativeRunRecord:
     """Create a new DB-stored run row. Raises on IntegrityError for duplicate id.
 
     Caller maps IntegrityError → HTTP 409 at the router layer (kept out of
     this module to avoid HTTP coupling).
+
+    ``pr_repo`` is accepted at insert time because the initiative loader knows
+    the qualified repo BEFORE the run starts — see
+    ``app.state.register``. Persisting it at INSERT (rather than waiting for
+    the completion ``update_run``) means a pod restart between INSERT and
+    completion still leaves the DB row with a usable pr_repo for downstream
+    consumers (notably the self_retrospect hook, which needs pr_repo +
+    pr_number to file Issues — regression observed on run ``44120e445abd``
+    2026-05-28 when pr_repo arrived NULL and the hook skipped every run).
     """
     row = InitiativeRunRow(
         id=id,
@@ -83,6 +93,7 @@ async def create_run(
         started_at=started_at,
         cluster=cluster,
         created_by=created_by,
+        pr_repo=pr_repo,
     )
     session.add(row)
     await session.flush()
