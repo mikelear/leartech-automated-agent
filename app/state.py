@@ -50,6 +50,15 @@ class InitiativeRecord(BaseModel):
     error: str | None = None
     cluster: str | None = None
     created_by: str | None = None
+    # Phase D.4 — which spawn path created this run.
+    # 'asyncio' (default): run lives inside the API pod's event loop.
+    # 'job':                run lives in its own K8s Job pod (survives
+    #                       API pod restarts). Set at register() time by
+    #                       the router from LEARTECH_INITIATIVE_RUNTIME.
+    runtime: str = 'asyncio'
+    # K8s Job name when runtime='job' — equals run_id by D.3 contract.
+    # None on the asyncio path.
+    job_name: str | None = None
 
 
 _records: dict[str, InitiativeRecord] = {}
@@ -80,18 +89,28 @@ def _run_record_to_initiative_record(run: InitiativeRunRecord) -> InitiativeReco
         error=run.error,
         cluster=run.cluster,
         created_by=run.created_by,
+        runtime=run.runtime,
+        job_name=run.job_name,
     )
 
 
-async def register(record: InitiativeRecord, task: asyncio.Task[Any]) -> None:
+async def register(record: InitiativeRecord, task: asyncio.Task[Any] | None) -> None:
     """Register a new initiative run — in-memory always, DB when configured.
 
     The in-memory write happens first (no await), so background tasks that
     call update() immediately after creation never race against an incomplete
     DB INSERT.
+
+    Phase D.4: ``task`` is optional. On the asyncio runtime path the caller
+    passes the live asyncio.Task so cancellation can target it. On the Job
+    runtime path the run lives in a separate K8s Job pod — there's no local
+    Task to track, so the caller passes None and ``_tasks`` is left untouched
+    for this run. Cancellation of Job-runtime runs flows through K8s (D.5
+    will wire that surface).
     """
     _records[record.id] = record
-    _tasks[record.id] = task
+    if task is not None:
+        _tasks[record.id] = task
     if is_db_enabled():
         async with db_session() as s:
             await create_run(
@@ -109,6 +128,10 @@ async def register(record: InitiativeRecord, task: asyncio.Task[Any]) -> None:
                 # pr_repo for self_retrospect — fixes the skip-every-run
                 # regression observed on run 44120e445abd (2026-05-28).
                 pr_repo=record.pr_repo,
+                # Phase D.4 — dual-path runtime fields, set once at INSERT
+                # and never mutated afterwards.
+                runtime=record.runtime,
+                job_name=record.job_name,
             )
 
 

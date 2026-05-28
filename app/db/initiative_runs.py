@@ -40,6 +40,10 @@ class InitiativeRunRecord:
     error: str | None
     cluster: str | None
     created_by: str | None
+    # Phase D.4 — dual-path runtime fields. `runtime` is 'asyncio' or
+    # 'job'; `job_name` is the K8s Job name when runtime='job'.
+    runtime: str
+    job_name: str | None
     updated_at: datetime
 
     @classmethod
@@ -57,6 +61,8 @@ class InitiativeRunRecord:
             error=row.error,
             cluster=row.cluster,
             created_by=row.created_by,
+            runtime=row.runtime,
+            job_name=row.job_name,
             updated_at=row.updated_at,
         )
 
@@ -71,6 +77,8 @@ async def create_run(
     cluster: str | None = None,
     created_by: str | None = None,
     pr_repo: str | None = None,
+    runtime: str = 'asyncio',
+    job_name: str | None = None,
 ) -> InitiativeRunRecord:
     """Create a new DB-stored run row. Raises on IntegrityError for duplicate id.
 
@@ -94,6 +102,8 @@ async def create_run(
         cluster=cluster,
         created_by=created_by,
         pr_repo=pr_repo,
+        runtime=runtime,
+        job_name=job_name,
     )
     session.add(row)
     await session.flush()

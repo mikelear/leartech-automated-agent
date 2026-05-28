@@ -96,6 +96,20 @@ class InitiativeRunRow(Base):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     cluster: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Phase D.4: dual-path runtime. 'asyncio' = run lives inside the API
+    # pod's event loop (today's default; dies on pod restart). 'job' = run
+    # lives in its own K8s Job pod (survives API pod restarts). The flag
+    # is set at INSERT time by the router based on
+    # LEARTECH_INITIATIVE_RUNTIME and never mutated afterwards.
+    runtime: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default='asyncio',
+        server_default='asyncio',
+    )
+    # K8s Job name when runtime='job' — equals the run_id by D.3 contract.
+    # NULL on the asyncio path so older rows continue to round-trip cleanly.
+    job_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
