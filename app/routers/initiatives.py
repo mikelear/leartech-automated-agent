@@ -67,6 +67,96 @@ _CLUSTER = os.environ.get('CLUSTER', 'unknown')
 # can consume them as a plain Path.
 _CATALOG_TMP_DIR = Path('/tmp/agent-catalog')  # noqa: S108 — intentional service-internal tmp dir
 
+# Phase D.4 — dual-path runtime selector. 'asyncio' (default) keeps today's
+# behaviour: the run lives inside the API pod's event loop. 'job' delegates
+# to D.3's spawn_initiative_job — the run lives in its own K8s Job pod and
+# survives API pod restarts. Read once per POST so a chart edit + rollout
+# can flip a cluster without bouncing in-flight runs.
+_RUNTIME_ENV = 'LEARTECH_INITIATIVE_RUNTIME'
+
+
+def _current_runtime_mode() -> str:
+    """Returns 'asyncio' or 'job' based on LEARTECH_INITIATIVE_RUNTIME.
+
+    Unknown values fall back to 'asyncio' (the safe, today's-default path) —
+    a typo in chart values should NOT silently switch a cluster to a path
+    the operator didn't intend.
+    """
+    mode = os.environ.get(_RUNTIME_ENV, 'asyncio').lower()
+    return mode if mode in {'asyncio', 'job'} else 'asyncio'
+
+
+def _pick_image_for_initiative(initiative_name: str) -> str:
+    """Return the container image to spawn for ``initiative_name``.
+
+    D.4 stub: always returns the default variant image. Phase E.1 will
+    add language-detection routing (Go/Python/Angular/Rust variants) by
+    inspecting the initiative's primary repo. For now, one image fits
+    every initiative — same as the asyncio path's behaviour today.
+
+    Overridable via ``LEARTECH_INITIATIVE_DEFAULT_IMAGE`` so a cluster
+    can pin a specific tag without code changes.
+    """
+    _ = initiative_name  # unused until E.1
+    return os.environ.get(
+        'LEARTECH_INITIATIVE_DEFAULT_IMAGE',
+        'ghcr.io/mikelear/leartech-agent-go:latest',
+    )
+
+
+# Plain env vars forwarded from the API pod into spawned Job pods.
+# Each entry is the env-var name; values come from the API pod's own
+# environment at spawn time. Keeping the list explicit (vs a wildcard)
+# means a Job never inherits an accidental local variable that doesn't
+# belong in the agent loop.
+_JOB_FORWARDED_ENV_KEYS = (
+    'LEARTECH_REPO_ROOT',
+    'VERSION',
+    'LEARTECH_AGENT_MODEL',
+    'CLUSTER',
+    'LEARTECH_INITIATIVES_DIR',
+    'LEARTECH_AGENT_SELF_RETROSPECT',
+)
+
+
+def _initiative_env() -> dict[str, str]:
+    """Plain env vars to propagate from the API pod into a spawned Job pod.
+
+    Only non-sensitive configuration the agent loop reads at startup is
+    forwarded. Secrets (API keys, DSNs) flow as `secret_refs` via
+    :func:`_initiative_secret_refs` so the Job pod resolves them itself
+    from the same K8s Secret the API pod uses.
+    """
+    return {k: os.environ[k] for k in _JOB_FORWARDED_ENV_KEYS if k in os.environ}
+
+
+def _initiative_secret_refs() -> dict[str, dict[str, str]]:
+    """Secret references the Job pod needs — same secrets the API pod reads.
+
+    Defaults match the chart's ``secrets.*`` values; the API pod's
+    Deployment can override per-cluster via the ``LEARTECH_JOB_*_SECRET_*``
+    env vars (chart values flip these). Returns a mapping of
+    ``ENV_VAR -> {secret, key}`` consumed verbatim by D.3's job_runner.
+    """
+    refs: dict[str, dict[str, str]] = {
+        'ANTHROPIC_API_KEY': {
+            'secret': os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_NAME', 'ai-review-api-keys'),
+            'key': os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_KEY', 'CLAUDE_API_KEY'),
+        },
+        'GH_TOKEN': {
+            'secret': os.environ.get('LEARTECH_JOB_GH_TOKEN_SECRET_NAME', 'tekton-git'),
+            'key': os.environ.get('LEARTECH_JOB_GH_TOKEN_SECRET_KEY', 'password'),
+        },
+    }
+    # Propagate the Postgres DSN only when the API pod knows about it
+    # (gated on the chart's postgresql.enabled). Without it the Job
+    # falls back to filesystem-only mode, same as the API pod.
+    dsn_secret = os.environ.get('LEARTECH_JOB_DB_DSN_SECRET_NAME')
+    dsn_key = os.environ.get('LEARTECH_JOB_DB_DSN_SECRET_KEY')
+    if dsn_secret and dsn_key:
+        refs['LEARTECH_INITIATIVE_DB_DSN'] = {'secret': dsn_secret, 'key': dsn_key}
+    return refs
+
 
 def _initiatives_dir() -> Path:
     """Where YAML initiatives live. Configurable via env in a later slice."""
@@ -284,6 +374,60 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
 
     initiative_id = new_id()
+    runtime_mode = _current_runtime_mode()
+
+    if runtime_mode == 'job':
+        # Phase D.4 — Job-per-run path. The run executes in its own K8s
+        # Job pod and survives API pod restarts. The structural fix for
+        # pod-restart-kills-run.
+        #
+        # We do not create an asyncio.Task here: there's nothing to await
+        # locally. The Job's lifecycle is owned by K8s; status reconciliation
+        # back into the DB is D.5's surface (a watcher that observes Job
+        # terminal state and patches initiative_runs.status).
+        from gate.agent.job_runner import spawn_initiative_job
+
+        namespace = os.environ.get('POD_NAMESPACE')
+        if not namespace:
+            raise HTTPException(
+                status_code=500,
+                detail='POD_NAMESPACE env var is required when '
+                f'{_RUNTIME_ENV}=job; chart deployment must inject it via '
+                'fieldRef metadata.namespace.',
+            )
+        try:
+            job_name, _ns = await spawn_initiative_job(
+                initiative_name=request.initiative,
+                run_id=initiative_id,
+                image=_pick_image_for_initiative(request.initiative),
+                namespace=namespace,
+                env=_initiative_env(),
+                secret_refs=_initiative_secret_refs(),
+            )
+        except Exception as exc:  # noqa: BLE001 — surface spawn failures as 502 so the consumer sees them
+            logger.exception('Job spawn failed for initiative %s', initiative_id)
+            raise HTTPException(status_code=502, detail=f'Failed to spawn initiative Job: {exc}') from exc
+        record = InitiativeRecord(
+            id=initiative_id,
+            initiative=request.initiative,
+            status='queued',
+            started_at=now(),
+            pr_repo=loaded.primary.qualified_repo,
+            cluster=_CLUSTER,
+            runtime='job',
+            job_name=job_name,
+        )
+        await register(record, task=None)
+        logger.info(
+            'initiative %s queued (runtime=job): %s — Job %s/%s',
+            initiative_id,
+            request.initiative,
+            namespace,
+            job_name,
+        )
+        return record
+
+    # Default asyncio path — unchanged from pre-D.4 behaviour.
     record = InitiativeRecord(
         id=initiative_id,
         initiative=request.initiative,
@@ -291,10 +435,11 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         started_at=now(),
         pr_repo=loaded.primary.qualified_repo,
         cluster=_CLUSTER,
+        runtime='asyncio',
     )
     task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
     await register(record, task)
-    logger.info('initiative %s queued: %s', initiative_id, request.initiative)
+    logger.info('initiative %s queued (runtime=asyncio): %s', initiative_id, request.initiative)
     return record
 
 
