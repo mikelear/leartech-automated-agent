@@ -50,6 +50,17 @@ goal: |
   - Unique title/description/canonical + OG. Add /demo to sitemap.xml + a bullet
     in llms.txt `## Pages`.
 
+  ## Playwright (end2end-ui) — the human / interactive audience
+  - Add `end2end-ui/07-demo.spec.ts` (runs against the same per-PR preview; baseURL
+    resolves from PREVIEW_URL — see end2end-ui/playwright.config.ts). Cover the
+    interactive behaviour a crawler can't and the curl checks don't:
+    - fill the criteria form (`demo-form`), submit, assert the ranked results table
+      (`demo-results-table`) renders rows.
+    - the compare action (`demo-compare`) works for 2-5 selected rows.
+    - the illustrative-data banner (`demo-illustrative-banner`) is visible.
+    - an API-down case (route/intercept the API call to fail) still renders the
+      bundled illustrative fixtures — never a blank page or stack trace.
+
   ## Constraints
   - `npm install --legacy-peer-deps`. Use the runtime ConfigMap pattern for the
     API base URL — do NOT bake environment URLs into the bundle.

@@ -61,6 +61,27 @@ goal: |
     head: name "Mortgage Sourcing", url https://www.mortgagesourcing.com, logo,
     and a `sameAs` array (leave with the company links available).
 
+  ## 7. Preview-gated discoverability check (end2end)
+  - Add `end2end/05-ai-baseline.sh`. The existing end2end Lighthouse pipeline
+    auto-discovers NN-*.sh scripts and runs them against the per-PR preview deploy
+    (see end2end/run.sh — it injects $PREVIEW_URL). Adding the script is enough;
+    do NOT edit `.lighthouse/jenkins-x/`.
+  - Script: `set -eo pipefail`; URL="${PREVIEW_URL:-${STAGING_URL:-http://localhost:8080}}".
+    Use curl (NOT a browser — we want the no-JS crawler view) + jq. Exit non-zero
+    on any failed assertion. Assert:
+    - `curl -sf -A GPTBot "$URL/"` is 200 and the body contains the home <h1>
+      text, NOT an empty `<app-root></app-root>`.
+    - `/robots.txt` is 200 and contains `GPTBot` + `ClaudeBot` Allow lines and a
+      `Sitemap:` line.
+    - `/sitemap.xml` and `/llms.txt` return 200.
+    - the home HTML contains a `<script type="application/ld+json">` block that
+      parses as valid JSON (pipe to `jq .`) with an `Organization` or `WebSite` @type.
+    - the home HTML has `<title>`, `<meta name="description">`,
+      `<link rel="canonical">`, and `og:title`.
+  - This is the deterministic enforcement of
+    hub/shared-rules/ai-discoverable-websites.md § Measured. Later initiatives add
+    their own NN-*.sh (e.g. 06-mcp-advertise.sh) for the surfaces they introduce.
+
   ## Constraints
   - `npm install --legacy-peer-deps` for npm ops. SSG only — no Node runtime.
   - Do not modify `.lighthouse/jenkins-x/`, the Helm chart, health probes, or

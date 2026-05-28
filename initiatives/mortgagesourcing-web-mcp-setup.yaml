@@ -73,6 +73,20 @@ goal: |
   - Add /connect to public/sitemap.xml; ensure it prerenders.
   - TechArticle + BreadcrumbList JSON-LD on /connect (with dates).
 
+  ## 5. Preview-gated MCP advertising check (end2end)
+  - Add `end2end/06-mcp-advertise.sh` (auto-run by the end2end pipeline against the
+    preview; do NOT edit `.lighthouse/jenkins-x/`). curl + jq; `set -eo pipefail`;
+    URL="${PREVIEW_URL:-${STAGING_URL:-http://localhost:8080}}"; exit non-zero on
+    failure. Assert:
+    - `$URL/.well-known/mcp.json` is 200, valid JSON, and lists the 4 tool names.
+    - `$URL/llms.txt` contains an `## MCP` section with the endpoint + the 4 tools.
+    - `curl -sf -A GPTBot "$URL/connect"` is 200 and the prerendered body contains
+      `https://api.mortgagesourcing.com/mcp`.
+    - Protocol-only liveness (NO LLM): POST the MCP `initialize` then `tools/list`
+      to https://api.mortgagesourcing.com/mcp and assert the 4 tools come back.
+      Treat a `401` with a `WWW-Authenticate` challenge (OAuth flag on) as
+      "endpoint alive", not a failure.
+
   ## Constraints
   - `npm install --legacy-peer-deps`. No secrets/tokens (Tier 0 needs none).
   - List ONLY the four real tools. Use the public production endpoint

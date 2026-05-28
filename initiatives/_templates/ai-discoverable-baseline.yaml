@@ -90,6 +90,23 @@ goal: |
     `og:type=website`, `og:url`, `og:image`, `twitter:card=summary_large_image`)
     overridable per route.
 
+  ## 7. Preview-gated discoverability check (end2end)
+
+  Add `end2end/05-ai-baseline.sh` — the existing end2end Lighthouse pipeline
+  auto-discovers NN-*.sh scripts and runs them against the per-PR preview deploy
+  ($PREVIEW_URL; see end2end/run.sh). Adding the script is enough — do NOT edit
+  `.lighthouse/jenkins-x/`. Use curl (NOT a browser — we want the no-JS crawler
+  view) + jq; `set -eo pipefail`;
+  URL="${PREVIEW_URL:-${STAGING_URL:-http://localhost:8080}}"; exit non-zero on any
+  failed assertion. Per key route assert:
+  - `curl -sf -A GPTBot "$URL/<route>"` is 200 and the body has the route's real
+    heading text, NOT an empty `<app-root></app-root>`.
+  - `/robots.txt` 200 with the AI-crawler Allow lines + a `Sitemap:` line;
+    `/sitemap.xml` + `/llms.txt` (+ `/llms-full.txt` if present) return 200.
+  - each route's HTML has a valid `<script type="application/ld+json">` block plus
+    `<title>` / `<meta name="description">` / canonical / `og:title`.
+  Deterministic enforcement of hub/shared-rules/ai-discoverable-websites.md § Measured.
+
   ## Constraints
   - Use `npm install --legacy-peer-deps` for any npm operations.
   - Do NOT add a Node SSR server, Express, or change the runtime base image.
