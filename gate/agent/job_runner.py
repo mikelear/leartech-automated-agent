@@ -155,9 +155,11 @@ async def spawn_initiative_job(
 
     Requires in-cluster credentials (the API pod's ServiceAccount).
     Loads via `load_incluster_config()`; not usable from a developer
-    laptop without further plumbing.
+    laptop without further plumbing. NOTE: in `kubernetes_asyncio`,
+    `load_incluster_config` is synchronous — do NOT await it. The async
+    counterpart is `load_kube_config` (file-based). See PR #50 root cause.
     """
-    await config.load_incluster_config()
+    config.load_incluster_config()
     async with ApiClient() as api:
         batch = client.BatchV1Api(api)
         manifest = _build_job_manifest(

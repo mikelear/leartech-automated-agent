@@ -17,6 +17,11 @@ service:
 # at `gate/agent/main.py::DEFAULT_MODEL`.
 agent:
   model: ""
+  # D.4 runtime selector: empty = in-code default ('asyncio'); 'job' = spawn
+  # K8s Job per initiative (orphan-killer path — runs survive API pod restarts).
+  # Override per cluster via GitOps configs/leartech-automated-agent.yaml.
+  # AZ-first rollout — AKV's configs flips to 'job' once validated; GCP follows.
+  runtime: ""
 
 # Anthropic SDK + agent loops are memory-heavy on substantial initiatives.
 # 2026-05-20: mortgages-gw-add-mcp-mock-sourcing run OOMKilled at the 1 GiB
