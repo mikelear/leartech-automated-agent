@@ -1,0 +1,57 @@
+# Phase 1 (run AFTER ai-baseline): branded holding / coming-soon home page.
+# Gets a credible holding site live for www.mortgagesourcing.com.
+# Run with: make initiative INITIATIVE=mortgagesourcing-web-holding-page
+
+name: mortgagesourcing-web-holding-page
+
+description: |
+  Replace the template home with a branded, prerendered holding page for
+  www.mortgagesourcing.com — what it is (AI-native mortgage sourcing), a
+  "coming soon" note, and a teaser that an MCP server is available for AI
+  clients. Enough to put a credible site live while Phase 2 builds the real
+  product pages.
+
+repo: leartech-mortgagesourcing-web
+branch: agent/holding-page
+base: main
+language: angular
+
+goal: |
+  Build a branded holding page as the home route `/`. Assumes prerendering is
+  already enabled (mortgagesourcing-web-ai-baseline). Read the existing
+  AppComponent / home route first.
+
+  ## Home page content (`src/app/home/` or the existing root component)
+  - One `<h1>`: "Mortgage Sourcing — AI-native UK mortgage sourcing".
+  - A short hero paragraph: search, compare and source UK mortgage products,
+    built so AI assistants (ChatGPT, Claude) can source live on your behalf.
+  - A 3-item "what's coming" list: live product search, side-by-side
+    comparison, AI-client (MCP) access.
+  - A "Coming soon" badge and a contact line.
+  - A teaser card: "For developers / AI clients — a Model Context Protocol
+    server is available" linking to `/connect` (page added later; link can
+    point to /connect even before that page exists).
+  - data-testid anchors: home-page, home-heading, home-summary, home-coming-soon,
+    home-mcp-teaser.
+
+  ## Meta + JSON-LD for the home route
+  - Set the home `<title>` ("Mortgage Sourcing — AI-native UK mortgage sourcing")
+    and `<meta name="description">`.
+  - Ensure the site-wide Organization/WebSite JSON-LD from the baseline renders.
+
+  ## Constraints
+  - `npm install --legacy-peer-deps` for npm ops.
+  - Static content only — no API calls, no chat widget, no live data yet.
+  - Don't touch `.lighthouse/jenkins-x/`, the chart, robots/sitemap/llms.txt
+    (the baseline owns those; only update the home description if needed).
+  - `git add <specific files only>`. Conventional commit
+    `feat(home): branded holding page`. Post /hold after opening the PR.
+
+  ## What this is NOT
+  - Not the live sourcing demo (that's mortgagesourcing-web-live-demo).
+  - Not the MCP setup page (that's mortgagesourcing-web-mcp-setup).
+  - Not a global design system / multi-page nav build-out.
+
+gate_marks: []
+
+max_iterations: 7

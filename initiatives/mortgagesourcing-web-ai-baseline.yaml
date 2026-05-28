@@ -1,0 +1,79 @@
+# Phase 1 (run FIRST): make leartech-mortgagesourcing-web AI-discoverable.
+# Instantiates _templates/ai-discoverable-baseline.yaml for www.mortgagesourcing.com.
+# Implements hub/shared-rules/ai-discoverable-websites.md Layers 1-3 + 5.
+# Run with: make initiative INITIATIVE=mortgagesourcing-web-ai-baseline
+
+name: mortgagesourcing-web-ai-baseline
+
+description: |
+  Apply the AI-Discoverable Websites baseline to leartech-mortgagesourcing-web:
+  prerendered (SSG) HTML on every route, AI-crawler-friendly robots.txt,
+  sitemap.xml, llms.txt, site-wide Organization/WebSite JSON-LD, and Open
+  Graph / Twitter Card meta. This is the foundation the holding page and all
+  Phase 2 pages build on. Mock/illustrative data must be marked as such.
+
+repo: leartech-mortgagesourcing-web
+branch: agent/ai-baseline
+base: main
+language: angular
+
+goal: |
+  Make every public route of mortgagesourcing.com crawlable + parseable by AI
+  clients (GPTBot, ClaudeBot, PerplexityBot) WITHOUT a browser. Read the
+  existing app first (it is an Angular 20 standalone app cloned from
+  leartech-angular-service-template).
+
+  ## 1. Enable prerendering / SSG (no Node runtime)
+  - Add `@angular/ssr` and enable PRERENDER mode (static), NOT per-request SSR.
+    Build must emit one static `.html` per route into the browser dist that the
+    `leartech-nginx` base image already serves. Do not add a Node server,
+    Express, or change the Dockerfile/chart runtime.
+  - In `angular.json`, configure the production build to prerender all routes.
+  - Verify: `npm run build` then confirm the emitted `index.html` for each route
+    contains real content, not an empty `<app-root>`.
+
+  ## 2. Per-route meta
+  - Unique `<title>` + `<meta name="description">` + `<link rel="canonical">`
+    per route via Angular `Title`/`Meta`, present in the prerendered HTML.
+  - Default OG/Twitter meta (og:title, og:description, og:type=website, og:url,
+    og:image, twitter:card=summary_large_image), overridable per route.
+
+  ## 3. public/robots.txt — allow AI crawlers, link sitemap
+  - Explicitly Allow: GPTBot, OAI-SearchBot, ChatGPT-User, ClaudeBot,
+    Claude-User, anthropic-ai, PerplexityBot, Perplexity-User, Google-Extended,
+    Googlebot, Bingbot, Amazonbot, Applebot-Extended, CCBot, meta-externalagent,
+    and `*` (Allow: /).
+  - Final line: `Sitemap: https://www.mortgagesourcing.com/sitemap.xml`
+
+  ## 4. public/sitemap.xml
+  - Every public route with <loc>https://www.mortgagesourcing.com/<route></loc>
+    and <lastmod>. Seed with `/` (home); later pages append their routes.
+
+  ## 5. public/llms.txt (llmstxt.org markdown)
+  - `# Mortgage Sourcing` H1, a `>` one-line summary
+    ("AI-native UK mortgage sourcing — search, compare and source mortgage
+    products, with a Model Context Protocol server so AI clients can source
+    live."), then a `## Pages` section listing the home page. Leave an `## MCP`
+    section to be filled by the mcp-setup initiative.
+
+  ## 6. Site-wide JSON-LD
+  - Inject `Organization` + `WebSite` Schema.org JSON-LD into the prerendered
+    head: name "Mortgage Sourcing", url https://www.mortgagesourcing.com, logo,
+    and a `sameAs` array (leave with the company links available).
+
+  ## Constraints
+  - `npm install --legacy-peer-deps` for npm ops. SSG only — no Node runtime.
+  - Do not modify `.lighthouse/jenkins-x/`, the Helm chart, health probes, or
+    the runtime ConfigMap wiring.
+  - `git add <specific files only>` (never -A). Conventional commit
+    `feat(ai): add AI-discoverability baseline`. Post /hold immediately after
+    opening the PR per agent-prs-must-be-held-pending-review.
+
+  ## What this is NOT
+  - Not per-request SSR; not a Node runtime. Not per-page content JSON-LD
+    (FAQPage/HowTo) — that comes later. Not the MCP setup page. Not real
+    marketing copy beyond the minimum needed for valid meta/JSON-LD.
+
+gate_marks: []
+
+max_iterations: 8

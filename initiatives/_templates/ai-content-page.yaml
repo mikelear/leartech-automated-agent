@@ -1,0 +1,67 @@
+# TEMPLATE: Add one AI-optimised, prerendered content page (Layer 2 — Structured).
+# Copy to initiatives/<service>-<page>-page.yaml and replace the <PLACEHOLDERS>.
+# Assumes ai-discoverable-baseline.yaml has already enabled prerendering.
+# Implements hub/shared-rules/ai-discoverable-websites.md Layer 2.
+
+name: <SERVICE>-<PAGE>-page
+
+description: |
+  Add a prerendered content page at /<ROUTE> with extractable copy and the
+  correct Schema.org JSON-LD so AI engines lift and cite it accurately.
+
+repo: <SERVICE>                              # e.g. leartech-mortgagesourcing-web
+branch: agent/<PAGE>-page
+base: main
+language: angular
+
+goal: |
+  Add a static, prerendered page at `/<ROUTE>` covering <TOPIC>. Read an
+  existing page component first to match local conventions (standalone vs
+  NgModule, routing file, styling).
+
+  ## Files to create
+  - `src/app/<ROUTE>/<PAGE>.component.ts` + `.html` (+ `.scss` if used).
+    Static content component, no DI needed.
+  - Add the route to the routes file so prerendering emits
+    `dist/<app>/browser/<ROUTE>/index.html`.
+
+  ## Content rules (write for extraction)
+  - One `<h1>` = the page's core question/topic. Logical `<h2>`/`<h3>` below.
+  - Put the answer in the FIRST sentence under each heading.
+  - Open with a short TL;DR / summary block.
+  - Express comparable facts as a `<table>` (models parse tables reliably).
+  - Define key terms inline. Add a short FAQ section of real Q&A.
+  - Include `data-testid` anchors: <PAGE>-page, <PAGE>-heading, <PAGE>-summary.
+
+  ## JSON-LD (pick what fits the page; render into the prerendered head)
+  - `BreadcrumbList` (always, for a nested page).
+  - `FAQPage` if the page has a FAQ section (each Q/A as a `Question`/`Answer`).
+  - `HowTo` if it's a step-by-step guide (`step` array).
+  - `Article` / `TechArticle` for explanatory/standards content, with
+    `datePublished` + `dateModified` + `author`/`Organization` (Layer 5).
+  - `FinancialProduct` / `Service` if the page describes a product.
+
+  ## Per-route meta (Layer 1/2)
+  - Unique `<title>`, `<meta name="description">`, `<link rel="canonical">`,
+    and Open Graph overrides for this route.
+
+  ## Map updates (Layer 3)
+  - Add the route to `public/sitemap.xml` and a bullet under the right section
+    of `public/llms.txt`.
+
+  ## Constraints
+  - Use `npm install --legacy-peer-deps` for any npm operations.
+  - Only add the page + its route + sitemap/llms.txt entries. Don't touch
+    `.lighthouse/jenkins-x/`, the chart, or unrelated components.
+  - JSON-LD must be VALID and must match the visible content (no fake markup).
+  - `git add <specific files only>`. Conventional commit
+    `feat(content): add <ROUTE> page`. Post /hold after opening the PR.
+
+  ## What this is NOT
+  - Not a redesign of global layout/nav. Not new global styles.
+  - Not invented facts/numbers — only content that can be substantiated; mark
+    illustrative data as illustrative.
+
+gate_marks: []
+
+max_iterations: 7

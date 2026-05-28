@@ -1,0 +1,65 @@
+# Phase 2: definitional content page "How mortgage sourcing works".
+# Instantiates _templates/ai-content-page.yaml. Layer 2 (Structured).
+# Run with: make initiative INITIATIVE=mortgagesourcing-web-what-is-sourcing
+
+name: mortgagesourcing-web-what-is-sourcing
+
+description: |
+  Add a prerendered, AI-optimised explainer at /how-sourcing-works covering
+  what UK mortgage sourcing is (search/compare/rank products by criteria; LTV,
+  rate type, fix length, ERCs, 5-year total cost), with FAQPage + HowTo +
+  TechArticle JSON-LD so AI engines lift and cite it accurately.
+
+repo: leartech-mortgagesourcing-web
+branch: agent/how-sourcing-works
+base: main
+language: angular
+
+goal: |
+  Add a static, prerendered page at `/how-sourcing-works`. Assumes prerendering
+  is enabled. Read an existing page component first to match conventions.
+
+  ## Files
+  - `src/app/how-sourcing-works/how-sourcing-works.component.{ts,html}` (+ scss).
+  - Register the route so prerender emits its index.html.
+
+  ## Content (write for extraction; all factual, UK domain)
+  - `<h1>`: "How mortgage sourcing works".
+  - TL;DR block: sourcing = searching the market for mortgage products that fit
+    a borrower's criteria, then comparing and ranking them by true cost.
+  - Define terms inline in a `<table>`: LTV (loan/value %), product type
+    (residential vs buy-to-let), rate type (fixed / tracker / SVR), fix length
+    (2/5/10yr), arrangement fee, ERC (early repayment charge), 5-year total cost
+    (how products are ranked).
+  - A `HowTo` section: the sourcing steps (1. capture criteria — loan amount,
+    property value, term, type; 2. filter by eligibility/LTV; 3. rank by 5-year
+    total cost; 4. compare shortlist side-by-side).
+  - A FAQ section (real Q&A): "What is LTV?", "Fixed vs tracker?", "What is an
+    ERC?", "How are products ranked?", "Can an AI assistant source for me?"
+    (answer: yes — via our MCP server, link /connect).
+  - data-testid: how-sourcing-works-page, -heading, -summary, -faq.
+
+  ## JSON-LD (valid, matching visible content)
+  - `TechArticle` with datePublished + dateModified + Organization author.
+  - `HowTo` for the steps. `FAQPage` for the FAQ. `BreadcrumbList`.
+
+  ## Meta + map
+  - Unique title/description/canonical + OG overrides.
+  - Append `/how-sourcing-works` to public/sitemap.xml and a bullet under
+    `## Pages` in public/llms.txt.
+
+  ## Constraints
+  - `npm install --legacy-peer-deps`. Only add this page + route + sitemap/llms
+    entries. Don't touch `.lighthouse/jenkins-x/` or the chart.
+  - JSON-LD must match the visible content — no fake markup. Facts must be
+    accurate UK mortgage domain; no invented lender names or rates on this page
+    (rates live on the demo page, marked illustrative).
+  - `git add <specific files only>`. Conventional commit
+    `feat(content): add how-sourcing-works page`. Post /hold after PR.
+
+  ## What this is NOT
+  - Not the live demo with product data. Not a redesign of global nav/styles.
+
+gate_marks: []
+
+max_iterations: 7
