@@ -1,0 +1,33 @@
+{{/*
+Postgres schema migrations — ConfigMap mounted by the API Deployment's
+`migrations` initContainer (see templates/deployment.yaml).
+
+Why a ConfigMap + initContainer (NOT a Helm post-install/post-upgrade hook):
+
+  Helm hooks don't fire reliably under JX3's helmfile-based apply path.
+  D.4's runtime+job_name migration (0003) didn't apply on first cascade
+  — helmfile re-applies the chart but skips hook re-runs in some cascade
+  paths, leaving the schema stale and the API CrashLooping on missing
+  columns. An initContainer runs every pod start; the migrations are
+  idempotent (CREATE TABLE IF NOT EXISTS / ADD COLUMN IF NOT EXISTS) so
+  repeated application is safe.
+
+Gated on .Values.postgresql.enabled AND .Values.postgresql.runMigrations
+— same toggle that flips on the DB endpoints. Disabling either skips
+both the ConfigMap and the deployment's initContainer block.
+
+Schema files in files/migrations/ are the authoritative source — to add
+a migration, drop a new `NNNN_<name>.sql` next to 0001_initial.sql. The
+initContainer applies them in lexical order on every pod start.
+*/}}
+{{- if and .Values.postgresql.enabled .Values.postgresql.runMigrations }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-migrations
+data:
+  {{- range $path, $_ := .Files.Glob "files/migrations/*.sql" }}
+  {{ base $path }}: |
+{{ $.Files.Get $path | indent 4 }}
+  {{- end }}
+{{- end }}

@@ -4,8 +4,9 @@
 -- run history survives pod restarts. The `initiative_catalog` table (0001)
 -- stores initiative DEFINITIONS; this table stores EXECUTIONS.
 --
--- IF NOT EXISTS makes this safely idempotent — the migrations Helm hook
--- runs on every install and upgrade.
+-- IF NOT EXISTS makes this safely idempotent — the deployment's
+-- migrations initContainer runs on every pod start, re-applying this
+-- file each time.
 
 CREATE TABLE IF NOT EXISTS initiative_runs (
     id            VARCHAR(64)   PRIMARY KEY,

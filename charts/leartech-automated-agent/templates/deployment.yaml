@@ -26,6 +26,75 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         fsGroup: 1000
+      {{- if and .Values.postgresql.enabled .Values.postgresql.runMigrations }}
+      # Phase D loose-end fix — schema migrations as an initContainer
+      # instead of a Helm post-install/post-upgrade hook.
+      #
+      # Helm hooks don't fire reliably under JX3's helmfile-based apply
+      # path: D.4's runtime+job_name migration (0003) didn't apply on
+      # the first cascade and the API CrashLooped on a missing column
+      # until manual `kubectl exec psql` recovered it. Running the
+      # migrations as an initContainer means EVERY pod start re-applies
+      # them — the SQL files are idempotent (CREATE TABLE IF NOT EXISTS
+      # / ADD COLUMN IF NOT EXISTS) so repeated runs are safe and cheap.
+      #
+      # The ConfigMap with the .sql payload is rendered alongside this
+      # Deployment by templates/migrations-configmap.yaml, gated on the
+      # same toggle so disabling postgres skips both.
+      initContainers:
+      - name: migrations
+        image: ghcr.io/cloudnative-pg/postgresql:17.2
+        # psql is user-agnostic — UID 1000 from the pod-level
+        # securityContext is fine; explicit here so the
+        # `runAsNonRoot: true` admission check has no ambiguity.
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+        env:
+        # DSN flows via the in-namespace Secret materialised by the
+        # chart's ExternalSecret (Vault on AZ / GSM on GCP). Same
+        # secret + key the main container reads — single source of
+        # truth per cluster.
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.postgresql.dsn.secretName }}
+              key: {{ .Values.postgresql.dsn.secretKey }}
+        command: ["/bin/sh", "-c"]
+        args:
+        - |
+          set -eu
+          # Wait for DB to accept connections — covers fresh-install
+          # cases where CNPG is still provisioning the Database CR
+          # alongside this pod's first rollout.
+          for i in $(seq 1 60); do
+            if psql "$DATABASE_URL" -c 'SELECT 1' >/dev/null 2>&1; then
+              break
+            fi
+            echo "[$(date -u +%H:%M:%S)] waiting for database (try $i/60)"
+            sleep 5
+          done
+          # Apply migrations in lexical order. -1 wraps each file in a
+          # single transaction so a partial apply rolls back cleanly.
+          for f in /migrations/*.sql; do
+            echo "==> applying $f"
+            psql "$DATABASE_URL" -1 -v ON_ERROR_STOP=1 -f "$f"
+          done
+          echo "==> migrations complete"
+        volumeMounts:
+        - name: migrations
+          mountPath: /migrations
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            memory: 128Mi
+      {{- end }}
       containers:
       - name: {{ .Chart.Name }}
         image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
@@ -123,3 +192,11 @@ spec:
       volumes:
       - name: workspace
         emptyDir: {}
+      {{- if and .Values.postgresql.enabled .Values.postgresql.runMigrations }}
+      # Mounted into the `migrations` initContainer above. Same lifecycle
+      # gate so disabling postgres elides both the volume and the
+      # initContainer cleanly.
+      - name: migrations
+        configMap:
+          name: {{ .Release.Name }}-migrations
+      {{- end }}

@@ -7,8 +7,9 @@
 --     runtime='job'. NULL on the asyncio path. Per D.3 contract job_name
 --     equals run_id, so the index here is unique except for the NULLs.
 --
--- ADD COLUMN IF NOT EXISTS makes this safely idempotent — the migrations
--- Helm hook runs on every install + upgrade.
+-- ADD COLUMN IF NOT EXISTS makes this safely idempotent — the
+-- deployment's migrations initContainer runs on every pod start,
+-- re-applying this file each time.
 --
 -- See app/db/models.py::InitiativeRunRow for the SQLAlchemy companion.
 
