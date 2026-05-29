@@ -28,9 +28,11 @@ the spawn path uses (synchronous in `kubernetes_asyncio`).
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import subprocess
 from datetime import UTC, datetime
 from typing import Any
 
@@ -201,6 +203,70 @@ def _build_job_crash_sticky_body(*, run_id: str, exit_reason: str, log_tail: str
     )
 
 
+def _lookup_pr_by_branch(qualified_repo: str, initiative: str, run_id: str) -> int | None:
+    """Fallback PR resolver — query GitHub by the initiative's branch convention.
+
+    D.5.1.1 — the agent's ``wait_for_terminal`` may block until the pod is
+    SIGTERM-killed before the final ``--- turns=...  pr=N`` summary line is
+    emitted. Today every job-mode run completes with ``pr_number=None`` even
+    though a PR actually exists, which means D.5.2's self_retrospect path
+    silently skips ("pr_repo/pr_number not set"). Closing that gap is the
+    point of this helper.
+
+    The leartech initiative convention is one branch per initiative, named
+    ``agent/<initiative-name>``. ``gh pr list --head <branch> --state open``
+    returns the open PR for that branch if one exists. We pick the first
+    (limit=1) since the convention is one PR per branch.
+
+    Returns ``None`` on any failure — caller leaves ``pr_number`` as-is.
+    Failures are logged at DEBUG (this is a best-effort enrichment; the row
+    update has already committed the rest of the run state).
+    """
+    branch = f'agent/{initiative}'
+    try:
+        result = subprocess.run(
+            [
+                'gh',
+                'pr',
+                'list',
+                '--repo',
+                qualified_repo,
+                '--head',
+                branch,
+                '--state',
+                'open',
+                '--json',
+                'number',
+                '--limit',
+                '1',
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=10,
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort lookup
+        logger.debug('reconciler: pr fallback lookup failed for %s: %s', run_id, exc)
+        return None
+    if result.returncode != 0:
+        logger.debug(
+            'reconciler: pr fallback lookup non-zero exit for %s: rc=%s stderr=%s',
+            run_id,
+            result.returncode,
+            result.stderr.strip() if result.stderr else '',
+        )
+        return None
+    try:
+        rows = json.loads(result.stdout or '[]')
+    except json.JSONDecodeError as exc:
+        logger.debug('reconciler: pr fallback json decode failed for %s: %s', run_id, exc)
+        return None
+    if not rows:
+        return None
+    number = rows[0].get('number')
+    return int(number) if number is not None else None
+
+
 def _parse_summary(log_text: str) -> tuple[int | None, float | None, int | None]:
     """Extract (turns, cost_usd, pr_number) from the trailing agent summary.
 
@@ -242,6 +308,13 @@ async def reconcile_once(namespace: str) -> int:
                 continue
             log_text = await _fetch_pod_log_tail(core, namespace, run_id)
             turns, cost, pr_number = _parse_summary(log_text)
+            # D.5.1.1 fallback — log parse missed `pr=N` (agent never emitted
+            # the final post-PR-resolution summary line before pod termination).
+            # Query GitHub by the initiative's branch convention so the row
+            # still gets the pr_number it would have had from the log. Without
+            # this, D.5.2's self_retrospect silently skips every job-mode run.
+            if pr_number is None and record.pr_repo:
+                pr_number = _lookup_pr_by_branch(record.pr_repo, record.initiative, run_id)
             await update(
                 run_id,
                 status=terminal,

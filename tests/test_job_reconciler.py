@@ -15,6 +15,7 @@ an initiative on AZ and watching the DB row transition queued -> complete.
 
 from __future__ import annotations
 
+import subprocess
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -24,6 +25,7 @@ import pytest
 from gate.agent.job_reconciler import (
     _build_job_crash_sticky_body,
     _job_terminal_state,
+    _lookup_pr_by_branch,
     _parse_summary,
     reconcile_once,
 )
@@ -682,10 +684,20 @@ async def test_reconcile_once_uses_record_pr_number_when_log_lacks_pr(
             'gate.agent.job_reconciler.get_record',
             new=AsyncMock(
                 # record.pr_number IS set — earlier write path captured it.
-                return_value=SimpleNamespace(status='running', pr_number=123, pr_repo='mikelear/example-svc'),
+                return_value=SimpleNamespace(
+                    status='running',
+                    pr_number=123,
+                    pr_repo='mikelear/example-svc',
+                    initiative='fallback-pr-test',
+                ),
             ),
         ),
         patch('gate.agent.job_reconciler.update', new=AsyncMock()),
+        # D.5.1.1 fallback now runs whenever the log lacks `pr=N`. Force it
+        # to a no-op (returns None) here so the test still exercises the
+        # crash-sticky path's fallback-to-record.pr_number behaviour, not
+        # the GH-side branch lookup (covered by dedicated tests below).
+        patch('gate.agent.job_reconciler._lookup_pr_by_branch', return_value=None),
         patch('gate.agent.job_reconciler._post_crash_sticky') as mock_post,
     ):
         _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
@@ -694,3 +706,253 @@ async def test_reconcile_once_uses_record_pr_number_when_log_lacks_pr(
     assert count == 1
     mock_post.assert_called_once()
     assert mock_post.call_args.kwargs['pr_number'] == 123
+
+
+# ---------------------------------------------------------------------------
+# D.5.1.1 — GH-side PR fallback when log parse misses `pr=N`
+# ---------------------------------------------------------------------------
+#
+# Today every job-mode run completes with `pr=None` even though a PR exists,
+# because the agent's `wait_for_terminal` blocks past the point where the
+# final `--- turns=...  pr=N` summary line would be emitted. The reconciler
+# falls back to `gh pr list --head agent/<initiative>` to recover the
+# pr_number from GitHub's side. Without this, D.5.2's self_retrospect path
+# silently skips every job-mode run with "pr_repo/pr_number not set".
+#
+# Contract:
+#   - log pr=N present                     → use that, skip GH lookup
+#   - log pr=None + GH returns a PR        → pr_number set from GH
+#   - log pr=None + GH returns empty array → pr_number stays None
+#   - log pr=None + GH errors (timeout, non-zero exit) → graceful, pr_number stays None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_uses_gh_fallback_when_log_pr_missing(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """Log lacks `pr=N` but record.pr_repo + initiative are set → reconciler
+    invokes `_lookup_pr_by_branch`, captures the returned PR number, and
+    persists it via update(). This is the headline behaviour that unblocks
+    D.5.2's self_retrospect path for job-mode runs."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-gh-fallback', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='pod'))]),
+    )
+    # Summary line WITHOUT pr=N — wait_for_terminal swallowed the final emit.
+    core.read_namespaced_pod_log = AsyncMock(return_value='--- turns=5  in=10  out=20  cost=$0.30\n')
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    status='running',
+                    pr_number=None,
+                    pr_repo='mikelear/example-svc',
+                    initiative='my-cool-feature',
+                ),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._lookup_pr_by_branch', return_value=789) as mock_lookup,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()),
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_lookup.assert_called_once_with('mikelear/example-svc', 'my-cool-feature', 'run-gh-fallback')
+    mock_update.assert_awaited_once()
+    kwargs = mock_update.await_args.kwargs
+    assert kwargs['pr_number'] == 789
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_skips_gh_fallback_when_log_has_pr(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """If the log parse already produced a pr_number, we MUST NOT invoke the
+    GH fallback — the log is the authoritative source. Skipping the subprocess
+    call keeps reconciler cycles cheap on the healthy path (no per-pass `gh`
+    fork+exec) and avoids any chance of overriding a parsed pr with a
+    different GH answer."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-log-has-pr', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='pod'))]),
+    )
+    core.read_namespaced_pod_log = AsyncMock(
+        return_value='--- turns=4  in=10  out=20  cost=$0.20  pr=321\n',
+    )
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    status='running',
+                    pr_number=None,
+                    pr_repo='mikelear/example-svc',
+                    initiative='log-wins',
+                ),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._lookup_pr_by_branch') as mock_lookup,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()),
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_lookup.assert_not_called()
+    assert mock_update.await_args.kwargs['pr_number'] == 321
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_gh_fallback_returning_none_leaves_pr_none(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """Log lacks pr AND GH returns no matching PR (e.g. no open PR for the
+    branch yet, or the branch was never pushed) → pr_number stays None. The
+    update still writes status + turns + cost so the row is no longer stuck
+    at 'running'; self_retrospect will then skip with its own pr-missing
+    guard, exactly as today."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-gh-empty', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='pod'))]),
+    )
+    core.read_namespaced_pod_log = AsyncMock(return_value='--- turns=2  in=0  out=0  cost=$0.0\n')
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    status='running',
+                    pr_number=None,
+                    pr_repo='mikelear/example-svc',
+                    initiative='no-pr-yet',
+                ),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._lookup_pr_by_branch', return_value=None) as mock_lookup,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()),
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_lookup.assert_called_once()
+    assert mock_update.await_args.kwargs['pr_number'] is None
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_skips_gh_fallback_when_pr_repo_missing(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """If record.pr_repo is None (initiative never resolved to a repo; e.g.
+    the agent crashed before the loader ran), the GH fallback has no target
+    to query and must be skipped entirely. No subprocess invocation, no
+    AttributeError on missing initiative — just leave pr_number as None."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-no-repo', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='pod'))]),
+    )
+    core.read_namespaced_pod_log = AsyncMock(return_value='--- turns=1  in=0  out=0  cost=$0.0\n')
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    status='running',
+                    pr_number=None,
+                    pr_repo=None,
+                    initiative='no-repo-set',
+                ),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()),
+        patch('gate.agent.job_reconciler._lookup_pr_by_branch') as mock_lookup,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()),
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_lookup.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _lookup_pr_by_branch — direct unit tests over the subprocess wrapper
+# ---------------------------------------------------------------------------
+
+
+def test_lookup_pr_by_branch_returns_number_from_gh_json() -> None:
+    """Happy path: `gh pr list ... --json number` emits a single-row JSON array.
+    The helper returns the integer number for the agent's branch convention
+    `agent/<initiative-name>`."""
+    fake_result = SimpleNamespace(returncode=0, stdout='[{"number": 456}]', stderr='')
+    with patch('gate.agent.job_reconciler.subprocess.run', return_value=fake_result) as mock_run:
+        pr = _lookup_pr_by_branch('mikelear/example-svc', 'add-thing', 'run-xyz')
+    assert pr == 456
+    args = mock_run.call_args.args[0]
+    # Validate the branch convention is being used — `agent/<name>`.
+    assert '--head' in args
+    assert args[args.index('--head') + 1] == 'agent/add-thing'
+    assert '--state' in args
+    assert args[args.index('--state') + 1] == 'open'
+
+
+def test_lookup_pr_by_branch_returns_none_on_empty_array() -> None:
+    """No matching open PR for the branch → returns None. Callers leave
+    pr_number unset; self_retrospect's own pr-missing guard then applies."""
+    fake_result = SimpleNamespace(returncode=0, stdout='[]', stderr='')
+    with patch('gate.agent.job_reconciler.subprocess.run', return_value=fake_result):
+        assert _lookup_pr_by_branch('mikelear/example-svc', 'nope', 'run-xyz') is None
+
+
+def test_lookup_pr_by_branch_returns_none_on_nonzero_exit() -> None:
+    """`gh` returned non-zero (auth missing, network blip, rate-limit) →
+    swallow + return None. The reconciler logs at DEBUG so the failure is
+    observable but doesn't poison the row update."""
+    fake_result = SimpleNamespace(returncode=1, stdout='', stderr='auth required')
+    with patch('gate.agent.job_reconciler.subprocess.run', return_value=fake_result):
+        assert _lookup_pr_by_branch('mikelear/example-svc', 'whatever', 'run-xyz') is None
+
+
+def test_lookup_pr_by_branch_returns_none_on_subprocess_exception() -> None:
+    """Timeout, FileNotFoundError (gh missing), any other subprocess exception
+    must be swallowed — the fallback is best-effort and must never bubble up
+    to abort the reconciler pass."""
+    with patch('gate.agent.job_reconciler.subprocess.run', side_effect=subprocess.TimeoutExpired(cmd='gh', timeout=10)):
+        assert _lookup_pr_by_branch('mikelear/example-svc', 'whatever', 'run-xyz') is None
+
+
+def test_lookup_pr_by_branch_returns_none_on_invalid_json() -> None:
+    """`gh` succeeded but stdout isn't valid JSON (corrupted pipe, partial
+    write) → return None rather than raising."""
+    fake_result = SimpleNamespace(returncode=0, stdout='not json {{{', stderr='')
+    with patch('gate.agent.job_reconciler.subprocess.run', return_value=fake_result):
+        assert _lookup_pr_by_branch('mikelear/example-svc', 'whatever', 'run-xyz') is None
