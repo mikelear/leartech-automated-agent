@@ -64,6 +64,18 @@ spec:
         # will use it for per-language variants.
         - name: LEARTECH_INITIATIVE_DEFAULT_IMAGE
           value: {{ default (printf "%s/leartech-agent-runtime:%s" (trimSuffix "/leartech-automated-agent" .Values.image.repository) .Chart.Version) .Values.jobs.defaultImage | quote }}
+        # E.1: language-aware image routing. The picker composes
+        # `<prefix>/leartech-agent-<lang>:<tag>` at spawn time for runs
+        # whose initiative carries a `language:` hint or whose primary
+        # repo's root manifests reveal one. The prefix is derived from
+        # the API image (same stripping rule as the default image above);
+        # the tag is the Chart.Version so per-language images move
+        # together with the API release. When either env is unset the
+        # picker degrades to LEARTECH_INITIATIVE_DEFAULT_IMAGE.
+        - name: LEARTECH_JOB_IMAGE_REGISTRY_PREFIX
+          value: {{ trimSuffix "/leartech-automated-agent" .Values.image.repository | quote }}
+        - name: LEARTECH_JOB_IMAGE_TAG
+          value: {{ .Chart.Version | quote }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
