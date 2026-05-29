@@ -12,10 +12,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import click
 from claude_agent_sdk import ClaudeAgentOptions, query
@@ -124,6 +126,52 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
         return resolved
     except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
         return None
+
+
+def _build_pr_url_pattern(qualified_repo: str) -> re.Pattern[str]:
+    """Compile a regex matching `https://github.com/<repo>/pull/<N>` for this repo.
+
+    Scoped to the configured ``qualified_repo`` so the early-emit path doesn't
+    pick up unrelated PR URLs the agent might mention in prose (e.g. citing a
+    prior PR for context).
+    """
+    return re.compile(rf'https://github\.com/{re.escape(qualified_repo)}/pull/(\d+)')
+
+
+def _extract_pr_from_tool_result(
+    block_content: str | list[dict[str, Any]] | None,
+    pr_url_pattern: re.Pattern[str],
+) -> int | None:
+    """Return the PR number from a tool-result's content if it contains a matching URL.
+
+    D.5.1.4 — used by the message-loop watcher to detect the moment the agent's
+    ``gh pr create`` (or any subsequent ``gh pr view`` / list) returns the PR URL
+    for this repo, so the harness can emit the ``--- pr_open pr=N`` marker
+    immediately. Two emit points (early marker + final summary) give the
+    reconciler's log-parse path an authoritative pr= field even when the agent
+    exits abnormally (``wait_for_terminal`` blocks past pod termination, SDK
+    exception mid-loop, etc.).
+
+    ``ToolResultBlock.content`` is typed as ``str | list[dict[str, Any]] | None``
+    in the SDK — we flatten both forms to a single text blob before searching.
+    Non-text items in the list shape (e.g. image dicts) are skipped.
+    """
+    if block_content is None:
+        return None
+    if isinstance(block_content, str):
+        text = block_content
+    else:
+        parts: list[str] = []
+        for item in block_content:
+            if isinstance(item, dict):
+                t = item.get('text')
+                if isinstance(t, str):
+                    parts.append(t)
+        text = '\n'.join(parts)
+    match = pr_url_pattern.search(text)
+    if match:
+        return int(match.group(1))
+    return None
 
 
 def _build_crash_sticky_body(
@@ -341,6 +389,14 @@ async def run_initiative(
     last_turn_count = 0
     last_cost: float | None = None
     crash_sticky_body: str | None = None
+    # D.5.1.4 — emit `--- pr_open pr=N` as soon as we see the PR URL in a tool
+    # result, in addition to the final post-loop summary. Two emit points keeps
+    # the reconciler's log-parse path informed even when the run exits before
+    # the final summary line lands (wait_for_terminal blocks past pod SIGTERM,
+    # exception mid-loop, etc.). `pr_emitted` guards against re-emitting on
+    # later tool calls that also surface the URL.
+    pr_url_pattern = _build_pr_url_pattern(primary.qualified_repo)
+    pr_emitted: int | None = None
     try:
         async for message in query(prompt=user_prompt, options=options):
             if isinstance(message, AssistantMessage):
@@ -349,7 +405,20 @@ async def run_initiative(
                         click.echo(block.text)
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
-                    elif isinstance(block, ThinkingBlock | ToolResultBlock):
+                    elif isinstance(block, ToolResultBlock):
+                        if pr_emitted is None:
+                            candidate = _extract_pr_from_tool_result(block.content, pr_url_pattern)
+                            if candidate is not None:
+                                pr_emitted = candidate
+                                click.echo(
+                                    click.style(
+                                        f'\n--- pr_open pr={pr_emitted} repo={primary.qualified_repo}',
+                                        fg='yellow',
+                                    ),
+                                    err=True,
+                                )
+                                _write_pr_number_hint(pr_emitted)
+                    elif isinstance(block, ThinkingBlock):
                         pass
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
