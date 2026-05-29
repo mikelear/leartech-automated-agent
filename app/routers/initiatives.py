@@ -18,8 +18,10 @@ Catalog-first resolution (feat: catalog-fire-fallback):
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 from sqlite3 import ProgrammingError as SQLiteProgrammingError
 
@@ -87,10 +89,166 @@ def _current_runtime_mode() -> str:
     return mode if mode in {'asyncio', 'job'} else 'asyncio'
 
 
+# Phase E.1 — known language hints. Each entry maps the language string
+# (as it appears in initiative YAML or as detected from repo manifests) to
+# the short image name in the leartech-agent fleet. Full image URL is
+# composed at spawn time via :func:`_compose_image_url` using the chart-
+# rendered LEARTECH_JOB_IMAGE_REGISTRY_PREFIX + LEARTECH_JOB_IMAGE_TAG
+# env vars. Adding a new language is one new entry here + a matching
+# image in leartech-dockerfiles. Unknown languages return None and the
+# caller falls back to LEARTECH_INITIATIVE_DEFAULT_IMAGE.
+_LANGUAGE_TO_IMAGE: dict[str, str] = {
+    'go': 'leartech-agent-go',
+    'python': 'leartech-agent-python',
+    'angular': 'leartech-agent-angular',
+    'node': 'leartech-agent-node',
+    'rust': 'leartech-agent-rust',
+    'dotnet': 'leartech-agent-dotnet',
+}
+
+# Module-level cache for repo -> detected-language results, populated by
+# :func:`_detect_language_from_repo`. Keyed by ``qualified_repo`` (e.g.
+# ``mikelear/foo``). Caches BOTH positive hits (e.g. ``'go'``) and confirmed
+# negatives (``None`` — manifests not recognised) so the GitHub API isn't
+# re-hit on every POST for repos we've already classified. Transient
+# fetch failures are NOT cached (they return None without recording, so a
+# follow-up call retries). Cache survives the process lifetime; a pod
+# restart re-fetches once per repo.
+_LANGUAGE_CACHE: dict[str, str | None] = {}
+
+
+def _image_for_language(language: str) -> str | None:
+    """Map a language hint to a leartech-agent short image name.
+
+    Returns the SHORT image name (no registry prefix, no tag) so the caller
+    composes the final URL with :func:`_compose_image_url`. Unknown / empty
+    languages return ``None``; the caller falls back to the env default.
+    The lookup is case-insensitive — initiative YAML authors sometimes
+    write ``Python`` or ``GO``.
+    """
+    if not language:
+        return None
+    return _LANGUAGE_TO_IMAGE.get(language.strip().lower())
+
+
+def _gh_api_list_repo_root(qualified_repo: str) -> list[str] | None:
+    """List the file names at the root of ``qualified_repo`` via ``gh api``.
+
+    Returns ``None`` on any failure (auth, network, repo not found,
+    timeout, malformed JSON) so the caller can fall back cleanly. The
+    happy path returns the list of ``name`` strings from the GitHub
+    Contents API. We shell out to ``gh`` rather than calling the REST
+    endpoint directly to inherit the same token-resolution + retry path
+    the rest of the agent uses (``GH_TOKEN`` env or ``gh auth``).
+    """
+    # `gh` is on PATH in the API pod image (same approach used across
+    # gate/agent/self_retrospect.py and gate/agent/initiative.py); the
+    # qualified_repo string is constrained upstream by the loader to
+    # ``<owner>/<name>`` shape so the URL path is safe. S603 / S607 are
+    # suppressed for this whole module in pyproject.toml.
+    try:
+        result = subprocess.run(
+            [
+                'gh',
+                'api',
+                f'repos/{qualified_repo}/contents/',
+                '--jq',
+                '[.[] | .name]',
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning('_detect_language: gh api errored for %r: %s', qualified_repo, exc)
+        return None
+    if result.returncode != 0:
+        logger.warning(
+            '_detect_language: gh api failed for %r (exit %d): %s',
+            qualified_repo,
+            result.returncode,
+            result.stderr.strip(),
+        )
+        return None
+    try:
+        payload = json.loads(result.stdout or '[]')
+    except json.JSONDecodeError as exc:
+        logger.warning('_detect_language: gh api returned non-JSON for %r: %s', qualified_repo, exc)
+        return None
+    if not isinstance(payload, list):
+        return None
+    return [str(name) for name in payload]
+
+
+def _detect_language_from_repo(qualified_repo: str) -> str | None:
+    """Sniff manifest files at the repo root to guess the primary language.
+
+    Detection order (highest priority first — the first hit wins):
+
+    1. ``go.mod`` → ``'go'``
+    2. ``pyproject.toml`` → ``'python'``
+    3. ``requirements.txt`` → ``'python'``
+    4. ``package.json`` + ``angular.json`` → ``'angular'``
+    5. ``package.json`` (no ``angular.json``) → ``'node'``
+    6. ``Cargo.toml`` → ``'rust'``
+    7. any ``*.csproj`` → ``'dotnet'``
+
+    Returns ``None`` when no recognised manifest is present OR when the
+    GitHub API call fails. Results are cached in :data:`_LANGUAGE_CACHE`
+    so repeated POSTs for the same repo are free. Fetch failures (the API
+    returned ``None``) are NOT cached — the next call retries.
+    """
+    if qualified_repo in _LANGUAGE_CACHE:
+        return _LANGUAGE_CACHE[qualified_repo]
+
+    names = _gh_api_list_repo_root(qualified_repo)
+    if names is None:
+        # Transient: don't cache — let the next call retry.
+        return None
+
+    names_set = set(names)
+    detected: str | None = None
+    if 'go.mod' in names_set:
+        detected = 'go'
+    elif 'pyproject.toml' in names_set:
+        detected = 'python'
+    elif 'requirements.txt' in names_set:
+        detected = 'python'
+    elif 'package.json' in names_set:
+        detected = 'angular' if 'angular.json' in names_set else 'node'
+    elif 'Cargo.toml' in names_set:
+        detected = 'rust'
+    elif any(n.endswith('.csproj') for n in names):
+        detected = 'dotnet'
+
+    _LANGUAGE_CACHE[qualified_repo] = detected
+    return detected
+
+
+def _compose_image_url(short_image: str) -> str | None:
+    """Compose ``<prefix>/<short_image>:<tag>`` from chart-rendered env vars.
+
+    ``LEARTECH_JOB_IMAGE_REGISTRY_PREFIX`` and ``LEARTECH_JOB_IMAGE_TAG`` are
+    rendered by the chart's ``deployment.yaml`` from the same expression
+    used for ``LEARTECH_INITIATIVE_DEFAULT_IMAGE`` (the API image's
+    repository minus the ``/leartech-automated-agent`` suffix, and the
+    Chart.Version respectively). Returns ``None`` when either is unset so
+    the caller falls back to ``LEARTECH_INITIATIVE_DEFAULT_IMAGE`` — this
+    handles the rollout gap where new code runs against an older chart.
+    """
+    prefix = os.environ.get('LEARTECH_JOB_IMAGE_REGISTRY_PREFIX')
+    tag = os.environ.get('LEARTECH_JOB_IMAGE_TAG')
+    if not prefix or not tag:
+        return None
+    return f'{prefix.rstrip("/")}/{short_image}:{tag}'
+
+
 def _pick_image_for_initiative(
     initiative_name: str,
     language: str | None = None,
     image_override: str | None = None,
+    qualified_repo: str | None = None,
 ) -> str:
     """Return the container image to spawn for ``initiative_name``.
 
@@ -98,31 +256,58 @@ def _pick_image_for_initiative(
 
     1. ``image_override`` (Phase E.3) — fully-qualified image ref from the
        initiative YAML's ``image:`` field. Short-circuits all other paths.
-    2. ``language`` (Phase E.2) — routing to a per-language variant image.
-    3. Repo manifest auto-detect (Phase E.1) — inspect the primary repo.
+    2. ``language`` (Phase E.2) — explicit language hint from the
+       initiative YAML's ``language:`` field. Routes to the matching
+       ``leartech-agent-<lang>`` image.
+    3. Repo manifest auto-detect (Phase E.1) — sniff the primary repo's
+       root for ``go.mod`` / ``pyproject.toml`` / ``package.json`` / etc.
     4. ``LEARTECH_INITIATIVE_DEFAULT_IMAGE`` env (D.4.4 default).
-
-    D.4 stub: layers 2 + 3 are stubs that currently fall through to the
-    default; E.1 / E.2 will fill them in. Plumbing all four args today
-    means future phases only have to touch this function's body, not
-    every caller.
 
     The ``LEARTECH_INITIATIVE_DEFAULT_IMAGE`` env is rendered by the chart
     deployment.yaml from ``image.repository:image.tag`` (the API pod's own
     image) — keeping API and Job code in lock-step. No silent hardcoded
-    fallback: if the env var is unset AND no override applies, raise so
-    the caller surfaces a 500 instead of spawning a Job that ErrImagePulls
-    forever on a bogus default (D.4.2 incident on GCP).
+    fallback: if the env var is unset AND no override / language applies,
+    raise so the caller surfaces a 500 instead of spawning a Job that
+    ErrImagePulls forever on a bogus default (D.4.2 incident on GCP).
+
+    Layers 2/3 require ``LEARTECH_JOB_IMAGE_REGISTRY_PREFIX`` and
+    ``LEARTECH_JOB_IMAGE_TAG`` to be set (chart-rendered). If either is
+    missing — e.g. running with an older chart release — we degrade to
+    the env default rather than failing, with a warning. This is the
+    same rollout-gap pattern D.4.4 uses.
     """
-    _ = initiative_name  # unused until E.1
-    _ = language  # accepted now, consumed by E.1's routing refactor
+    _ = initiative_name  # accepted so callers stay stable; future routing may consume it
 
     # Phase E.3 — per-initiative override wins over everything else.
     # Empty string is normalised to None by the loader, but be defensive
     # against callers that bypass the loader (e.g. constructing the model
-    # directly in tests). A whitespace-only override falls through to env.
+    # directly in tests). A whitespace-only override falls through.
     if image_override and image_override.strip():
         return image_override
+
+    # Resolve language: explicit hint (E.2) wins over repo auto-detect (E.1).
+    detected_language: str | None = None
+    if language and language.strip():
+        detected_language = language.strip().lower()
+    elif qualified_repo:
+        detected_language = _detect_language_from_repo(qualified_repo)
+
+    if detected_language:
+        short = _image_for_language(detected_language)
+        if short:
+            composed = _compose_image_url(short)
+            if composed:
+                return composed
+            # Chart-rollout gap — new env vars not rendered yet; degrade
+            # to the default image so the spawn succeeds instead of
+            # raising. The operator sees the warning and bumps the chart.
+            logger.warning(
+                '_pick_image_for_initiative: language %r resolved to %r but '
+                'LEARTECH_JOB_IMAGE_REGISTRY_PREFIX / LEARTECH_JOB_IMAGE_TAG '
+                'are not set; falling back to LEARTECH_INITIATIVE_DEFAULT_IMAGE',
+                detected_language,
+                short,
+            )
 
     image = os.environ.get('LEARTECH_INITIATIVE_DEFAULT_IMAGE')
     if not image:
@@ -432,14 +617,17 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
             job_name, _ns = await spawn_initiative_job(
                 initiative_name=request.initiative,
                 run_id=initiative_id,
-                # Phase E.2: thread the YAML's `language:` hint to the image
-                # picker so E.1's routing refactor sees it. None / unknown values
-                # fall through to the default image — same behaviour as today.
-                # Phase E.3: `image:` override wins over `language:` and env default.
+                # Phase E.1/E.2/E.3 image routing:
+                #   image: override (E.3) > language: hint (E.2) > repo
+                #   auto-detect (E.1) > LEARTECH_INITIATIVE_DEFAULT_IMAGE.
+                # `qualified_repo` is the primary repo so the picker can
+                # sniff its root manifests when neither `image:` nor
+                # `language:` is set.
                 image=_pick_image_for_initiative(
                     request.initiative,
                     language=loaded.language,
                     image_override=loaded.image,
+                    qualified_repo=loaded.primary.qualified_repo,
                 ),
                 namespace=namespace,
                 env=_initiative_env(),
