@@ -24,13 +24,28 @@
 set -uo pipefail
 
 CLUSTER="${1:-}"
-MODE="${2:-agent}"
+shift || true
+# Parse remaining args. Accept --run <id> at any position (after the cluster):
+#   tail_agent_log.sh az --run abc12345           # Job pod, default mode
+#   tail_agent_log.sh az narrative --run abc12345 # Job pod, narrative mode
+#   tail_agent_log.sh az --run abc12345 tools     # Job pod, tools mode
+MODE="agent"
 RUN_ID=""
-# Optional --run <id> selects the Job pod for that run-id rather than the API pod.
-# Job-mode runs (D.4+) live in their own pods, labelled leartech.io/run-id=<id>.
-if [ "${3:-}" = "--run" ] && [ -n "${4:-}" ]; then
-  RUN_ID="$4"
-fi
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --run)
+      RUN_ID="${2:-}"
+      shift 2 || shift
+      ;;
+    agent|narrative|tools|results|full)
+      MODE="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
 
 case "$CLUSTER" in
   gcp) CTX="gke_product-first_us-east1-b_tf-jx-usable-bird" ;;
