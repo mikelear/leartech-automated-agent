@@ -189,18 +189,16 @@ jobs:
   # Override the SA used by spawned Job pods. Empty means default to
   # `<fullname>-job-runner` (rendered by job-runner-serviceaccount.yaml).
   serviceAccountName: ""
-  # Image used by spawned Job pods. Mirrors the Observer/playwright-runner
-  # pattern: release.yaml kaniko-pushes `leartech-agent-runtime` to the
-  # cluster's home registry AND ghcr; each cluster pulls from its home
-  # registry so no cross-registry auth is needed.
-  # - imageRegistry defaults to GCP AR (the chart-default cluster).
-  #   AZ overrides to `modernburro.azurecr.io/mikelear` in its GitOps config.
-  # - imageTag empty means use the chart version (lockstep with API release).
-  # - defaultImage (legacy) lets you set a fully-qualified ref to bypass the
-  #   triple. Phase E.1 will use it for per-language variants.
-  imageRegistry: us-central1-docker.pkg.dev/product-first/oci
-  imageRepository: leartech-agent-runtime
-  imageTag: ""
+  # Image used by spawned Job pods. release.yaml kaniko-pushes
+  # `leartech-agent-runtime` to BOTH the cluster's home registry
+  # (${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}) AND ghcr (backup).
+  # When `defaultImage` is empty, deployment.yaml derives the registry from
+  # `.Values.image.repository` — strip the API image's `/leartech-automated-agent`
+  # suffix and append `/leartech-agent-runtime:{Chart.Version}`. The runtime
+  # image therefore lives in the same registry as the API image (which is
+  # already cluster-specific from GitOps config), so no separate per-cluster
+  # registry override is needed. Phase E.1 per-language variants set
+  # `defaultImage` explicitly to bypass the derivation.
   defaultImage: ""
   # Image pull secret attached to the job-runner ServiceAccount. Every
   # spawned Job pod inherits this so private-registry pulls work without

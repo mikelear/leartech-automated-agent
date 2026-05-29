@@ -54,14 +54,16 @@ spec:
         - name: LEARTECH_INITIATIVE_RUNTIME
           value: {{ .Values.agent.runtime | quote }}
         {{- end }}
-        # D.4.4: per-cluster registry routing matching the Observer pattern.
-        # release.yaml mirrors leartech-agent-runtime to BOTH the cluster's
-        # home registry (GAR / ACR) and ghcr. The chart triples
-        # (jobs.imageRegistry + imageRepository + imageTag) compose the
-        # pull URL; defaults point at GCP, AZ overrides in its GitOps config.
-        # `jobs.defaultImage`, if set, wins outright (E.1 per-language variants).
+        # D.4.4: Job-pod image registry derived from the API image so no
+        # per-cluster hardcoded registry default lives in the chart.
+        # release.yaml kaniko-mirrors leartech-agent-runtime to the cluster's
+        # home registry + ghcr; pulling URL is built by stripping the API
+        # image's `/leartech-automated-agent` suffix and appending
+        # `/leartech-agent-runtime:{Chart.Version}` to the prefix.
+        # `.Values.jobs.defaultImage`, if set, wins outright — Phase E.1
+        # will use it for per-language variants.
         - name: LEARTECH_INITIATIVE_DEFAULT_IMAGE
-          value: {{ default (printf "%s/%s:%s" .Values.jobs.imageRegistry .Values.jobs.imageRepository (default .Chart.Version .Values.jobs.imageTag)) .Values.jobs.defaultImage | quote }}
+          value: {{ default (printf "%s/leartech-agent-runtime:%s" (trimSuffix "/leartech-automated-agent" .Values.image.repository) .Chart.Version) .Values.jobs.defaultImage | quote }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
