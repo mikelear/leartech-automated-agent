@@ -51,8 +51,14 @@ spec:
             #!/busybox/sh
             set -e
             set -o pipefail
+            # Source jx-variables so PUSH_CONTAINER_REGISTRY + DOCKER_REGISTRY_ORG
+            # are exported with the cluster's home-registry prefix. Without this,
+            # both vars are empty and kaniko falls back to docker.io. Same pattern
+            # leartech-agent-base/release.yaml uses.
+            source .jx/variables.sh
             VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0-snapshot")
             echo "=== Building leartech-agent-runtime:${VERSION} ==="
+            echo "    cluster registry: ${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}"
 
             # Build docker config: cluster-registry creds + ghcr.io auth
             # Mirrors leartech-dockerfiles/.lighthouse/jenkins-x/leartech-agent-base/release.yaml
