@@ -300,6 +300,60 @@ async def test_state_register_persists_pr_repo_to_db(db_enabled: None) -> None:
 
 
 @pytest.mark.asyncio
+async def test_state_register_persists_branch_to_db(db_enabled: None) -> None:
+    """Regression: D.5.1.2 — branch must be persisted to the DB at register() time.
+
+    The job_reconciler's GH-side PR fallback (D.5.1.1) looks up the open PR via
+    ``gh pr list --head <branch>``. D.5.1.1 derived the branch from
+    ``f'agent/{record.initiative}'`` which doesn't match the real YAML
+    convention (the prefix gets doubled when the initiative name already
+    starts with ``agent-`` — observed live on every promo PR). D.5.1.2 makes
+    the YAML-declared branch authoritative by persisting it on the DB row at
+    INSERT time; the reconciler then just reads ``record.branch``.
+
+    This test guards the INSERT path: register() must carry branch through to
+    create_run() so the DB row has it from the start, before any completion
+    update. We clear the in-memory cache after register() to PROVE the value
+    landed in the DB row (simulates a pod restart between INSERT and the
+    reconciler's read).
+    """
+
+    run_id = new_id()
+    rec = InitiativeRecord(
+        id=run_id,
+        initiative='agent-d5-1-2-persist-branch-on-record',
+        status='queued',
+        started_at=now(),
+        pr_repo='mikelear/leartech-automated-agent',
+        # The YAML's declared branch — note the prefix is NOT doubled
+        # (initiative name starts with `agent-` but the branch name does not).
+        # This is exactly the case D.5.1.1's `agent/<initiative>` derivation
+        # got wrong.
+        branch='agent/d5-1-2-persist-branch-on-record',
+    )
+    await register(rec)
+
+    # Clear in-memory cache so we PROVE the DB row carries the branch
+    # (simulates a pod restart between INSERT and any subsequent read).
+    state_module._records.clear()
+
+    async with db_module.session() as s:
+        db_rec = await get_run(s, run_id)
+    assert db_rec is not None
+    assert db_rec.branch == 'agent/d5-1-2-persist-branch-on-record', (
+        'branch must be persisted to the DB at INSERT time so the '
+        'job_reconciler can read it back as the authoritative source — '
+        'otherwise we rederive from initiative name and bake in the wrong '
+        'convention (D.5.1.1 bug).'
+    )
+
+    # State-layer read must also surface the branch on the InitiativeRecord.
+    fetched = await get(run_id)
+    assert fetched is not None
+    assert fetched.branch == 'agent/d5-1-2-persist-branch-on-record'
+
+
+@pytest.mark.asyncio
 async def test_state_get_reads_from_db(db_enabled: None) -> None:
     run_id = new_id()
     rec = InitiativeRecord(id=run_id, initiative='db-read-test', status='queued', started_at=now())

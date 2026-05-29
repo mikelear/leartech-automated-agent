@@ -571,6 +571,10 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         cluster=_CLUSTER,
         runtime='job',
         job_name=job_name,
+        # Phase D.5.1.2 — the YAML's declared branch, persisted so the
+        # job_reconciler's GH-side PR fallback can `gh pr list --head
+        # <branch>` without name-mangling `record.initiative`.
+        branch=loaded.primary.branch,
     )
     await register(record)
     # Phase D.5.3 — reflect that the Job is in flight. Without this, the

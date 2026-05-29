@@ -689,6 +689,7 @@ async def test_reconcile_once_uses_record_pr_number_when_log_lacks_pr(
                     pr_number=123,
                     pr_repo='mikelear/example-svc',
                     initiative='fallback-pr-test',
+                    branch='agent/fallback-pr-test',
                 ),
             ),
         ),
@@ -730,10 +731,11 @@ async def test_reconcile_once_uses_record_pr_number_when_log_lacks_pr(
 async def test_reconcile_once_uses_gh_fallback_when_log_pr_missing(
     _mock_k8s_ok: Any,  # type: ignore[valid-type]
 ) -> None:
-    """Log lacks `pr=N` but record.pr_repo + initiative are set → reconciler
-    invokes `_lookup_pr_by_branch`, captures the returned PR number, and
-    persists it via update(). This is the headline behaviour that unblocks
-    D.5.2's self_retrospect path for job-mode runs."""
+    """Log lacks `pr=N` but record.pr_repo + branch are set → reconciler
+    invokes `_lookup_pr_by_branch` with the DB-persisted branch (D.5.1.2),
+    captures the returned PR number, and persists it via update(). This is
+    the headline behaviour that unblocks D.5.2's self_retrospect path for
+    job-mode runs."""
     batch, core = _mock_k8s_ok
     job = _make_job('run-gh-fallback', [('Complete', 'True')])
     batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
@@ -755,6 +757,7 @@ async def test_reconcile_once_uses_gh_fallback_when_log_pr_missing(
                     pr_number=None,
                     pr_repo='mikelear/example-svc',
                     initiative='my-cool-feature',
+                    branch='agent/my-cool-feature',
                 ),
             ),
         ),
@@ -766,7 +769,10 @@ async def test_reconcile_once_uses_gh_fallback_when_log_pr_missing(
         count = await reconcile_once('jx-staging')
 
     assert count == 1
-    mock_lookup.assert_called_once_with('mikelear/example-svc', 'my-cool-feature', 'run-gh-fallback')
+    # D.5.1.2 — the branch is read from the DB row (record.branch), not
+    # re-derived from record.initiative. This is the contract that fixes
+    # the doubled-prefix bug (`agent/agent-<name>`) that D.5.1.1 shipped.
+    mock_lookup.assert_called_once_with('mikelear/example-svc', 'agent/my-cool-feature', 'run-gh-fallback')
     mock_update.assert_awaited_once()
     kwargs = mock_update.await_args.kwargs
     assert kwargs['pr_number'] == 789
@@ -803,6 +809,7 @@ async def test_reconcile_once_skips_gh_fallback_when_log_has_pr(
                     pr_number=None,
                     pr_repo='mikelear/example-svc',
                     initiative='log-wins',
+                    branch='agent/log-wins',
                 ),
             ),
         ),
@@ -847,6 +854,7 @@ async def test_reconcile_once_gh_fallback_returning_none_leaves_pr_none(
                     pr_number=None,
                     pr_repo='mikelear/example-svc',
                     initiative='no-pr-yet',
+                    branch='agent/no-pr-yet',
                 ),
             ),
         ),
@@ -863,13 +871,79 @@ async def test_reconcile_once_gh_fallback_returning_none_leaves_pr_none(
 
 
 @pytest.mark.asyncio
+async def test_reconcile_once_skips_gh_fallback_when_record_branch_missing(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """D.5.1.2 — if record.branch is None (pre-migration row from before the
+    0004_branch_column.sql migration ran), the reconciler must NOT attempt
+    the GH-side branch fallback. The original D.5.1.1 code derived the branch
+    from ``f'agent/{record.initiative}'`` which baked in the wrong convention
+    (doubled `agent/` prefix on real initiative names) and always missed.
+
+    The fix is to read the authoritative branch off the DB row — but old rows
+    written before the column existed will carry NULL. For those we have to
+    fall through to log-parse only; making up a branch name and hoping it
+    matches is what got us into this bug.
+
+    Net effect: log lacks `pr=N` AND record.branch is None → pr_number stays
+    None, no subprocess invocation. Row update still completes (queued →
+    terminal) so the catalog doesn't sit stuck.
+    """
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-no-branch', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='pod'))]),
+    )
+    # Summary lacks `pr=N` — exactly the case where D.5.1.1 would fall back.
+    core.read_namespaced_pod_log = AsyncMock(return_value='--- turns=3  in=0  out=0  cost=$0.10\n')
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    status='running',
+                    pr_number=None,
+                    pr_repo='mikelear/example-svc',
+                    initiative='pre-migration-row',
+                    branch=None,  # ← the pre-migration NULL case
+                ),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._lookup_pr_by_branch') as mock_lookup,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()),
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    # The headline assertion: no subprocess call attempted for NULL-branch rows.
+    mock_lookup.assert_not_called()
+    # Row STILL flips to terminal so the catalog isn't stuck — pr_number just
+    # remains None, and self_retrospect's own guard skips it.
+    mock_update.assert_awaited_once()
+    kwargs = mock_update.await_args.kwargs
+    assert kwargs['status'] == 'complete'
+    assert kwargs['pr_number'] is None
+
+
+@pytest.mark.asyncio
 async def test_reconcile_once_skips_gh_fallback_when_pr_repo_missing(
     _mock_k8s_ok: Any,  # type: ignore[valid-type]
 ) -> None:
     """If record.pr_repo is None (initiative never resolved to a repo; e.g.
     the agent crashed before the loader ran), the GH fallback has no target
     to query and must be skipped entirely. No subprocess invocation, no
-    AttributeError on missing initiative — just leave pr_number as None."""
+    AttributeError on missing initiative — just leave pr_number as None.
+
+    The ``record.branch`` happens to be set here, but the ``pr_repo is None``
+    short-circuit must dominate: no repo → no fallback regardless of branch.
+    """
     batch, core = _mock_k8s_ok
     job = _make_job('run-no-repo', [('Complete', 'True')])
     batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
@@ -890,6 +964,7 @@ async def test_reconcile_once_skips_gh_fallback_when_pr_repo_missing(
                     pr_number=None,
                     pr_repo=None,
                     initiative='no-repo-set',
+                    branch='agent/no-repo-set',
                 ),
             ),
         ),
@@ -911,14 +986,16 @@ async def test_reconcile_once_skips_gh_fallback_when_pr_repo_missing(
 
 def test_lookup_pr_by_branch_returns_number_from_gh_json() -> None:
     """Happy path: `gh pr list ... --json number` emits a single-row JSON array.
-    The helper returns the integer number for the agent's branch convention
-    `agent/<initiative-name>`."""
+    The helper returns the integer number for the YAML-declared branch
+    (D.5.1.2 — caller passes the persisted ``record.branch`` directly)."""
     fake_result = SimpleNamespace(returncode=0, stdout='[{"number": 456}]', stderr='')
     with patch('gate.agent.job_reconciler.subprocess.run', return_value=fake_result) as mock_run:
-        pr = _lookup_pr_by_branch('mikelear/example-svc', 'add-thing', 'run-xyz')
+        pr = _lookup_pr_by_branch('mikelear/example-svc', 'agent/add-thing', 'run-xyz')
     assert pr == 456
     args = mock_run.call_args.args[0]
-    # Validate the branch convention is being used — `agent/<name>`.
+    # The branch passed in is used VERBATIM as `--head` — no string-templating
+    # in the helper any more; that's why we persist `record.branch` in the
+    # first place (D.5.1.2 motivation).
     assert '--head' in args
     assert args[args.index('--head') + 1] == 'agent/add-thing'
     assert '--state' in args
@@ -930,7 +1007,7 @@ def test_lookup_pr_by_branch_returns_none_on_empty_array() -> None:
     pr_number unset; self_retrospect's own pr-missing guard then applies."""
     fake_result = SimpleNamespace(returncode=0, stdout='[]', stderr='')
     with patch('gate.agent.job_reconciler.subprocess.run', return_value=fake_result):
-        assert _lookup_pr_by_branch('mikelear/example-svc', 'nope', 'run-xyz') is None
+        assert _lookup_pr_by_branch('mikelear/example-svc', 'agent/nope', 'run-xyz') is None
 
 
 def test_lookup_pr_by_branch_returns_none_on_nonzero_exit() -> None:
@@ -939,7 +1016,7 @@ def test_lookup_pr_by_branch_returns_none_on_nonzero_exit() -> None:
     observable but doesn't poison the row update."""
     fake_result = SimpleNamespace(returncode=1, stdout='', stderr='auth required')
     with patch('gate.agent.job_reconciler.subprocess.run', return_value=fake_result):
-        assert _lookup_pr_by_branch('mikelear/example-svc', 'whatever', 'run-xyz') is None
+        assert _lookup_pr_by_branch('mikelear/example-svc', 'agent/whatever', 'run-xyz') is None
 
 
 def test_lookup_pr_by_branch_returns_none_on_subprocess_exception() -> None:
@@ -947,7 +1024,7 @@ def test_lookup_pr_by_branch_returns_none_on_subprocess_exception() -> None:
     must be swallowed — the fallback is best-effort and must never bubble up
     to abort the reconciler pass."""
     with patch('gate.agent.job_reconciler.subprocess.run', side_effect=subprocess.TimeoutExpired(cmd='gh', timeout=10)):
-        assert _lookup_pr_by_branch('mikelear/example-svc', 'whatever', 'run-xyz') is None
+        assert _lookup_pr_by_branch('mikelear/example-svc', 'agent/whatever', 'run-xyz') is None
 
 
 def test_lookup_pr_by_branch_returns_none_on_invalid_json() -> None:
@@ -955,4 +1032,4 @@ def test_lookup_pr_by_branch_returns_none_on_invalid_json() -> None:
     write) → return None rather than raising."""
     fake_result = SimpleNamespace(returncode=0, stdout='not json {{{', stderr='')
     with patch('gate.agent.job_reconciler.subprocess.run', return_value=fake_result):
-        assert _lookup_pr_by_branch('mikelear/example-svc', 'whatever', 'run-xyz') is None
+        assert _lookup_pr_by_branch('mikelear/example-svc', 'agent/whatever', 'run-xyz') is None

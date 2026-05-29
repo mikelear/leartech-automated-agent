@@ -111,6 +111,12 @@ class InitiativeRunRow(Base):
     # legacy asyncio rows from before Phase F so older rows continue to
     # round-trip cleanly.
     job_name: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Phase D.5.1.2 — initiative YAML's declared `branch` field. Persisting
+    # the authoritative branch (rather than rederiving from `initiative`)
+    # lets the job_reconciler's GH-side PR fallback look up the PR by
+    # `gh pr list --head <branch>` without name-mangling. NULL on old rows
+    # pre-migration; the reconciler treats NULL as "skip fallback".
+    branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
