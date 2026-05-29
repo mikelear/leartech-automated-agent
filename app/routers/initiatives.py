@@ -98,12 +98,18 @@ def _current_runtime_mode() -> str:
 # image in leartech-dockerfiles. Unknown languages return None and the
 # caller falls back to LEARTECH_INITIATIVE_DEFAULT_IMAGE.
 _LANGUAGE_TO_IMAGE: dict[str, str] = {
+    # Short suffixes match what leartech-dockerfiles actually builds —
+    # `leartech-agent-py` (not `-python`), `leartech-agent-ng` (not `-angular`).
+    # `node` aliases to the angular image since the same Node toolchain
+    # underpins both. Dotnet has no published image yet; falls back to
+    # LEARTECH_INITIATIVE_DEFAULT_IMAGE via the None-return path.
     'go': 'leartech-agent-go',
-    'python': 'leartech-agent-python',
-    'angular': 'leartech-agent-angular',
-    'node': 'leartech-agent-node',
+    'python': 'leartech-agent-py',
+    'py': 'leartech-agent-py',
+    'angular': 'leartech-agent-ng',
+    'node': 'leartech-agent-ng',
+    'ng': 'leartech-agent-ng',
     'rust': 'leartech-agent-rust',
-    'dotnet': 'leartech-agent-dotnet',
 }
 
 # Module-level cache for repo -> detected-language results, populated by

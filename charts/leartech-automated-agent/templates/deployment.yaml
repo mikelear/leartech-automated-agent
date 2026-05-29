@@ -74,8 +74,12 @@ spec:
         # picker degrades to LEARTECH_INITIATIVE_DEFAULT_IMAGE.
         - name: LEARTECH_JOB_IMAGE_REGISTRY_PREFIX
           value: {{ trimSuffix "/leartech-automated-agent" .Values.image.repository | quote }}
+        # Language images live in leartech-dockerfiles' own version stream
+        # (e.g. leartech-agent-py:0.38.0), NOT the agent chart version. Default
+        # to `latest` so spawns work out-of-the-box; pin via
+        # `.Values.jobs.languageImageTag` in GitOps when reproducibility matters.
         - name: LEARTECH_JOB_IMAGE_TAG
-          value: {{ .Chart.Version | quote }}
+          value: {{ default "latest" .Values.jobs.languageImageTag | quote }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:

@@ -200,6 +200,13 @@ jobs:
   # registry override is needed. Phase E.1 per-language variants set
   # `defaultImage` explicitly to bypass the derivation.
   defaultImage: ""
+  # Tag for E.1's per-language images (leartech-agent-py / -go / -ng / -rust).
+  # These are built by leartech-dockerfiles with their OWN version stream
+  # (e.g. 0.38.0) — NOT the agent chart version. Empty here means
+  # deployment.yaml renders `latest` for LEARTECH_JOB_IMAGE_TAG so spawns
+  # work out-of-the-box. Pin to a specific tag per cluster via GitOps when
+  # immutability matters (e.g. "0.38.0").
+  languageImageTag: ""
   # Image pull secret attached to the job-runner ServiceAccount. Every
   # spawned Job pod inherits this so private-registry pulls work without
   # per-pod imagePullSecrets plumbing. Cluster-default convention is
