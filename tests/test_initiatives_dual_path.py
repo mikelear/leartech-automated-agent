@@ -107,12 +107,13 @@ def test_pick_image_uses_env_override_when_set(monkeypatch: pytest.MonkeyPatch) 
     assert _pick_image_for_initiative('any-name') == 'ghcr.io/foo/custom:1.2.3'
 
 
-def test_pick_image_falls_back_to_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_pick_image_raises_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """D.4.2: no silent fallback. If the chart didn't render the env var,
+    spawning a Job pod with a bogus default just guarantees an ErrImagePull
+    loop. Raise so the API surfaces a 500 the operator can actually act on."""
     monkeypatch.delenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', raising=False)
-    img = _pick_image_for_initiative('any-name')
-    # Anchor on the prefix rather than the full string so an image-tag bump
-    # doesn't break the test. The contract is "some ghcr.io image".
-    assert img.startswith('ghcr.io/'), f'expected default to be a ghcr.io image, got {img!r}'
+    with pytest.raises(RuntimeError, match='LEARTECH_INITIATIVE_DEFAULT_IMAGE'):
+        _pick_image_for_initiative('any-name')
 
 
 # ---------------------------------------------------------------------------

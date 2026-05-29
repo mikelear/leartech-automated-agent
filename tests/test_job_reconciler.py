@@ -69,10 +69,7 @@ def test_parse_summary_ignores_url_references_in_prose() -> None:
     """A GitHub URL mentioned by the agent's prose (e.g. referencing a
     pre-existing PR for context) must NOT poison pr_number. Only the
     final `--- turns=...  pr=N` line is authoritative."""
-    log = (
-        'Existing PR for context: https://github.com/owner/repo/pull/100\n'
-        '--- turns=3  in=10  out=20  cost=$0.05\n'
-    )
+    log = 'Existing PR for context: https://github.com/owner/repo/pull/100\n--- turns=3  in=10  out=20  cost=$0.05\n'
     _, _, pr_number = _parse_summary(log)
     assert pr_number is None
 
