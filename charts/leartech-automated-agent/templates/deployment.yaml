@@ -54,17 +54,14 @@ spec:
         - name: LEARTECH_INITIATIVE_RUNTIME
           value: {{ .Values.agent.runtime | quote }}
         {{- end }}
-        # D.4.3: image spawned Jobs run. Defaults to the agent-runtime image
-        # which carries the agent loop's deps (click, claude_agent_sdk, etc.) —
-        # NOT the API pod's image, which is a slim FastAPI build that omits
-        # them. Each release publishes leartech-agent-runtime:{VERSION} alongside
-        # the API image, so chart version == agent-runtime tag (lockstep).
-        # Override `.Values.jobs.defaultImage` to point at a different image
-        # (e.g. when Phase E.1 splits per-language variants).
-        # See D.4.3 incident on AZ where the API-image default ErrImagePulled
-        # immediately with `ModuleNotFoundError: click`.
+        # D.4.4: per-cluster registry routing matching the Observer pattern.
+        # release.yaml mirrors leartech-agent-runtime to BOTH the cluster's
+        # home registry (GAR / ACR) and ghcr. The chart triples
+        # (jobs.imageRegistry + imageRepository + imageTag) compose the
+        # pull URL; defaults point at GCP, AZ overrides in its GitOps config.
+        # `jobs.defaultImage`, if set, wins outright (E.1 per-language variants).
         - name: LEARTECH_INITIATIVE_DEFAULT_IMAGE
-          value: {{ default (printf "ghcr.io/mikelear/leartech-agent-runtime:%s" .Chart.Version) .Values.jobs.defaultImage | quote }}
+          value: {{ default (printf "%s/%s:%s" .Values.jobs.imageRegistry .Values.jobs.imageRepository (default .Chart.Version .Values.jobs.imageTag)) .Values.jobs.defaultImage | quote }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
