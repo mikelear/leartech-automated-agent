@@ -72,6 +72,10 @@ class InitiativeRecord(BaseModel):
     # from `record.initiative` (which doesn't match the YAML convention
     # cleanly — see migration 0004 + the reconciler comment). NULL on old
     # rows pre-migration; the reconciler treats NULL as "skip fallback".
+    #
+    # Phase D.5.1.3 — also surfaced through the FastAPI response_model on
+    # POST/GET /initiatives so operators (and `scripts/list_runs.sh`) can
+    # see which branch each run targets without a DB round-trip.
     branch: str | None = None
 
 
