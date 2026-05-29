@@ -159,6 +159,20 @@ spec:
             secretKeyRef:
               name: {{ .Values.secrets.ghToken.secretName }}
               key: {{ .Values.secrets.ghToken.secretKey }}
+        {{- if and .Values.secrets.adminToken.secretName .Values.secrets.adminToken.secretKey }}
+        # Phase B (B.3+B.4): admin-token gate for POST /admin/cleanup.
+        # When both secretName + secretKey are set the env is rendered
+        # and the endpoint authenticates against it. Empty values (the
+        # safe default) skip the env entirely, so the endpoint's
+        # `_check_admin_token` falls into the "auth not configured" 401
+        # branch — closed by default until the materialising Secret
+        # exists on this cluster.
+        - name: LEARTECH_ADMIN_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.adminToken.secretName }}
+              key: {{ .Values.secrets.adminToken.secretKey }}
+        {{- end }}
         - name: LEARTECH_REPO_ROOT
           value: {{ .Values.leartechRepoRoot | quote }}
         - name: VERSION

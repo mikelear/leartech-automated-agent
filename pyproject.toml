@@ -58,6 +58,7 @@ ignore = ["E501"]
 "gate/mcp_servers/*" = ["S603", "S607"]
 "gate/agent/initiative.py" = ["S603", "S607"]  # shells out to `gh repo clone` for cluster-mode consumer-repo bootstrap
 "app/routers/initiatives.py" = ["S603", "S607"]  # shells out to `gh api` for Phase E.1 language detection
+"gate/admin/cleanup.py" = ["S603", "S607"]  # shells out to `gh api` for PR HEAD lookup (Phase B.4)
 "app/main.py" = ["S104"]
 # Operator CLI deliberately shells out to mmdc / pbcopy for Mermaid rendering.
 "app/agent_cli/*" = ["S108", "S603", "S607"]

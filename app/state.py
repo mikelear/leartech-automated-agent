@@ -22,7 +22,7 @@ import asyncio
 import logging
 import os
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -184,12 +184,15 @@ async def list_records() -> list[InitiativeRecord]:
     return list(_records.values())
 
 
-async def reconcile_orphaned_runs() -> int:
+async def reconcile_orphaned_runs(older_than_seconds: int | None = None) -> int:
     """Mark in-flight DB runs as 'orphaned' when no live execution backs them.
 
-    Called on FastAPI startup. A pod restart leaves DB rows in 'running' or
-    'queued' state; this function rectifies the state so API consumers can
-    detect the gap and act accordingly.
+    Called on FastAPI startup (no age filter) AND from the Phase B admin
+    cleanup endpoint (with ``older_than_seconds`` set so that recent runs
+    that legitimately haven't reached terminal yet are skipped). A pod
+    restart leaves DB rows in 'running' or 'queued' state; this function
+    rectifies the state so API consumers can detect the gap and act
+    accordingly.
 
     Liveness is determined per-runtime:
 
@@ -209,6 +212,15 @@ async def reconcile_orphaned_runs() -> int:
     re-evaluated on the next startup. False-orphaning a live Job is
     a worse outcome than briefly delaying orphan detection.
 
+    When ``older_than_seconds`` is not None, candidates whose
+    ``started_at`` is more recent than that threshold are treated as live
+    — keeping them safe from the orphan marker even when there's no
+    backing K8s Job yet (e.g. a Job that has been Pending for 30s after
+    spawn, before the pod is scheduled). The startup callsite passes None
+    because pod restart unconditionally invalidates the in-memory task
+    map; the operator cleanup passes 86400 (default 24h) so the endpoint
+    can't accidentally sweep healthy mid-run state.
+
     Returns the count of rows marked orphaned (0 when DB is not configured).
     """
     if not is_db_enabled():
@@ -220,6 +232,22 @@ async def reconcile_orphaned_runs() -> int:
     # Asyncio-runtime rows skip this entirely — they have no Job to check.
     async with db_session() as s:
         in_flight = await list_in_flight_runs(s)
+
+    # Age filter: when ``older_than_seconds`` is set, anything more recent
+    # than the cutoff is treated as live (kept out of the orphan set). This
+    # protects the in-flight steady state on a healthy pod from the admin
+    # cleanup endpoint — only stale rows are eligible to be marked orphaned.
+    if older_than_seconds is not None:
+        cutoff = datetime.now(UTC) - timedelta(seconds=older_than_seconds)
+        for record in in_flight:
+            started = record.started_at
+            # Postgres returns TZ-aware datetimes; SQLite (tests) can return
+            # naive — normalise so the comparison is meaningful.
+            if started.tzinfo is None:
+                started = started.replace(tzinfo=UTC)
+            if started > cutoff:
+                live_ids.add(record.id)
+
     job_candidates = [r for r in in_flight if r.runtime == 'job' and r.id not in live_ids]
 
     for record in job_candidates:

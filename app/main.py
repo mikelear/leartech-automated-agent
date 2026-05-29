@@ -30,7 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from app.db import dispose_engine, init_engine, is_db_enabled
 from app.db import session as db_session
 from app.db.initiative_catalog import create_initiative, get_initiative
-from app.routers import health, initiative_catalog, initiatives, introspection, lessons, mcp_admin
+from app.routers import admin, health, initiative_catalog, initiatives, introspection, lessons, mcp_admin
 from app.state import reconcile_orphaned_runs
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(name)s: %(message)s')
@@ -156,3 +156,4 @@ app.include_router(initiatives.router, prefix='/initiatives', tags=['initiatives
 app.include_router(lessons.router, prefix='/lessons', tags=['lessons'])
 app.include_router(introspection.router, tags=['introspection'])
 app.include_router(mcp_admin.router, tags=['mcp-admin'])
+app.include_router(admin.router, tags=['admin'])
