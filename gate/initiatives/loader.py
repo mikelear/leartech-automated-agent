@@ -97,15 +97,29 @@ class Initiative(BaseModel):
         ),
     )
 
-    @field_validator('language', mode='before')
+    image: str | None = Field(
+        default=None,
+        description=(
+            'Optional fully-qualified OCI image reference (Phase E.3). When set, this '
+            'wins over `language:` (E.2), repo auto-detection (E.1), and the '
+            '`LEARTECH_INITIATIVE_DEFAULT_IMAGE` env (D.4.4). Escape hatch for initiatives '
+            'that need a specific custom image — e.g. an experimental agent variant, a '
+            'pinned-version image, or a debug build — without code changes. Free-form '
+            'string; we do not validate the format because operators may target private '
+            'mirrors, digest pins (`@sha256:...`), etc. Empty string is normalised to None '
+            '(env fallback applies).'
+        ),
+    )
+
+    @field_validator('language', 'image', mode='before')
     @classmethod
-    def _normalise_language(cls, value: object) -> object:
+    def _normalise_blank_strings(cls, value: object) -> object:
         """Treat empty/whitespace-only strings as ``None``.
 
-        YAML authors sometimes leave ``language:`` set to an empty value while
-        sketching an initiative. The image picker treats absence and empty
-        identically, so normalise here rather than threading a "blank counts as
-        None" check through every consumer.
+        YAML authors sometimes leave ``language:`` / ``image:`` set to an empty
+        value while sketching an initiative. The image picker treats absence and
+        empty identically, so normalise here rather than threading a "blank counts
+        as None" check through every consumer.
         """
         if isinstance(value, str) and not value.strip():
             return None

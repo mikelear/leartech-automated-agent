@@ -87,28 +87,43 @@ def _current_runtime_mode() -> str:
     return mode if mode in {'asyncio', 'job'} else 'asyncio'
 
 
-def _pick_image_for_initiative(initiative_name: str, language: str | None = None) -> str:
+def _pick_image_for_initiative(
+    initiative_name: str,
+    language: str | None = None,
+    image_override: str | None = None,
+) -> str:
     """Return the container image to spawn for ``initiative_name``.
 
-    D.4 stub: always returns the default variant image. Phase E.1 will
-    add language-detection routing (Go/Python/Angular/Rust variants) by
-    inspecting the initiative's primary repo or honouring the YAML's
-    ``language:`` field (Phase E.2). For now, one image fits every
-    initiative — same as the asyncio path's behaviour today.
+    Precedence (highest to lowest):
 
-    The ``language`` parameter (Phase E.2) is accepted now but unused
-    until E.1's routing logic lands. Plumbing the value through today
-    means E.1 only has to touch this function's body, not every caller.
+    1. ``image_override`` (Phase E.3) — fully-qualified image ref from the
+       initiative YAML's ``image:`` field. Short-circuits all other paths.
+    2. ``language`` (Phase E.2) — routing to a per-language variant image.
+    3. Repo manifest auto-detect (Phase E.1) — inspect the primary repo.
+    4. ``LEARTECH_INITIATIVE_DEFAULT_IMAGE`` env (D.4.4 default).
 
-    Sourced from ``LEARTECH_INITIATIVE_DEFAULT_IMAGE``, which the chart
-    deployment.yaml renders to ``image.repository:image.tag`` (the API
-    pod's own image) by default — keeping API and Job code in lock-step.
-    No silent hardcoded fallback: if the env var is unset, raise so the
-    caller surfaces a 500 instead of spawning a Job that ErrImagePulls
+    D.4 stub: layers 2 + 3 are stubs that currently fall through to the
+    default; E.1 / E.2 will fill them in. Plumbing all four args today
+    means future phases only have to touch this function's body, not
+    every caller.
+
+    The ``LEARTECH_INITIATIVE_DEFAULT_IMAGE`` env is rendered by the chart
+    deployment.yaml from ``image.repository:image.tag`` (the API pod's own
+    image) — keeping API and Job code in lock-step. No silent hardcoded
+    fallback: if the env var is unset AND no override applies, raise so
+    the caller surfaces a 500 instead of spawning a Job that ErrImagePulls
     forever on a bogus default (D.4.2 incident on GCP).
     """
     _ = initiative_name  # unused until E.1
     _ = language  # accepted now, consumed by E.1's routing refactor
+
+    # Phase E.3 — per-initiative override wins over everything else.
+    # Empty string is normalised to None by the loader, but be defensive
+    # against callers that bypass the loader (e.g. constructing the model
+    # directly in tests). A whitespace-only override falls through to env.
+    if image_override and image_override.strip():
+        return image_override
+
     image = os.environ.get('LEARTECH_INITIATIVE_DEFAULT_IMAGE')
     if not image:
         raise RuntimeError(
@@ -420,7 +435,12 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
                 # Phase E.2: thread the YAML's `language:` hint to the image
                 # picker so E.1's routing refactor sees it. None / unknown values
                 # fall through to the default image — same behaviour as today.
-                image=_pick_image_for_initiative(request.initiative, language=loaded.language),
+                # Phase E.3: `image:` override wins over `language:` and env default.
+                image=_pick_image_for_initiative(
+                    request.initiative,
+                    language=loaded.language,
+                    image_override=loaded.image,
+                ),
                 namespace=namespace,
                 env=_initiative_env(),
                 secret_refs=_initiative_secret_refs(),
