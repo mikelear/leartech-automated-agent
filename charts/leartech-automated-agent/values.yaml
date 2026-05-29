@@ -189,13 +189,16 @@ jobs:
   # Override the SA used by spawned Job pods. Empty means default to
   # `<fullname>-job-runner` (rendered by job-runner-serviceaccount.yaml).
   serviceAccountName: ""
-  # Image used by spawned Job pods. Empty means deployment.yaml renders
-  # LEARTECH_INITIATIVE_DEFAULT_IMAGE as `ghcr.io/mikelear/leartech-agent-runtime:{Chart.Version}`
-  # — the agent-runtime image which carries the agent loop's deps (click,
-  # claude_agent_sdk, etc.). NOT the API image, which is a slim FastAPI
-  # build that omits them. Each release publishes both images in lockstep,
-  # so chart version == agent-runtime tag. Override only when Phase E.1
-  # introduces per-language variants.
+  # Image used by spawned Job pods. release.yaml kaniko-pushes
+  # `leartech-agent-runtime` to BOTH the cluster's home registry
+  # (${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}) AND ghcr (backup).
+  # When `defaultImage` is empty, deployment.yaml derives the registry from
+  # `.Values.image.repository` — strip the API image's `/leartech-automated-agent`
+  # suffix and append `/leartech-agent-runtime:{Chart.Version}`. The runtime
+  # image therefore lives in the same registry as the API image (which is
+  # already cluster-specific from GitOps config), so no separate per-cluster
+  # registry override is needed. Phase E.1 per-language variants set
+  # `defaultImage` explicitly to bypass the derivation.
   defaultImage: ""
   # Image pull secret attached to the job-runner ServiceAccount. Every
   # spawned Job pod inherits this so private-registry pulls work without

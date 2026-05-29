@@ -67,6 +67,8 @@ spec:
             /kaniko/executor \
               --dockerfile=Dockerfile.runtime \
               --context=/workspace/source \
+              --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:${VERSION} \
+              --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:latest \
               --destination=ghcr.io/mikelear/leartech-agent-runtime:${VERSION} \
               --destination=ghcr.io/mikelear/leartech-agent-runtime:latest \
               --build-arg=BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.30.1 \
