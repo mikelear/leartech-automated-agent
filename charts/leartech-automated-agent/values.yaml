@@ -189,10 +189,18 @@ jobs:
   # Override the SA used by spawned Job pods. Empty means default to
   # `<fullname>-job-runner` (rendered by job-runner-serviceaccount.yaml).
   serviceAccountName: ""
-  # Image used by spawned Job pods. Empty means D.3's job_runner.py
-  # defaults to the API pod's own image (same release SHA), keeping
-  # cluster-side and Job-side code in lock-step.
+  # Image used by spawned Job pods. Empty means deployment.yaml renders
+  # LEARTECH_INITIATIVE_DEFAULT_IMAGE as `{image.repository}:{image.tag}`
+  # — same image the API pod uses, ensuring code lock-step between API and
+  # Job-side. Override only when Phase E.1 introduces per-language variants.
   defaultImage: ""
+  # Image pull secret attached to the job-runner ServiceAccount. Every
+  # spawned Job pod inherits this so private-registry pulls work without
+  # per-pod imagePullSecrets plumbing. Cluster-default convention is
+  # `tekton-container-registry-auth` (same secret Tekton tasks use).
+  # Set to empty string to skip attaching (rare — only on clusters where
+  # the registry doesn't need auth).
+  imagePullSecretName: "tekton-container-registry-auth"
   # Default resources injected into the Job pod spec at spawn time.
   # Higher than API-pod defaults because initiative runs include Anthropic
   # SDK loops with substantial memory peaks (see resources comment above).

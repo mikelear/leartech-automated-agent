@@ -54,6 +54,15 @@ spec:
         - name: LEARTECH_INITIATIVE_RUNTIME
           value: {{ .Values.agent.runtime | quote }}
         {{- end }}
+        # D.4.2: image that spawned Jobs run. Defaults to the API pod's own
+        # image (same release SHA, lock-step code) — that's the safe choice
+        # for a service whose agent code lives in the same module as the API.
+        # Override `.Values.jobs.defaultImage` to point at a different image
+        # (e.g. when Phase E.1 splits per-language variants). Without this
+        # env var, job_runner.py falls back to a hardcoded ghcr stub that
+        # likely 401s on private clusters — see D.4.2 incident on GCP.
+        - name: LEARTECH_INITIATIVE_DEFAULT_IMAGE
+          value: {{ default (printf "%s:%s" .Values.image.repository .Values.image.tag) .Values.jobs.defaultImage | quote }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:

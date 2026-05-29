@@ -94,14 +94,22 @@ def _pick_image_for_initiative(initiative_name: str) -> str:
     inspecting the initiative's primary repo. For now, one image fits
     every initiative — same as the asyncio path's behaviour today.
 
-    Overridable via ``LEARTECH_INITIATIVE_DEFAULT_IMAGE`` so a cluster
-    can pin a specific tag without code changes.
+    Sourced from ``LEARTECH_INITIATIVE_DEFAULT_IMAGE``, which the chart
+    deployment.yaml renders to ``image.repository:image.tag`` (the API
+    pod's own image) by default — keeping API and Job code in lock-step.
+    No silent hardcoded fallback: if the env var is unset, raise so the
+    caller surfaces a 500 instead of spawning a Job that ErrImagePulls
+    forever on a bogus default (D.4.2 incident on GCP).
     """
     _ = initiative_name  # unused until E.1
-    return os.environ.get(
-        'LEARTECH_INITIATIVE_DEFAULT_IMAGE',
-        'ghcr.io/mikelear/leartech-agent-go:latest',
-    )
+    image = os.environ.get('LEARTECH_INITIATIVE_DEFAULT_IMAGE')
+    if not image:
+        raise RuntimeError(
+            'LEARTECH_INITIATIVE_DEFAULT_IMAGE is not set; chart deployment.yaml '
+            'is supposed to render it from jobs.defaultImage or image.{repository,tag}. '
+            'Cannot spawn Job pod without a real image reference.'
+        )
+    return image
 
 
 # Plain env vars forwarded from the API pod into spawned Job pods.
