@@ -190,9 +190,12 @@ jobs:
   # `<fullname>-job-runner` (rendered by job-runner-serviceaccount.yaml).
   serviceAccountName: ""
   # Image used by spawned Job pods. Empty means deployment.yaml renders
-  # LEARTECH_INITIATIVE_DEFAULT_IMAGE as `{image.repository}:{image.tag}`
-  # — same image the API pod uses, ensuring code lock-step between API and
-  # Job-side. Override only when Phase E.1 introduces per-language variants.
+  # LEARTECH_INITIATIVE_DEFAULT_IMAGE as `ghcr.io/mikelear/leartech-agent-runtime:{Chart.Version}`
+  # — the agent-runtime image which carries the agent loop's deps (click,
+  # claude_agent_sdk, etc.). NOT the API image, which is a slim FastAPI
+  # build that omits them. Each release publishes both images in lockstep,
+  # so chart version == agent-runtime tag. Override only when Phase E.1
+  # introduces per-language variants.
   defaultImage: ""
   # Image pull secret attached to the job-runner ServiceAccount. Every
   # spawned Job pod inherits this so private-registry pulls work without
