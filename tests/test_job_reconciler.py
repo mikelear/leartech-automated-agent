@@ -231,3 +231,161 @@ async def test_reconcile_once_handles_log_fetch_failure_gracefully(
     assert kwargs['status'] == 'failed'
     assert kwargs['turns'] is None
     assert kwargs['cost_usd'] is None
+
+
+# ---------------------------------------------------------------------------
+# D.5.2 — self_retrospect hook on Job-mode terminal+success
+# ---------------------------------------------------------------------------
+#
+# The asyncio path's `_run_and_track` fires `_run_self_retrospect` after
+# writing status='complete'. Job-mode runs reach terminal state through the
+# reconciler (D.4 task=None branch never executes `_run_and_track`), so
+# without an explicit hook here the post-success Issue is never filed —
+# silent regression vs the asyncio path. These tests pin the contract:
+#
+#   - complete   -> retrospect fires (with run_id)
+#   - failed     -> retrospect does NOT fire (only success runs)
+#   - already-terminal row -> retrospect does NOT fire (idempotent skip)
+#   - retrospect raises -> reconciler logs + continues; row update still
+#     succeeds; next pass doesn't retry retrospect (idempotent)
+
+
+def _patch_k8s_for_reconcile(
+    batch: Any, core: Any, mock_config: Any, mock_api_client_cls: Any, mock_client_mod: Any
+) -> None:
+    """Common boilerplate to wire the K8s mocks for reconcile_once."""
+    mock_config.load_incluster_config = MagicMock()
+    mock_api_client_cls.return_value.__aenter__ = AsyncMock(return_value=MagicMock())
+    mock_api_client_cls.return_value.__aexit__ = AsyncMock(return_value=None)
+    mock_client_mod.BatchV1Api.return_value = batch
+    mock_client_mod.CoreV1Api.return_value = core
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_runs_self_retrospect_on_complete(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """terminal=='complete' on a non-terminal DB row must trigger
+    _run_self_retrospect with the run_id (Job-mode parity with _run_and_track)."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-success-1', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(
+            items=[SimpleNamespace(metadata=SimpleNamespace(name='run-success-1-pod'))],
+        ),
+    )
+    core.read_namespaced_pod_log = AsyncMock(
+        return_value='--- turns=3  in=10  out=20  cost=$0.05  pr=42\n',
+    )
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch('gate.agent.job_reconciler.get_record', new=AsyncMock(return_value=SimpleNamespace(status='running'))),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()) as mock_retrospect,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_update.assert_awaited_once()
+    mock_retrospect.assert_awaited_once_with('run-success-1')
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_does_not_run_self_retrospect_on_failed(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """terminal=='failed' must NOT trigger retrospect — the asyncio path only
+    fires it when exit_code==0, and Job-mode follows the same contract."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-failed-1', [('Failed', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='p'))]),
+    )
+    core.read_namespaced_pod_log = AsyncMock(return_value='--- turns=2  in=0  out=0  cost=$0.0\n')
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch('gate.agent.job_reconciler.get_record', new=AsyncMock(return_value=SimpleNamespace(status='running'))),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()) as mock_retrospect,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_update.assert_awaited_once()
+    assert mock_update.await_args.kwargs['status'] == 'failed'
+    mock_retrospect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_already_terminal_row_does_not_run_retrospect(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """A row already at status='complete' is skipped before reaching the
+    retrospect hook — idempotency guarantee. Repeated reconciler passes on
+    the same terminal Job must not re-fire the LLM call."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-already-complete', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch('gate.agent.job_reconciler.get_record', new=AsyncMock(return_value=SimpleNamespace(status='complete'))),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()) as mock_retrospect,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 0
+    mock_update.assert_not_called()
+    mock_retrospect.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_swallows_self_retrospect_exception(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """If _run_self_retrospect raises (LLM down, GH 5xx, etc.), the reconciler
+    must log + continue: the row update has already succeeded and the next
+    pass will see the row as terminal and skip retrospect entirely (no retry
+    loop, no resurrected 'queued' state)."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-retrospect-blows', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='p'))]),
+    )
+    core.read_namespaced_pod_log = AsyncMock(
+        return_value='--- turns=4  in=0  out=0  cost=$0.10  pr=99\n',
+    )
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch('gate.agent.job_reconciler.get_record', new=AsyncMock(return_value=SimpleNamespace(status='running'))),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch(
+            'gate.agent.job_reconciler._run_self_retrospect',
+            new=AsyncMock(side_effect=RuntimeError('llm provider down')),
+        ) as mock_retrospect,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        # Must NOT raise — best-effort retrospect.
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_update.assert_awaited_once()
+    mock_retrospect.assert_awaited_once_with('run-retrospect-blows')

@@ -37,6 +37,7 @@ from typing import Any
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client.api_client import ApiClient
 
+from app.routers.initiatives import _run_self_retrospect
 from app.state import get as get_record
 from app.state import update
 
@@ -171,6 +172,20 @@ async def reconcile_once(namespace: str) -> int:
                 cost,
                 pr_number,
             )
+            # Post-success retrospective for Job-mode runs (D.5.2).
+            # The asyncio path's `_run_and_track` already fires this on
+            # successful completion; Job-mode goes through the reconciler
+            # and would otherwise skip the post-success Issue filing.
+            # Idempotency: the `record.status in TERMINAL_STATUSES` guard
+            # above means each run flips non-terminal -> terminal at most
+            # once per reconcile_once invocation, so retrospect fires at
+            # most once too. Best-effort — never let a retrospect failure
+            # poison the reconciler loop (the run row is already patched).
+            if terminal == 'complete':
+                try:
+                    await _run_self_retrospect(run_id)
+                except Exception as exc:  # noqa: BLE001 — best-effort
+                    logger.warning('reconciler: self_retrospect failed for %s: %s', run_id, exc)
     return updates
 
 
