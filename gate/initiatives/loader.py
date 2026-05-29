@@ -37,10 +37,9 @@ errors with a clear message when `len(repos) > 1` until that slice lands.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class RepoTarget(BaseModel):
@@ -87,15 +86,30 @@ class Initiative(BaseModel):
 
     goal: str = Field(min_length=1, description='What the agent must accomplish. Constraints belong here verbatim.')
 
-    language: Literal['go', 'python', 'angular', 'rust', 'mixed'] | None = Field(
+    language: str | None = Field(
         default=None,
         description=(
-            'Optional language hint. Today informational only (the agent already auto-detects '
-            'from manifests). Future image-routing work — Session 3+ — will use this to dispatch '
-            'runs to the right `leartech-agent-<lang>` image. Leaving unset is fine; agent will '
-            'detect at clone time.'
+            'Optional language hint, used by Phase E.1 image-routing to dispatch the run to the '
+            'right `leartech-agent-<lang>` image. Any string is accepted at parse time — the '
+            'image picker (`_pick_image_for_initiative`) decides what values it knows; unknown '
+            'or omitted values fall back to repo auto-detection / the default image. Leaving '
+            'unset (or empty string) is the safe default.'
         ),
     )
+
+    @field_validator('language', mode='before')
+    @classmethod
+    def _normalise_language(cls, value: object) -> object:
+        """Treat empty/whitespace-only strings as ``None``.
+
+        YAML authors sometimes leave ``language:`` set to an empty value while
+        sketching an initiative. The image picker treats absence and empty
+        identically, so normalise here rather than threading a "blank counts as
+        None" check through every consumer.
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
 
     gate_marks: list[str] = Field(
         default_factory=list,

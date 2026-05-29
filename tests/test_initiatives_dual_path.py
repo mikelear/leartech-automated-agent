@@ -116,6 +116,23 @@ def test_pick_image_raises_when_env_unset(monkeypatch: pytest.MonkeyPatch) -> No
         _pick_image_for_initiative('any-name')
 
 
+def test_pick_image_accepts_language_kwarg_no_behaviour_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Phase E.2: the picker accepts an optional ``language`` kwarg. Until E.1's
+    routing refactor lands, behaviour is unchanged regardless of value — the
+    kwarg is plumbed through so E.1 only has to touch the function body, not
+    every caller."""
+    monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/default:1.0')
+    # None (default), known, and unknown language values all return the default
+    # image at the D.4 stub stage. Unknown languages must NOT raise here — the
+    # picker is the only place that decides what's "known".
+    assert _pick_image_for_initiative('any-name') == 'ghcr.io/foo/default:1.0'
+    assert _pick_image_for_initiative('any-name', language=None) == 'ghcr.io/foo/default:1.0'
+    assert _pick_image_for_initiative('any-name', language='angular') == 'ghcr.io/foo/default:1.0'
+    assert _pick_image_for_initiative('any-name', language='kotlin') == 'ghcr.io/foo/default:1.0'
+
+
 # ---------------------------------------------------------------------------
 # POST /initiatives — asyncio path (default, today's behaviour)
 # ---------------------------------------------------------------------------
