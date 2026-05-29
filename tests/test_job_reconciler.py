@@ -22,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from gate.agent.job_reconciler import (
+    _build_job_crash_sticky_body,
     _job_terminal_state,
     _parse_summary,
     reconcile_once,
@@ -214,7 +215,10 @@ async def test_reconcile_once_handles_log_fetch_failure_gracefully(
         patch('gate.agent.job_reconciler.config') as mock_config,
         patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
         patch('gate.agent.job_reconciler.client') as mock_client_mod,
-        patch('gate.agent.job_reconciler.get_record', new=AsyncMock(return_value=SimpleNamespace(status='queued'))),
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(return_value=SimpleNamespace(status='queued', pr_number=None, pr_repo=None)),
+        ),
         patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
     ):
         mock_config.load_incluster_config = MagicMock()
@@ -313,7 +317,10 @@ async def test_reconcile_once_does_not_run_self_retrospect_on_failed(
         patch('gate.agent.job_reconciler.config') as mock_config,
         patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
         patch('gate.agent.job_reconciler.client') as mock_client_mod,
-        patch('gate.agent.job_reconciler.get_record', new=AsyncMock(return_value=SimpleNamespace(status='running'))),
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(return_value=SimpleNamespace(status='running', pr_number=None, pr_repo=None)),
+        ),
         patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
         patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()) as mock_retrospect,
     ):
@@ -389,3 +396,301 @@ async def test_reconcile_once_swallows_self_retrospect_exception(
     assert count == 1
     mock_update.assert_awaited_once()
     mock_retrospect.assert_awaited_once_with('run-retrospect-blows')
+
+
+# ---------------------------------------------------------------------------
+# D.crash-detection — crash sticky on hard-terminate (OOMKilled, Error, etc.)
+# ---------------------------------------------------------------------------
+#
+# The preStop hook (D.7) only fires on graceful SIGTERM. For hard pod kills
+# the reconciler is the only signal path that can surface the crash to the
+# PR thread. Tests pin the contract:
+#
+#   - failed + OOMKilled + record has PR → sticky posted, body contains
+#     "OOMKilled" + log tail
+#   - failed + record.pr_number is None  → no sticky posted (only logged)
+#   - failed + pod log unavailable       → partial sticky still posted
+#   - complete (not failed)              → NO crash sticky path entered
+#   - failed + gh post raises            → reconciler continues; row update
+#                                          + retrospect path unaffected
+
+
+def _make_failed_pod(name: str, exit_reason: str) -> SimpleNamespace:
+    """Build a pod-like object whose containerStatuses[0] reports a terminal
+    state with the given exit reason — matches the K8s shape that
+    ``_fetch_pod_crash_info`` reads."""
+    return SimpleNamespace(
+        metadata=SimpleNamespace(name=name),
+        status=SimpleNamespace(
+            container_statuses=[
+                SimpleNamespace(
+                    state=SimpleNamespace(
+                        terminated=SimpleNamespace(reason=exit_reason),
+                    ),
+                ),
+            ],
+        ),
+    )
+
+
+def test_build_job_crash_sticky_body_includes_marker_reason_and_log_tail() -> None:
+    body = _build_job_crash_sticky_body(
+        run_id='abc123',
+        exit_reason='OOMKilled',
+        log_tail='line a\nline b\nline c',
+    )
+    assert '<!-- leartech-agent-run -->' in body
+    assert '## ⚠ Agent Job pod crashed' in body
+    assert 'abc123' in body
+    assert 'OOMKilled' in body
+    assert 'line a' in body
+    assert 'line c' in body
+
+
+def test_build_job_crash_sticky_body_handles_empty_log_tail() -> None:
+    """Pod GC'd or log driver flaked → sticky still rendered with a placeholder
+    rather than dropping the comment entirely. The exit reason carries the
+    primary signal anyway."""
+    body = _build_job_crash_sticky_body(run_id='r1', exit_reason='Error', log_tail='')
+    assert '(no log output captured)' in body
+    assert 'Error' in body
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_posts_crash_sticky_on_oomkilled(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """OOMKilled + parsed pr=N + record.pr_repo set → crash sticky posted,
+    body cites OOMKilled and contains the captured log tail."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-oom-1', [('Failed', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    failed_pod = _make_failed_pod('run-oom-1-pod', 'OOMKilled')
+    core.list_namespaced_pod = AsyncMock(return_value=SimpleNamespace(items=[failed_pod]))
+    core.read_namespaced_pod_log = AsyncMock(
+        return_value='compiling...\nMemoryError: out of memory\n--- turns=3  in=0  out=0  cost=$0.05  pr=99\n',
+    )
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(status='running', pr_number=None, pr_repo='mikelear/example-svc'),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()),
+        patch('gate.agent.job_reconciler._post_crash_sticky') as mock_post,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_post.assert_called_once()
+    kwargs = mock_post.call_args.kwargs
+    assert kwargs['qualified_repo'] == 'mikelear/example-svc'
+    assert kwargs['pr_number'] == 99  # picked up from the parsed summary line
+    body = kwargs['body']
+    assert 'OOMKilled' in body
+    assert 'MemoryError: out of memory' in body
+    assert 'run-oom-1' in body
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_skips_crash_sticky_when_no_pr_resolved(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """Failed Job with neither parsed-pr nor record.pr_number → don't post a
+    crash sticky (no PR to post to). Row update still happens so the catalog
+    flips queued → failed; the crash is just silent on the GH side."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-no-pr', [('Failed', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[_make_failed_pod('p', 'Error')]),
+    )
+    # Log carries no `pr=N` summary line — agent crashed before opening a PR.
+    core.read_namespaced_pod_log = AsyncMock(return_value='boom\n')
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(return_value=SimpleNamespace(status='running', pr_number=None, pr_repo=None)),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._post_crash_sticky') as mock_post,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_update.assert_awaited_once()
+    mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_posts_partial_crash_sticky_when_log_unavailable(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """Pod log endpoint flakes during crash-info fetch → sticky still posts
+    with the placeholder log block. The row update is independent (uses the
+    earlier 200-line tail) and already succeeded above."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-log-flake', [('Failed', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    failed_pod = _make_failed_pod('run-log-flake-pod', 'OOMKilled')
+
+    # First call: succeeds (for the summary-parse path with tail=200).
+    # Second call: raises (for the crash-info path with tail=50).
+    pod_calls = AsyncMock(side_effect=[SimpleNamespace(items=[failed_pod]), SimpleNamespace(items=[failed_pod])])
+    log_calls = AsyncMock(
+        side_effect=['--- turns=3  in=0  out=0  cost=$0.05  pr=77\n', RuntimeError('logs unreadable')],
+    )
+    core.list_namespaced_pod = pod_calls
+    core.read_namespaced_pod_log = log_calls
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(status='running', pr_number=None, pr_repo='mikelear/example-svc'),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()),
+        patch('gate.agent.job_reconciler._post_crash_sticky') as mock_post,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_post.assert_called_once()
+    body = mock_post.call_args.kwargs['body']
+    # Partial sticky: exit reason captured (pod object came through), log tail empty.
+    assert 'OOMKilled' in body
+    assert '(no log output captured)' in body
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_does_not_post_crash_sticky_on_complete(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """The complete branch must NOT invoke the crash sticky path — even when a
+    PR is resolved. Crash sticky is exclusively a failed-branch signal."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-complete-1', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='p'))]),
+    )
+    core.read_namespaced_pod_log = AsyncMock(
+        return_value='--- turns=3  in=0  out=0  cost=$0.05  pr=42\n',
+    )
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(status='running', pr_number=None, pr_repo='mikelear/example-svc'),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()),
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()),
+        patch('gate.agent.job_reconciler._post_crash_sticky') as mock_post,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_swallows_crash_sticky_post_failure(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """If `_post_crash_sticky` raises (gh down, network blip), the reconciler
+    must log + continue. The row has already flipped to 'failed'; the next
+    pass sees a terminal row and short-circuits — no resurrected 'running'
+    state, no retry storm."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-gh-down', [('Failed', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[_make_failed_pod('p', 'OOMKilled')]),
+    )
+    core.read_namespaced_pod_log = AsyncMock(
+        return_value='--- turns=3  in=0  out=0  cost=$0.05  pr=55\n',
+    )
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(status='running', pr_number=None, pr_repo='mikelear/example-svc'),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch(
+            'gate.agent.job_reconciler._post_crash_sticky',
+            side_effect=RuntimeError('gh API 500'),
+        ) as mock_post,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        # Must not raise.
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_update.assert_awaited_once()
+    mock_post.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_uses_record_pr_number_when_log_lacks_pr(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """If the parsed summary has no `pr=N` (e.g. agent crashed right after
+    opening the PR but before the final summary), fall back to whatever's
+    already on the DB row. Maximises sticky coverage."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-fallback-pr', [('Failed', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[_make_failed_pod('p', 'Error')]),
+    )
+    # Summary line WITHOUT pr=N — pr_number from parsing is None.
+    core.read_namespaced_pod_log = AsyncMock(return_value='--- turns=2  in=0  out=0  cost=$0.0\n')
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                # record.pr_number IS set — earlier write path captured it.
+                return_value=SimpleNamespace(status='running', pr_number=123, pr_repo='mikelear/example-svc'),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()),
+        patch('gate.agent.job_reconciler._post_crash_sticky') as mock_post,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    mock_post.assert_called_once()
+    assert mock_post.call_args.kwargs['pr_number'] == 123
