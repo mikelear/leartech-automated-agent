@@ -35,6 +35,14 @@ from kubernetes_asyncio.client.api_client import ApiClient
 DEFAULT_SERVICE_ACCOUNT = 'leartech-automated-agent-job-runner'
 DEFAULT_TTL_SECONDS_AFTER_FINISHED = 86400  # 24 h — matches values.yaml default
 
+# Phase D.7 — grace window for the preStop hook to post a "cancelled" sticky
+# comment to the PR before K8s SIGKILLs the pod. The hook itself is fast
+# (one gh API call) but we give 30s of headroom for transient network blips
+# / gh CLI retries. Cancel from the API pod must NOT block longer than this
+# either — operators expect ``POST /initiatives/{id}/cancel`` to return
+# promptly with the row already marked 'cancelled' in the DB.
+DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS = 30
+
 
 def _default_resources() -> dict[str, dict[str, str]]:
     """Fallback resource policy when caller doesn't override.
@@ -61,7 +69,9 @@ def _build_job_manifest(
     secret_refs: dict[str, dict[str, str]],
     resources: dict[str, dict[str, str]],
     yaml_body: str,
+    pr_repo: str = '',
     ttl_seconds_after_finished: int = DEFAULT_TTL_SECONDS_AFTER_FINISHED,
+    termination_grace_period_seconds: int = DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS,
 ) -> dict[str, Any]:
     """Construct the V1Job dict submitted to batch/v1.
 
@@ -84,9 +94,16 @@ def _build_job_manifest(
 
     # env entries: plain `value` form for env, `valueFrom.secretKeyRef` for secret_refs.
     env_list: list[dict[str, Any]] = [{'name': name, 'value': value} for name, value in env.items()]
+    # D.7 — propagate the qualified repo so the preStop hook can post a
+    # "cancelled" sticky to the PR. PR number isn't known at spawn time
+    # (resolved by run_initiative near end-of-run), so the agent writes it
+    # to /tmp/run_pr_number mid-run and the preStop sh wrapper reads it
+    # from there. Empty string is the well-defined "no repo to post to"
+    # case — crash_sticky.py treats it the same as missing.
+    env_list.append({'name': 'LEARTECH_PR_REPO', 'value': pr_repo})
     # Inline the YAML body so the Job pod can resolve the initiative
-    # without DB access. Keep this last so it sorts predictably at the
-    # tail of the env list in test assertions.
+    # without DB access. Keep this last (before secret_refs) so it sorts
+    # predictably at the tail of the env list in test assertions.
     env_list.append({'name': 'LEARTECH_INITIATIVE_YAML', 'value': yaml_body})
     for name, ref in secret_refs.items():
         env_list.append(
@@ -117,6 +134,7 @@ def _build_job_manifest(
                         'runAsUser': 1000,
                         'fsGroup': 1000,
                     },
+                    'terminationGracePeriodSeconds': termination_grace_period_seconds,
                     'containers': [
                         {
                             'name': 'agent',
@@ -132,6 +150,29 @@ def _build_job_manifest(
                                 'printf "%s" "$LEARTECH_INITIATIVE_YAML" > /tmp/initiative.yaml '
                                 '&& exec python -m gate.agent.initiative /tmp/initiative.yaml'
                             ],
+                            # D.7 — preStop hook posts a "cancelled" sticky to the PR
+                            # before K8s SIGKILLs the pod. Reads the PR number from
+                            # /tmp/run_pr_number (written by run_initiative when it
+                            # resolves the PR mid-run); LEARTECH_PR_REPO is set at
+                            # spawn time. Wrapped in `|| true` so a failure here never
+                            # blocks pod termination — we're already shutting down.
+                            # Uses sh expansion `$(cat ...)` so missing file → empty
+                            # string → crash_sticky skips gracefully.
+                            'lifecycle': {
+                                'preStop': {
+                                    'exec': {
+                                        'command': [
+                                            'sh',
+                                            '-c',
+                                            'python -m gate.agent.crash_sticky '
+                                            '--reason cancelled '
+                                            '--repo "$LEARTECH_PR_REPO" '
+                                            '--pr "$(cat /tmp/run_pr_number 2>/dev/null || true)" '
+                                            '|| true',
+                                        ],
+                                    },
+                                },
+                            },
                             'securityContext': {
                                 'runAsNonRoot': True,
                                 'runAsUser': 1000,
@@ -166,10 +207,12 @@ async def spawn_initiative_job(
     namespace: str,
     env: dict[str, str],
     yaml_body: str,
+    pr_repo: str = '',
     secret_refs: dict[str, dict[str, str]] | None = None,
     service_account: str = DEFAULT_SERVICE_ACCOUNT,
     resources: dict[str, dict[str, str]] | None = None,
     ttl_seconds_after_finished: int = DEFAULT_TTL_SECONDS_AFTER_FINISHED,
+    termination_grace_period_seconds: int = DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS,
 ) -> tuple[str, str]:
     """Spawn a K8s Job for one initiative run.
 
@@ -203,7 +246,9 @@ async def spawn_initiative_job(
             secret_refs=secret_refs or {},
             resources=resources or _default_resources(),
             yaml_body=yaml_body,
+            pr_repo=pr_repo,
             ttl_seconds_after_finished=ttl_seconds_after_finished,
+            termination_grace_period_seconds=termination_grace_period_seconds,
         )
         resp = await batch.create_namespaced_job(namespace=namespace, body=manifest)
         return resp.metadata.name, resp.metadata.namespace
