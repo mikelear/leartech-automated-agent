@@ -63,11 +63,10 @@ def routing_env(monkeypatch: pytest.MonkeyPatch) -> None:
     ('language', 'expected'),
     [
         ('go', 'leartech-agent-go'),
-        ('python', 'leartech-agent-python'),
-        ('angular', 'leartech-agent-angular'),
-        ('node', 'leartech-agent-node'),
+        ('python', 'leartech-agent-py'),
+        ('angular', 'leartech-agent-ng'),
+        ('node', 'leartech-agent-ng'),
         ('rust', 'leartech-agent-rust'),
-        ('dotnet', 'leartech-agent-dotnet'),
     ],
 )
 def test_image_for_language_known_values(language: str, expected: str) -> None:
@@ -75,9 +74,14 @@ def test_image_for_language_known_values(language: str, expected: str) -> None:
     assert _image_for_language(language) == expected
 
 
+def test_image_for_language_dotnet_returns_none() -> None:
+    """dotnet image isn't published yet — caller falls back to default."""
+    assert _image_for_language('dotnet') is None
+
+
 def test_image_for_language_is_case_insensitive() -> None:
     """YAML authors sometimes write ``Python`` or ``GO`` — accept those too."""
-    assert _image_for_language('Python') == 'leartech-agent-python'
+    assert _image_for_language('Python') == 'leartech-agent-py'
     assert _image_for_language('GO') == 'leartech-agent-go'
     assert _image_for_language('  rust  ') == 'leartech-agent-rust'
 
@@ -286,7 +290,7 @@ def test_compose_image_url_strips_trailing_slash(monkeypatch: pytest.MonkeyPatch
     """Defensive: an operator-set prefix ending in ``/`` doesn't double-slash."""
     monkeypatch.setenv('LEARTECH_JOB_IMAGE_REGISTRY_PREFIX', 'ghcr.io/leartech-org/')
     monkeypatch.setenv('LEARTECH_JOB_IMAGE_TAG', '1.2.3')
-    assert _compose_image_url('leartech-agent-python') == 'ghcr.io/leartech-org/leartech-agent-python:1.2.3'
+    assert _compose_image_url('leartech-agent-py') == 'ghcr.io/leartech-org/leartech-agent-py:1.2.3'
 
 
 def test_compose_image_url_returns_none_when_prefix_missing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -323,7 +327,7 @@ def test_pick_image_explicit_language_python_bypasses_detection(
         language='python',
         qualified_repo='mikelear/some-go-svc',
     )
-    assert image == 'ghcr.io/leartech-org/leartech-agent-python:1.2.3'
+    assert image == 'ghcr.io/leartech-org/leartech-agent-py:1.2.3'
 
 
 def test_pick_image_routes_to_go_for_a_go_repo(routing_env: None) -> None:
@@ -348,7 +352,7 @@ def test_pick_image_routes_to_angular_for_an_angular_repo(routing_env: None) -> 
             'any-name',
             qualified_repo='mikelear/leartech-auth-ui',
         )
-    assert image == 'ghcr.io/leartech-org/leartech-agent-angular:1.2.3'
+    assert image == 'ghcr.io/leartech-org/leartech-agent-ng:1.2.3'
 
 
 def test_pick_image_unknown_repo_falls_back_to_env_default(routing_env: None) -> None:
@@ -396,7 +400,7 @@ def test_pick_image_explicit_language_wins_over_repo_autodetect(
         language='node',
         qualified_repo='mikelear/some-go-svc',
     )
-    assert image == 'ghcr.io/leartech-org/leartech-agent-node:1.2.3'
+    assert image == 'ghcr.io/leartech-org/leartech-agent-ng:1.2.3'
 
 
 def test_pick_image_unknown_language_falls_back_to_default(routing_env: None) -> None:
