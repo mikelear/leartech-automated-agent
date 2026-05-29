@@ -24,11 +24,17 @@ rules:
 - apiGroups: [""]
   resources: ["pods", "pods/log"]
   verbs: ["get", "list", "watch"]
-# Tekton read for future MCP tools (B.2-equivalent kubectl-based monitoring).
-# Read-only — we never mutate PipelineRuns from the agent.
+# Tekton read for MCP tools (B.2-equivalent kubectl-based monitoring).
+# Read across pipelineruns + taskruns; PATCH on pipelineruns only — the
+# Phase B.4 admin cleanup writes `spec.status: PipelineRunCancelled` on
+# superseded runs. TaskRuns are still read-only (Tekton cascades the
+# cancel to them when the parent PipelineRun is patched).
 - apiGroups: ["tekton.dev"]
   resources: ["pipelineruns", "taskruns"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["tekton.dev"]
+  resources: ["pipelineruns"]
+  verbs: ["patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding

@@ -77,6 +77,17 @@ secrets:
   ghToken:
     secretName: tekton-git
     secretKey: password
+  # Phase B (B.3+B.4): admin-token-gated POST /admin/cleanup endpoint.
+  # When set, deployment.yaml plumbs LEARTECH_ADMIN_TOKEN from this
+  # secretKeyRef. When empty (default), the env var isn't rendered and
+  # the endpoint returns 401 to every request — safe default until
+  # GitOps PRs populate the AKV/GSM source paths and the in-namespace
+  # Secret. Same convention as the other entries in this block: the
+  # chart references an existing Secret name; ExternalSecret (operator
+  # PRs out of band) materialises it per-cluster.
+  adminToken:
+    secretName: ""
+    secretKey: ""
 
 # ExternalSecret rendering — both clusters' shape kept here so the chart is
 # multi-cluster-ready out of the box. Activate one via the cluster's
