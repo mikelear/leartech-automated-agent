@@ -24,6 +24,7 @@ from pathlib import Path
 from sqlite3 import ProgrammingError as SQLiteProgrammingError
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import ProgrammingError as SAProgrammingError
 
@@ -468,6 +469,87 @@ async def get_initiative_status(initiative_id: str) -> InitiativeRecord:
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
     return record
+
+
+@router.get('/{initiative_id}/logs', response_class=PlainTextResponse)
+async def get_initiative_logs(initiative_id: str, tail_lines: int = 500) -> PlainTextResponse:
+    """Tail logs for a run.
+
+    Phase D.6 — surfaces the spawned Job pod's stdout/stderr through the same
+    API as the catalog so operators don't need direct ``kubectl logs`` access
+    via ``scripts/tail_agent_log.sh``.
+
+    For ``runtime=job`` runs: looks up the run's pod via the
+    ``leartech.io/run-id=<id>`` label in ``POD_NAMESPACE`` and streams the
+    tail back as text/plain. Uses the same in-cluster credentials the
+    job_reconciler uses (D.5) — the API pod's ServiceAccount is bound to
+    the job-runner Role which already grants ``pods/log get``.
+
+    For ``runtime=asyncio`` runs: returns 501. These runs share the API
+    pod's stdout/stderr so per-run isolation isn't possible from here;
+    operators can use ``scripts/tail_agent_log.sh --run <id>`` directly
+    against the API pod.
+
+    NOTE: ``kubernetes_asyncio.config.load_incluster_config`` is synchronous
+    in this library (do NOT await it). The async sibling is
+    ``load_kube_config`` (file-based). See PR #50 root cause + the
+    ``feedback_kubernetes_asyncio_load_incluster_is_sync`` memory.
+    """
+    record = await get_record(initiative_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
+
+    if record.runtime != 'job':
+        raise HTTPException(
+            status_code=501,
+            detail=(
+                f'Log streaming endpoint only supports runtime=job runs '
+                f'(this run is runtime={record.runtime!r}). For asyncio-mode '
+                'runs, use scripts/tail_agent_log.sh --run <id> against the API pod.'
+            ),
+        )
+
+    namespace = os.environ.get('POD_NAMESPACE')
+    if not namespace:
+        raise HTTPException(
+            status_code=500,
+            detail='POD_NAMESPACE env var is required to read Job pod logs; '
+            'chart deployment must inject it via fieldRef metadata.namespace.',
+        )
+
+    # Late import: kubernetes_asyncio is only needed on this code path; keeps
+    # `from app.routers.initiatives import ...` cheap for in-process tests
+    # that don't exercise the logs endpoint.
+    from kubernetes_asyncio import client as k8s_client
+    from kubernetes_asyncio import config as k8s_config
+    from kubernetes_asyncio.client.api_client import ApiClient
+
+    k8s_config.load_incluster_config()  # synchronous — do NOT await
+    try:
+        async with ApiClient() as api:
+            core = k8s_client.CoreV1Api(api)
+            pods = await core.list_namespaced_pod(
+                namespace=namespace,
+                label_selector=f'leartech.io/run-id={initiative_id}',
+            )
+            if not pods.items:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f'No pod found for run-id {initiative_id!r} in namespace {namespace!r}',
+                )
+            pod_name = pods.items[0].metadata.name
+            log_text: str = await core.read_namespaced_pod_log(
+                name=pod_name,
+                namespace=namespace,
+                tail_lines=tail_lines,
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:  # noqa: BLE001 — surface K8s API failures as 502 so operators see them
+        logger.exception('logs fetch failed for initiative %s', initiative_id)
+        raise HTTPException(status_code=502, detail=f'Failed to read pod logs: {exc}') from exc
+
+    return PlainTextResponse(content=log_text)
 
 
 @router.post('/{initiative_id}/cancel', response_model=InitiativeRecord)
