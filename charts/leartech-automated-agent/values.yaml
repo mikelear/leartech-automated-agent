@@ -134,8 +134,12 @@ leartechRepoRoot: /workspace
 #   secrets are namespace-scoped — workloads here can't reference it.
 #   Instead we keep a parallel DSN string in Vault/GSM that ESO syncs
 #   into this namespace as `<dsn.secretName>` with key `<dsn.secretKey>`.
-# - migrations-job applies files/migrations/*.sql as a Helm post-install
-#   hook, reading the same in-namespace DSN secret.
+# - The deployment's `migrations` initContainer applies
+#   files/migrations/*.sql on every pod start, reading the same
+#   in-namespace DSN secret. SQL files are idempotent (CREATE TABLE
+#   IF NOT EXISTS / ADD COLUMN IF NOT EXISTS) so repeated application
+#   is safe. This replaced a Helm post-install/post-upgrade hook
+#   that didn't fire reliably under JX3's helmfile cascade.
 #
 # The Vault/GSM DSN password must match what leartech-platform-postgres
 # uses for the role (same source key in their chart). No automatic
@@ -155,8 +159,11 @@ postgresql:
   # this chart via the CR below.
   clusterName: leartech-staging
   databaseName: leartech_automated_agent
-  # post-install/post-upgrade hook applies schema migrations from
-  # files/migrations/*.sql in lexical order. Idempotent (IF NOT EXISTS).
+  # When true, the API Deployment renders an initContainer that applies
+  # files/migrations/*.sql in lexical order on every pod start. The SQL
+  # files are idempotent (IF NOT EXISTS) so repeated application is safe.
+  # Replaced the prior Helm post-install/post-upgrade hook, which didn't
+  # fire reliably under JX3's helmfile-based cascade.
   runMigrations: true
   # DSN secret materialised in this namespace by the ExternalSecret in
   # templates/externalsecret-postgres-db.yaml. Both the deployment and the
