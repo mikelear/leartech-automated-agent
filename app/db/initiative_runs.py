@@ -180,6 +180,24 @@ async def update_run(
     return InitiativeRunRecord.from_row(row)
 
 
+async def list_in_flight_runs(session: AsyncSession) -> list[InitiativeRunRecord]:
+    """Return all runs with status in ('queued', 'running') — no limit applied.
+
+    Used by orphan reconciliation to enumerate candidates BEFORE marking
+    them orphaned, so callers can per-record decide whether the run is
+    actually live (e.g. by checking K8s for a backing Job pod — see
+    ``app.state.reconcile_orphaned_runs``).
+
+    The returned records preserve ``runtime`` and ``job_name`` so the
+    caller can branch on runtime when deciding the orphan-detection
+    strategy: asyncio-runtime rows are validated against in-memory
+    ``_tasks``; job-runtime rows must be validated against K8s.
+    """
+    stmt = select(InitiativeRunRow).where(InitiativeRunRow.status.in_(['queued', 'running']))
+    result = await session.execute(stmt)
+    return [InitiativeRunRecord.from_row(row) for row in result.scalars()]
+
+
 async def mark_orphaned_runs(session: AsyncSession, live_ids: set[str]) -> int:
     """Mark in-flight DB runs as 'orphaned' if their id is NOT in `live_ids`.
 
