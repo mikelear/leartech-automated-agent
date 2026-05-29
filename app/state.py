@@ -19,6 +19,8 @@ can detect the gap.
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -31,10 +33,13 @@ from app.db.initiative_runs import (
     InitiativeRunRecord,
     create_run,
     get_run,
+    list_in_flight_runs,
     list_runs,
     mark_orphaned_runs,
     update_run,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class InitiativeRecord(BaseModel):
@@ -180,15 +185,96 @@ async def list_records() -> list[InitiativeRecord]:
 
 
 async def reconcile_orphaned_runs() -> int:
-    """Mark in-flight DB runs as 'orphaned' if no live asyncio.Task exists.
+    """Mark in-flight DB runs as 'orphaned' when no live execution backs them.
 
     Called on FastAPI startup. A pod restart leaves DB rows in 'running' or
-    'queued' state but with no Task in `_tasks`. This function rectifies
-    the state so API consumers can detect the gap and act accordingly.
+    'queued' state; this function rectifies the state so API consumers can
+    detect the gap and act accordingly.
+
+    Liveness is determined per-runtime:
+
+    - ``runtime='asyncio'``: row is live iff its id is in the in-memory
+      ``_tasks`` dict. On a fresh pod start that dict is empty, so any
+      asyncio-mode in-flight rows are correctly orphaned.
+    - ``runtime='job'``: row is live iff K8s reports a Job in ``POD_NAMESPACE``
+      labelled ``leartech.io/run-id=<id>``. This was added 2026-05-29 after
+      the D.5.2 fire: when the API pod rolls mid-Job, the new pod's
+      ``_tasks`` is empty BUT the Job pod is still alive and making
+      progress. Marking such records orphaned creates a stale catalog
+      verdict (DB says ``orphaned`` while the Job completes successfully
+      and opens a PR).
+
+    K8s API failures are treated conservatively — we DO NOT orphan
+    job-runtime records when we cannot verify Job liveness. They will be
+    re-evaluated on the next startup. False-orphaning a live Job is
+    a worse outcome than briefly delaying orphan detection.
 
     Returns the count of rows marked orphaned (0 when DB is not configured).
     """
     if not is_db_enabled():
         return 0
+
+    live_ids: set[str] = set(_tasks.keys())
+
+    # Enumerate in-flight job-runtime candidates so we can ask K8s about each.
+    # Asyncio-runtime rows skip this entirely — they have no Job to check.
     async with db_session() as s:
-        return await mark_orphaned_runs(s, set(_tasks.keys()))
+        in_flight = await list_in_flight_runs(s)
+    job_candidates = [r for r in in_flight if r.runtime == 'job' and r.id not in live_ids]
+
+    for record in job_candidates:
+        try:
+            if await _job_exists_for_run(record.id):
+                live_ids.add(record.id)
+        except Exception as exc:  # noqa: BLE001 — K8s failures are diverse
+            # Conservative: don't orphan when we can't verify. Re-evaluated
+            # on next reconcile cycle. See module docstring for rationale.
+            logger.warning(
+                'K8s Job-existence check failed for runtime=job run %s (%s); '
+                'conservatively treating as live to avoid false orphan. '
+                'Will be re-evaluated on the next startup reconcile.',
+                record.id,
+                exc,
+            )
+            live_ids.add(record.id)
+
+    async with db_session() as s:
+        return await mark_orphaned_runs(s, live_ids)
+
+
+async def _job_exists_for_run(run_id: str) -> bool:
+    """Return True if a K8s Job labelled ``leartech.io/run-id=<run_id>`` exists
+    in ``POD_NAMESPACE``.
+
+    Raises ``RuntimeError`` when ``POD_NAMESPACE`` is unset — caller's
+    conservative fallback (don't orphan) then kicks in. In production the
+    chart injects POD_NAMESPACE via fieldRef metadata.namespace; this
+    branch protects against misconfigured deploys.
+
+    NOTE: ``kubernetes_asyncio.config.load_incluster_config`` is synchronous
+    in this library — do NOT await it. Same pattern as the logs/cancel
+    endpoints; see PR #50 + the
+    ``feedback_kubernetes_asyncio_load_incluster_is_sync`` memory.
+    """
+    namespace = os.environ.get('POD_NAMESPACE')
+    if not namespace:
+        raise RuntimeError(
+            'POD_NAMESPACE env var is required to verify live K8s Jobs '
+            'for runtime=job runs during orphan reconciliation.'
+        )
+
+    # Late import: kubernetes_asyncio is only needed when reconciling
+    # runtime=job records. Keeps `from app.state import ...` cheap for
+    # in-process tests that don't exercise the Job path.
+    from kubernetes_asyncio import client as k8s_client
+    from kubernetes_asyncio import config as k8s_config
+    from kubernetes_asyncio.client.api_client import ApiClient
+
+    k8s_config.load_incluster_config()  # synchronous — do NOT await
+    async with ApiClient() as api:
+        batch = k8s_client.BatchV1Api(api)
+        jobs = await batch.list_namespaced_job(
+            namespace=namespace,
+            label_selector=f'leartech.io/run-id={run_id}',
+        )
+    return bool(jobs.items)
