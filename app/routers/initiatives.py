@@ -23,7 +23,7 @@ import os
 from pathlib import Path
 from sqlite3 import ProgrammingError as SQLiteProgrammingError
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import ProgrammingError as SAProgrammingError
@@ -54,7 +54,7 @@ from gate.agent.self_retrospect import (
     file_issue_with_findings,
     retrospect_after_ready,
 )
-from gate.initiatives.loader import load_initiative
+from gate.initiatives.loader import Initiative, load_initiative, load_initiative_from_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -572,23 +572,16 @@ async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
     return refreshed
 
 
-@router.get('/_validate/{initiative}')
-async def validate_initiative(initiative: str) -> dict[str, object]:
-    """Resolve and parse an initiative YAML, returning a summary dict.
+def _summary_of(loaded: Initiative) -> dict[str, object]:
+    """Build the validation summary dict for an Initiative.
 
-    No side effects. Useful for callers (Tekton task, CRD controller) to
-    verify YAML correctness before POST. Returns a plain dict rather than
-    the Initiative model itself because the model carries both new
-    (`repos: [...]`) and legacy (`repo`, `branch`, `base`) shapes after
-    normalization, which trips re-validation when re-serialized.
+    Shared by the name-based GET /_validate/{name} and body-based
+    POST /_validate endpoints so both routes return identical shapes.
+    Returns a plain dict rather than the Initiative model itself because
+    the model carries both new (`repos: [...]`) and legacy
+    (`repo`, `branch`, `base`) shapes after normalization, which trips
+    re-validation when re-serialized.
     """
-    yaml_path = await _resolve_yaml_path(initiative)
-    if yaml_path is None:
-        raise HTTPException(status_code=404, detail=f'Initiative {initiative!r} not found')
-    try:
-        loaded = load_initiative(yaml_path)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
     primary = loaded.primary
     return {
         'name': loaded.name,
@@ -598,3 +591,39 @@ async def validate_initiative(initiative: str) -> dict[str, object]:
         'gate_marks': loaded.gate_marks,
         'max_iterations': loaded.max_iterations,
     }
+
+
+@router.get('/_validate/{initiative}')
+async def validate_initiative(initiative: str) -> dict[str, object]:
+    """Resolve and parse an initiative YAML by name, returning a summary dict.
+
+    No side effects. Useful for callers (Tekton task, CRD controller) to
+    verify YAML correctness before POST.
+    """
+    yaml_path = await _resolve_yaml_path(initiative)
+    if yaml_path is None:
+        raise HTTPException(status_code=404, detail=f'Initiative {initiative!r} not found')
+    try:
+        loaded = load_initiative(yaml_path)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
+    return _summary_of(loaded)
+
+
+@router.post('/_validate')
+async def validate_initiative_body(body: str = Body(..., media_type='text/plain')) -> dict[str, object]:
+    """Parse + validate an initiative YAML body, returning the same summary
+    shape as ``GET /_validate/{name}``.
+
+    No side effects — does NOT register the initiative in the catalog or
+    spawn any background task. Useful for pre-flight validation of a draft
+    YAML body before POSTing to ``/initiatives/catalog`` or ``/initiatives``,
+    so operators don't need to spin up the Python loader locally.
+    """
+    if not body or not body.strip():
+        raise HTTPException(status_code=422, detail='Invalid initiative YAML: empty body')
+    try:
+        loaded = load_initiative_from_yaml(body)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
+    return _summary_of(loaded)
