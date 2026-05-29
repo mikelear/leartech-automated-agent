@@ -173,6 +173,96 @@ def test_cancel_unknown_id_returns_404() -> None:
     assert response.status_code == 404
 
 
+# ─── Phase D.5.1.3 — branch exposed in API response surface ──────────────────
+# D.5.1.2 persisted `branch` on the DB row; these tests pin the contract that
+# the FastAPI response_model actually surfaces it through both POST and GET so
+# operators (and `scripts/list_runs.sh`) can see which branch each run targets.
+
+
+def test_post_job_mode_response_includes_branch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /initiatives returns the YAML-declared `branch` in the response body.
+
+    The InitiativeRecord pydantic model exposes `branch` (D.5.1.2), but the
+    HTTP surface wasn't covered by any test. This guards the response_model
+    serialization end-to-end.
+    """
+    monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
+    monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
+
+    # Use a known-on-disk initiative so we can pin the expected branch value.
+    # auth-ui-add-about-page declares `branch: agent/add-about-page`.
+    target = 'auth-ui-add-about-page'
+    expected_branch = 'agent/add-about-page'
+
+    async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
+        return kwargs['run_id'], kwargs['namespace']
+
+    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
+        response = client.post('/initiatives', json={'initiative': target})
+
+    assert response.status_code == 202
+    body = response.json()
+    assert 'branch' in body, 'branch must appear in the POST /initiatives response JSON'
+    assert body['branch'] == expected_branch, f'expected branch={expected_branch!r} from YAML, got {body["branch"]!r}'
+
+
+def test_get_initiative_returns_branch_after_post(monkeypatch: pytest.MonkeyPatch) -> None:
+    """GET /initiatives/{id} returns the same branch as the POST response.
+
+    Round-trips through the in-memory store and FastAPI response_model so a
+    regression in either path (store read, pydantic serialization) is caught.
+    """
+    monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
+    monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
+
+    target = 'auth-ui-add-about-page'
+    expected_branch = 'agent/add-about-page'
+
+    async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
+        return kwargs['run_id'], kwargs['namespace']
+
+    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
+        post_response = client.post('/initiatives', json={'initiative': target})
+    assert post_response.status_code == 202
+    run_id = post_response.json()['id']
+
+    get_response = client.get(f'/initiatives/{run_id}')
+    assert get_response.status_code == 200
+    body = get_response.json()
+    assert body['branch'] == expected_branch, (
+        f'GET /initiatives/{{id}} must surface the persisted branch; '
+        f'expected {expected_branch!r}, got {body["branch"]!r}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_initiative_returns_none_branch_for_legacy_record() -> None:
+    """Records registered without a `branch` (legacy / pre-D.5.1.2) surface branch=None.
+
+    Operators reading the API for an old DB row must see an explicit None, not
+    a missing field or a KeyError. We register a record directly through the
+    state layer (bypassing the router) to simulate the pre-migration shape.
+    """
+    from app.state import InitiativeRecord, new_id, now, register
+
+    initiative_id = new_id()
+    await register(
+        InitiativeRecord(
+            id=initiative_id,
+            initiative='legacy-no-branch',
+            status='running',
+            started_at=now(),
+            # branch intentionally omitted — defaults to None on the model.
+        )
+    )
+
+    response = client.get(f'/initiatives/{initiative_id}')
+    assert response.status_code == 200
+    body = response.json()
+    assert 'branch' in body, 'branch field must always be present in the response JSON'
+    assert body['branch'] is None, f'legacy record without branch must serialise to None, got {body["branch"]!r}'
+
+
 # ─── Catalog-first resolution tests (feat: catalog-fire-fallback) ────────────
 # Tests 1-3 test _resolve_yaml_path directly (no HTTP / no background task) to
 # avoid the TestClient teardown / asyncio cancel interaction with SQLite.
