@@ -261,3 +261,76 @@ def test_language_field_defaults_to_none_when_omitted(tmp_path: Path) -> None:
     )
     init = load_initiative(path)
     assert init.language is None
+
+
+def test_language_field_accepts_angular(tmp_path: Path) -> None:
+    """Phase E.2: `language: angular` parses cleanly. Many existing YAMLs
+    declare this so the field must round-trip without error."""
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        language: angular
+        """,
+    )
+    init = load_initiative(path)
+    assert init.language == 'angular'
+
+
+def test_language_field_accepts_arbitrary_string(tmp_path: Path) -> None:
+    """Phase E.2: parse-time validation is permissive — any string is accepted.
+
+    The image picker decides which values it knows how to route. Unknown
+    languages fall back to the default image rather than failing parse, so
+    sketch YAMLs with experimental language hints don't refuse to load.
+    """
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        language: kotlin
+        """,
+    )
+    init = load_initiative(path)
+    assert init.language == 'kotlin'
+
+
+def test_language_field_empty_string_treated_as_none(tmp_path: Path) -> None:
+    """An empty `language: ''` (or whitespace-only) is normalised to None so
+    downstream consumers only see one shape for "no language declared"."""
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        language: ''
+        """,
+    )
+    init = load_initiative(path)
+    assert init.language is None
+
+
+def test_language_field_whitespace_only_treated_as_none(tmp_path: Path) -> None:
+    """Whitespace-only language values also normalise to None — same reasoning
+    as empty string: YAML authors sometimes leave the value blank-ish while
+    sketching, and we don't want the picker to receive a literal '   '."""
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        language: '   '
+        """,
+    )
+    init = load_initiative(path)
+    assert init.language is None

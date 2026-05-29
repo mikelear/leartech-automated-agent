@@ -87,13 +87,18 @@ def _current_runtime_mode() -> str:
     return mode if mode in {'asyncio', 'job'} else 'asyncio'
 
 
-def _pick_image_for_initiative(initiative_name: str) -> str:
+def _pick_image_for_initiative(initiative_name: str, language: str | None = None) -> str:
     """Return the container image to spawn for ``initiative_name``.
 
     D.4 stub: always returns the default variant image. Phase E.1 will
     add language-detection routing (Go/Python/Angular/Rust variants) by
-    inspecting the initiative's primary repo. For now, one image fits
-    every initiative — same as the asyncio path's behaviour today.
+    inspecting the initiative's primary repo or honouring the YAML's
+    ``language:`` field (Phase E.2). For now, one image fits every
+    initiative — same as the asyncio path's behaviour today.
+
+    The ``language`` parameter (Phase E.2) is accepted now but unused
+    until E.1's routing logic lands. Plumbing the value through today
+    means E.1 only has to touch this function's body, not every caller.
 
     Sourced from ``LEARTECH_INITIATIVE_DEFAULT_IMAGE``, which the chart
     deployment.yaml renders to ``image.repository:image.tag`` (the API
@@ -103,6 +108,7 @@ def _pick_image_for_initiative(initiative_name: str) -> str:
     forever on a bogus default (D.4.2 incident on GCP).
     """
     _ = initiative_name  # unused until E.1
+    _ = language  # accepted now, consumed by E.1's routing refactor
     image = os.environ.get('LEARTECH_INITIATIVE_DEFAULT_IMAGE')
     if not image:
         raise RuntimeError(
@@ -411,7 +417,10 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
             job_name, _ns = await spawn_initiative_job(
                 initiative_name=request.initiative,
                 run_id=initiative_id,
-                image=_pick_image_for_initiative(request.initiative),
+                # Phase E.2: thread the YAML's `language:` hint to the image
+                # picker so E.1's routing refactor sees it. None / unknown values
+                # fall through to the default image — same behaviour as today.
+                image=_pick_image_for_initiative(request.initiative, language=loaded.language),
                 namespace=namespace,
                 env=_initiative_env(),
                 secret_refs=_initiative_secret_refs(),
