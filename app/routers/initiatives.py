@@ -416,6 +416,11 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
                 env=_initiative_env(),
                 secret_refs=_initiative_secret_refs(),
                 yaml_body=yaml_path.read_text(),
+                # D.7 — propagate qualified repo so the Job's preStop hook
+                # can post a "cancelled" sticky to the PR when an operator
+                # cancels mid-run. The agent itself writes /tmp/run_pr_number
+                # once it resolves the PR; the hook reads from there.
+                pr_repo=loaded.primary.qualified_repo,
             )
         except Exception as exc:  # noqa: BLE001 — surface spawn failures as 502 so the consumer sees them
             logger.exception('Job spawn failed for initiative %s', initiative_id)
@@ -554,11 +559,103 @@ async def get_initiative_logs(initiative_id: str, tail_lines: int = 500) -> Plai
 
 @router.post('/{initiative_id}/cancel', response_model=InitiativeRecord)
 async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
-    """Request cancellation of a running initiative. Idempotent for terminal records."""
+    """Request cancellation of a running initiative. Idempotent for terminal records.
+
+    Phase D.7 — dual-path cancel.
+
+    For ``runtime=asyncio`` runs (the historical path) we still call
+    ``app.state.cancel`` which targets the in-process asyncio.Task; the
+    ``_run_and_track`` CancelledError handler writes the terminal status.
+
+    For ``runtime=job`` runs the API pod holds no in-process task — the run
+    lives in its own K8s Job pod. We delete the Job (propagationPolicy
+    Background so the pod is GC'd asynchronously); K8s will SIGTERM the
+    pod, give it ``terminationGracePeriodSeconds`` to write the preStop
+    "cancelled" sticky comment to the PR (see D.7 preStop hook in
+    ``gate/agent/job_runner.py``), then kill it. We immediately write the
+    cancelled status to the DB so the next ``GET`` reflects the operator's
+    intent — the reconciler (D.5) sees the now-terminal row and skips it,
+    so the brief race where the Job has gone but the pod is still posting
+    its preStop sticky does NOT mark the row 'failed'.
+
+    NOTE: ``kubernetes_asyncio.config.load_incluster_config`` is synchronous
+    in this library (do NOT await it). Same pattern as the logs endpoint
+    and ``spawn_initiative_job``; see PR #50 + the
+    ``feedback_kubernetes_asyncio_load_incluster_is_sync`` memory.
+    """
     record = await get_record(initiative_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
 
+    if record.status in {'cancelled', 'complete', 'failed', 'orphaned', 'timed_out'}:
+        # Idempotent: terminal records short-circuit. Mirrors the asyncio
+        # path's behaviour before D.7 (cancel_initiative_task returned False
+        # but the 409 was suppressed for terminal records).
+        return record
+
+    if record.runtime == 'job':
+        # Delete the K8s Job — Kubernetes propagates SIGTERM to the pod,
+        # respects terminationGracePeriodSeconds (set on the Job manifest by
+        # D.7), then kills. The preStop hook posts a "cancelled" sticky to
+        # the PR (when one was resolved by the mid-run write to
+        # /tmp/run_pr_number) before the pod is GC'd.
+        namespace = os.environ.get('POD_NAMESPACE')
+        if not namespace:
+            raise HTTPException(
+                status_code=500,
+                detail='POD_NAMESPACE env var is required to cancel runtime=job runs; '
+                'chart deployment must inject it via fieldRef metadata.namespace.',
+            )
+        if not record.job_name:  # pragma: no cover — invariant: runtime=job ⇒ job_name set at register()
+            raise HTTPException(
+                status_code=500,
+                detail=f'runtime=job record {initiative_id!r} is missing job_name; cannot delete K8s Job.',
+            )
+
+        # Late import: kubernetes_asyncio is only needed on this code path; keeps
+        # `from app.routers.initiatives import ...` cheap for in-process tests.
+        from kubernetes_asyncio import client as k8s_client
+        from kubernetes_asyncio import config as k8s_config
+        from kubernetes_asyncio.client.api_client import ApiClient
+        from kubernetes_asyncio.client.exceptions import ApiException
+
+        k8s_config.load_incluster_config()  # synchronous — do NOT await
+        try:
+            async with ApiClient() as api:
+                batch = k8s_client.BatchV1Api(api)
+                await batch.delete_namespaced_job(
+                    name=record.job_name,
+                    namespace=namespace,
+                    propagation_policy='Background',
+                )
+        except ApiException as exc:
+            # 404 means the Job is already gone (TTL'd out, or a prior
+            # cancel + delete completed). Treat as success — the operator's
+            # intent ("this run should be cancelled") is already satisfied.
+            if exc.status != 404:
+                logger.exception('Job delete failed for initiative %s', initiative_id)
+                raise HTTPException(status_code=502, detail=f'Failed to delete initiative Job: {exc}') from exc
+            logger.info(
+                'initiative %s: Job %s already absent — recording cancelled status', initiative_id, record.job_name
+            )
+        except Exception as exc:  # noqa: BLE001 — surface K8s API failures as 502
+            logger.exception('Job delete failed for initiative %s', initiative_id)
+            raise HTTPException(status_code=502, detail=f'Failed to delete initiative Job: {exc}') from exc
+
+        # Synchronously write terminal status. The reconciler (D.5) sees
+        # this on its next pass and skips the run — no race where it sees
+        # the Job gone and writes 'failed'.
+        await update(initiative_id, status='cancelled', finished_at=now())
+        logger.info(
+            'initiative %s cancelled (runtime=job): Job %s/%s deleted', initiative_id, namespace, record.job_name
+        )
+
+        refreshed = await get_record(initiative_id)
+        if refreshed is None:  # pragma: no cover — record was just confirmed above
+            raise HTTPException(status_code=500, detail='Record disappeared between get and refresh')
+        return refreshed
+
+    # runtime=asyncio path — unchanged from pre-D.7 behaviour.
     cancelled = await cancel_initiative_task(initiative_id)
     if not cancelled and record.status not in {'cancelled', 'complete', 'failed'}:
         raise HTTPException(

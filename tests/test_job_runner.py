@@ -29,6 +29,7 @@ from kubernetes_asyncio.client.exceptions import ApiException
 
 from gate.agent.job_runner import (
     DEFAULT_SERVICE_ACCOUNT,
+    DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS,
     DEFAULT_TTL_SECONDS_AFTER_FINISHED,
     _build_job_manifest,
     _default_resources,
@@ -251,6 +252,97 @@ def test_manifest_top_level_kind_and_api_version() -> None:
 
 
 # ---------------------------------------------------------------------------
+# D.7 — preStop lifecycle hook + terminationGracePeriodSeconds + LEARTECH_PR_REPO
+# ---------------------------------------------------------------------------
+
+
+def test_manifest_includes_termination_grace_period() -> None:
+    """D.7: the pod must declare ``terminationGracePeriodSeconds`` so K8s
+    waits long enough for the preStop hook to post a "cancelled" sticky
+    to the PR before SIGKILL. 30s is the documented chart default and
+    matches the cancel handler's expectations."""
+    m = _baseline_manifest()
+    pod_spec = m['spec']['template']['spec']
+    assert pod_spec['terminationGracePeriodSeconds'] == DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS == 30
+
+
+def test_manifest_termination_grace_period_can_be_overridden() -> None:
+    """Custom grace windows must flow through. Charts with slower PR
+    networks may want to raise this."""
+    m = _build_job_manifest(
+        run_id='r',
+        initiative='i',
+        image='img',
+        namespace='ns',
+        service_account='sa',
+        env={},
+        secret_refs={},
+        resources=_default_resources(),
+        yaml_body='name: i\n',
+        termination_grace_period_seconds=120,
+    )
+    assert m['spec']['template']['spec']['terminationGracePeriodSeconds'] == 120
+
+
+def test_manifest_container_has_prestop_lifecycle_hook() -> None:
+    """D.7: the container must declare a ``lifecycle.preStop`` exec hook
+    that calls ``python -m gate.agent.crash_sticky --reason cancelled``.
+    The hook reads the PR repo from LEARTECH_PR_REPO (env) and the PR
+    number from /tmp/run_pr_number (file written by the agent mid-run).
+    `|| true` ensures the hook never blocks pod termination on a
+    transient comment-post failure."""
+    m = _baseline_manifest()
+    container = m['spec']['template']['spec']['containers'][0]
+    lifecycle = container['lifecycle']
+    assert 'preStop' in lifecycle
+    cmd = lifecycle['preStop']['exec']['command']
+    # The hook is `sh -c '<script>'`; assert structurally so future edits
+    # of the script body don't require rewriting the whole assertion list.
+    assert cmd[0] == 'sh'
+    assert cmd[1] == '-c'
+    script = cmd[2]
+    assert 'python -m gate.agent.crash_sticky' in script
+    assert '--reason cancelled' in script
+    assert '--repo "$LEARTECH_PR_REPO"' in script
+    # PR number flows from /tmp/run_pr_number — written by the agent's
+    # _resolve_pr_number side-effect (D.7) so the hook has it on cancel.
+    assert '/tmp/run_pr_number' in script  # noqa: S108 — service-internal tmp file referenced in a manifest
+    # `|| true` — preStop must NEVER block pod termination.
+    assert '|| true' in script
+
+
+def test_manifest_includes_pr_repo_env_var() -> None:
+    """D.7: LEARTECH_PR_REPO carries the qualified repo from the
+    initiative (loaded.primary.qualified_repo) into the Job pod so the
+    preStop hook can target the right repo's PR. Empty string when no
+    repo provided (filesystem-only initiative without a qualified repo)."""
+    m = _build_job_manifest(
+        run_id='r',
+        initiative='i',
+        image='img',
+        namespace='ns',
+        service_account='sa',
+        env={},
+        secret_refs={},
+        resources=_default_resources(),
+        yaml_body='name: i\n',
+        pr_repo='owner/some-repo',
+    )
+    env = m['spec']['template']['spec']['containers'][0]['env']
+    env_by_name = {e['name']: e for e in env}
+    assert env_by_name['LEARTECH_PR_REPO'] == {'name': 'LEARTECH_PR_REPO', 'value': 'owner/some-repo'}
+
+
+def test_manifest_pr_repo_defaults_to_empty_string() -> None:
+    """Unspecified pr_repo → empty value (well-defined "no repo to post to").
+    crash_sticky.py treats empty as "skip" so the hook is a no-op."""
+    m = _baseline_manifest()  # baseline doesn't pass pr_repo
+    env = m['spec']['template']['spec']['containers'][0]['env']
+    env_by_name = {e['name']: e for e in env}
+    assert env_by_name['LEARTECH_PR_REPO'] == {'name': 'LEARTECH_PR_REPO', 'value': ''}
+
+
+# ---------------------------------------------------------------------------
 # spawn_initiative_job — async, mocked-K8s tests.
 # ---------------------------------------------------------------------------
 
@@ -352,7 +444,10 @@ async def test_spawn_submits_manifest_to_batch_v1() -> None:
     env_names = {e['name'] for e in env}
     # LEARTECH_INITIATIVE_YAML is appended by the builder so the Job pod
     # can resolve the initiative without DB access. See _build_job_manifest.
-    assert env_names == {'FOO', 'CLAUDE_API_KEY', 'LEARTECH_INITIATIVE_YAML'}
+    # LEARTECH_PR_REPO carries the qualified repo for the preStop hook
+    # (D.7) — present even when the caller didn't supply a value (empty
+    # string default).
+    assert env_names == {'FOO', 'CLAUDE_API_KEY', 'LEARTECH_INITIATIVE_YAML', 'LEARTECH_PR_REPO'}
 
 
 @pytest.mark.asyncio

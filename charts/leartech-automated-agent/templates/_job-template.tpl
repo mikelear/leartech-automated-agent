@@ -47,6 +47,10 @@ spec:
     spec:
       serviceAccountName: {{ .serviceAccountName }}
       restartPolicy: Never
+      # D.7 — grace window for the preStop hook to post a "cancelled" sticky
+      # comment to the PR before K8s SIGKILLs the pod. Matches job_runner.py's
+      # DEFAULT_TERMINATION_GRACE_PERIOD_SECONDS.
+      terminationGracePeriodSeconds: {{ .terminationGracePeriodSeconds | default 30 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -63,6 +67,18 @@ spec:
         command: ["sh", "-c"]
         args:
         - 'printf "%s" "$LEARTECH_INITIATIVE_YAML" > /tmp/initiative.yaml && exec python -m gate.agent.initiative /tmp/initiative.yaml'
+        # D.7 — preStop posts a "cancelled" sticky to the PR before K8s
+        # SIGKILLs the pod. Reads the PR number from /tmp/run_pr_number
+        # (written by run_initiative when it resolves the PR mid-run);
+        # LEARTECH_PR_REPO is set at spawn time. `|| true` so a transient
+        # comment-post failure never blocks pod termination.
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - sh
+              - -c
+              - 'python -m gate.agent.crash_sticky --reason cancelled --repo "$LEARTECH_PR_REPO" --pr "$(cat /tmp/run_pr_number 2>/dev/null || true)" || true'
         securityContext:
           runAsNonRoot: true
           runAsUser: 1000

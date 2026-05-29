@@ -50,10 +50,44 @@ class RunSummary:
     pr_number: int | None = None
 
 
+# Phase D.7 — file the preStop hook reads to learn the PR number on cancel.
+# Updated mid-run by ``_resolve_pr_number`` so the hook has a current value
+# regardless of when the operator triggers cancel. Path is process-local so
+# absence on disk simply means "no PR yet" — the hook skips gracefully.
+PR_NUMBER_HINT_FILE = '/tmp/run_pr_number'  # noqa: S108 — intentional service-internal tmp file
+
+
+def _write_pr_number_hint(pr_number: int | None) -> None:
+    """Best-effort: write the PR number to ``PR_NUMBER_HINT_FILE`` for the preStop hook.
+
+    The Job pod's preStop lifecycle hook (D.7) reads this file via
+    ``$(cat /tmp/run_pr_number)`` to populate the ``--pr`` flag of
+    ``python -m gate.agent.crash_sticky``. Empty / missing file → hook
+    skips the sticky post gracefully.
+
+    Tolerates any OSError (read-only fs, missing /tmp, etc.) — the file
+    is purely an enrichment for the cancel path; the agent loop is fine
+    without it.
+    """
+    if pr_number is None:
+        return
+    try:
+        with open(PR_NUMBER_HINT_FILE, 'w', encoding='utf-8') as fh:
+            fh.write(str(pr_number))
+    except OSError:
+        # Non-fatal: the hint file is enrichment, not core flow.
+        pass
+
+
 def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
     """Best-effort: ask GitHub for the open PR on `branch`. Returns None on miss/error.
 
     Runs synchronously; called once at end-of-run so the few-hundred-ms cost is fine.
+
+    Side effect (D.7): on resolution, writes the PR number to
+    ``/tmp/run_pr_number`` so the spawned Job pod's preStop hook can post a
+    "cancelled" sticky to the PR if the operator triggers cancel after this
+    point. Failure to write the hint file does not affect the return value.
     """
     try:
         result = subprocess.run(
@@ -83,7 +117,11 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
         if not rows:
             return None
         number = rows[0].get('number')
-        return int(number) if number is not None else None
+        if number is None:
+            return None
+        resolved = int(number)
+        _write_pr_number_hint(resolved)
+        return resolved
     except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
         return None
 
