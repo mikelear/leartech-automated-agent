@@ -62,7 +62,7 @@ async def _seed_job_record(
         runtime='job',
         job_name=job_name,
     )
-    await register(record, task=None)
+    await register(record)
 
 
 def _wire_k8s_mocks(*, delete_side_effect: object = None) -> tuple[MagicMock, AsyncMock, MagicMock, MagicMock]:
@@ -223,31 +223,29 @@ async def test_cancel_terminal_record_is_idempotent(
     cfg.load_incluster_config.assert_not_called()
 
 
-async def test_cancel_asyncio_runtime_does_not_touch_k8s(
+async def test_cancel_legacy_asyncio_record_without_job_name_500s(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The asyncio path must NOT exercise the new K8s delete branch. This
-    pins the regression: the new runtime=job code must NEVER run for
-    runtime=asyncio records."""
+    """A legacy DB row with ``runtime='asyncio'`` (created before Phase F)
+    has no ``job_name`` set. Cancelling it surfaces a clear 500 — there's
+    no K8s Job to delete and the orphan reconciler will pick the record up
+    on the next sweep."""
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
-    # Seed an asyncio-runtime record. No live task is registered so
-    # ``cancel_initiative_task`` returns False and the handler 409s — the
-    # important thing is that the K8s path is NOT taken.
     record = InitiativeRecord(
-        id='run-asyncio-1',
+        id='run-asyncio-legacy',
         initiative='demo',
         status='running',
         started_at=datetime.now(UTC),
         runtime='asyncio',
+        job_name=None,
     )
-    await register(record, task=None)
+    await register(record)
 
     cfg, delete_mock, client_mod, api_cls = _wire_k8s_mocks()
     with _sys_modules_patch(cfg, client_mod, api_cls):
-        resp = _client.post('/initiatives/run-asyncio-1/cancel')
+        resp = _client.post('/initiatives/run-asyncio-legacy/cancel')
 
-    # The asyncio path with no live task returns 409 (its historical
-    # behaviour). We don't assert the body, just that K8s wasn't touched.
-    assert resp.status_code in {200, 409}
+    assert resp.status_code == 500
+    assert 'missing job_name' in resp.json()['detail']
     delete_mock.assert_not_awaited()
     cfg.load_incluster_config.assert_not_called()

@@ -116,9 +116,10 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        # D.4 runtime selector: 'asyncio' (default) keeps the in-process
-        # task path; 'job' spawns a K8s Job per initiative. Empty/unset
-        # falls back to 'asyncio' in code at app/routers/initiatives.py.
+        # Phase F: runtime is always 'job' now (in-code constant); the env
+        # var is rendered for observability + back-compat with any operator
+        # tooling that reads it, but it no longer influences the spawn path.
+        # Empty/unset is fine — the code ignores it.
         {{- if .Values.agent.runtime }}
         - name: LEARTECH_INITIATIVE_RUNTIME
           value: {{ .Values.agent.runtime | quote }}

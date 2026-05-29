@@ -1,8 +1,10 @@
 """Initiatives endpoint tests — validation, listing, status lookup.
 
-The execution path (POST /initiatives → real run_initiative) is mocked
-because real execution would call the Anthropic API. We focus on the
-contract surface: validation, error shapes, list/lookup behaviour.
+Phase F: POST /initiatives always spawns a K8s Job (the in-process
+asyncio path was removed). We mock ``spawn_initiative_job`` so these
+tests don't touch real K8s and don't fire the Anthropic API. We focus
+on the contract surface: validation, error shapes, list/lookup
+behaviour.
 
 Includes tests for the catalog-first resolution path introduced by
 feat(api): catalog-fire-fallback — DB-stored initiatives can be fired
@@ -12,7 +14,7 @@ without an image rebuild; filesystem serves as fallback.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from typing import NoReturn
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -22,7 +24,6 @@ from fastapi.testclient import TestClient
 from app import db as db_module
 from app.db.models import Base
 from app.main import app
-from gate.agent.initiative import RunSummary
 
 client = TestClient(app)
 
@@ -131,73 +132,45 @@ def test_list_initiatives_returns_array() -> None:
     assert isinstance(response.json(), list)
 
 
-def test_post_valid_initiative_queues_with_mocked_runtime() -> None:
-    """POST /initiatives with a valid name returns 202 + queued record when
-    the runtime is mocked. Confirms the validation + spawn path works without
-    actually firing the agent loop."""
+def test_post_valid_initiative_queues_with_mocked_job_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST /initiatives with a valid name returns 202 + running record
+    when the Job spawn is mocked. Confirms the validation + spawn path
+    works without actually creating a real K8s Job."""
+    monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
+    monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
+
     listed = client.post('/initiatives', json={'initiative': 'does-not-exist-xyz'})
     target = listed.json()['detail']['available'][0]
 
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> RunSummary:
-        return RunSummary(exit_code=0)
+    async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
+        return kwargs['run_id'], kwargs['namespace']
 
-    with patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative):
+    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
         response = client.post('/initiatives', json={'initiative': target})
 
     assert response.status_code == 202
     body = response.json()
     assert body['initiative'] == target
-    assert body['status'] in {'queued', 'running', 'complete'}
+    # Phase D.5.3 — record reflects 'running' after a successful spawn.
+    assert body['status'] == 'running'
+    assert body['runtime'] == 'job'
+    assert body['job_name'] == body['id']
     assert 'id' in body
     assert len(body['id']) == 12
+    # pr_repo is set at register() time from loaded.primary.qualified_repo
+    # — must be present from the very first response (no completion update
+    # needed). Self_retrospect (fired by job_reconciler later) depends on
+    # pr_repo being on the DB row.
+    assert body['pr_repo'] is not None, (
+        'pr_repo must be set on the record from spawn time; the '
+        'self_retrospect hook (fired by the reconciler on completion) '
+        'depends on it being on the DB row.'
+    )
 
 
 def test_cancel_unknown_id_returns_404() -> None:
     response = client.post('/initiatives/unknown-xyz/cancel')
     assert response.status_code == 404
-
-
-def test_completed_run_surfaces_pr_number_turns_cost() -> None:
-    """RunSummary fields (pr_number/turns/cost_usd) must reach the GET response.
-
-    Regression guard: the original handler discarded everything except exit_code,
-    so `GET /initiatives/{id}` showed pr_number=null even after the agent opened
-    the PR. The fix returns a RunSummary and the handler unpacks the fields.
-
-    Also guards pr_repo preservation through the completion update — the
-    2026-05-28 self_retrospect skip regression came from pr_repo being lost
-    between register() and the final GET. The completion update in
-    ``_run_and_track`` re-fetches the record and explicitly carries pr_repo
-    through; this assertion locks that behaviour in.
-    """
-    listed = client.post('/initiatives', json={'initiative': 'does-not-exist-xyz'})
-    target = listed.json()['detail']['available'][0]
-
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> RunSummary:
-        return RunSummary(exit_code=0, turns=7, cost_usd=0.4242, pr_number=99)
-
-    with patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative):
-        post_resp = client.post('/initiatives', json={'initiative': target})
-        run_id = post_resp.json()['id']
-        # The background task is scheduled on the same event loop; TestClient
-        # blocks long enough for it to complete by the time the GET returns.
-        for _ in range(20):
-            get_resp = client.get(f'/initiatives/{run_id}')
-            body = get_resp.json()
-            if body['status'] == 'complete':
-                break
-
-    assert body['status'] == 'complete'
-    assert body['pr_number'] == 99
-    assert body['turns'] == 7
-    assert body['cost_usd'] == 0.4242
-    # pr_repo was set at register() time from loaded.primary.qualified_repo
-    # — must still be present after the completion update.
-    assert body['pr_repo'] is not None, (
-        'pr_repo must survive the completion update; the self_retrospect '
-        'hook depends on it being on the final record (regression on run '
-        '44120e445abd 2026-05-28).'
-    )
 
 
 # ─── Catalog-first resolution tests (feat: catalog-fire-fallback) ────────────
@@ -297,143 +270,3 @@ def test_404_lists_both_db_and_filesystem_names(client_with_db: TestClient) -> N
     assert 'db-only-initiative-xyz' in available
     # At least one filesystem name must also be present.
     assert len(available) > 1, 'expected both DB and FS names in 404 available list'
-
-
-async def test_cancel_cleanup_tolerates_db_engine_disposal(
-    db_enabled_for_resolution: None,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Cancel cleanup must tolerate DB engine being disposed during pod shutdown.
-
-    Regression for the observed issue during run fcbbc53f2650 (2026-05-26):
-    when FastAPI shutdown disposes the DB engine before asyncio cancellation
-    completes, the update() call in the CancelledError handler fails with
-    RuntimeError. The fix wraps the update in try/except to tolerate this.
-
-    The test simulates the race: a background task is cancelled while the
-    engine is disposed. The cancel cleanup path should log a warning and
-    not raise.
-    """
-    import asyncio
-    from pathlib import Path
-    from unittest.mock import patch
-
-    from app import db as db_m
-    from app.routers.initiatives import _run_and_track
-    from app.state import new_id
-
-    # Set up a mock initiative record in memory.
-    initiative_id = new_id()
-
-    # Create a background task that will be cancelled.
-    # `started` synchronises deterministically with the task entering
-    # run_initiative — replaces the previous `asyncio.sleep(0.01)` race
-    # which flaked on contention-pressed nodes (GCP release tb8t6, 6kkjj
-    # 2026-05-27) when 10ms wasn't enough for the task to schedule.
-    started = asyncio.Event()
-
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> NoReturn:
-        started.set()
-        await asyncio.sleep(float('inf'))
-        raise AssertionError('unreachable: sleep(inf) only exits via cancellation')
-
-    yaml_path = Path('/tmp/dummy.yaml')  # noqa: S108 — test only, path not created
-    with patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative):
-        task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
-
-        # Wait deterministically for the task to enter running state.
-        await started.wait()
-
-        # Dispose the DB engine to simulate the pod shutdown race.
-        await db_m.dispose_engine()
-
-        # Now cancel the task. This triggers the CancelledError handler.
-        # Without the fix, this would raise RuntimeError from update().
-        # With the fix, it should log a warning and re-raise CancelledError cleanly.
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    # Assert the warning was logged with the expected substring.
-    assert any(
-        'DB engine already disposed' in record.message for record in caplog.records if record.levelname == 'WARNING'
-    ), f'Expected warning "DB engine already disposed" in logs. Got: {caplog.messages}'
-
-
-async def test_cancel_cleanup_tolerates_db_programming_error(
-    db_enabled_for_resolution: None,
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Cancel cleanup must tolerate ProgrammingError on closed engine.
-
-    Regression for GCP release tb8t6 (2026-05-27): under cluster contention,
-    FastAPI shutdown disposes the engine such that the cancel-cleanup's
-    update() raises sqlite3.ProgrammingError (wrapped by SQLAlchemy as
-    sqlalchemy.exc.ProgrammingError) instead of RuntimeError. Both surfaces
-    must be tolerated — see PR #35 for the RuntimeError case.
-
-    AZ release rwkch on identical code passed the same release pipeline,
-    confirming the failure is contention-exposed rather than a code bug.
-    Under cluster pressure the engine disposal interleaves DIFFERENTLY:
-    the engine connection is closed mid-cleanup rather than the session
-    factory being cleared, exposing a different exception surface.
-
-    The test deterministically forces the closed-engine surface by patching
-    update() to raise sqlite3.ProgrammingError. Outcome must mirror the
-    sibling test: warning logged, CancelledError re-raised cleanly, no
-    crash propagating out of _run_and_track.
-    """
-    import asyncio
-    from pathlib import Path
-    from sqlite3 import ProgrammingError as SQLiteProgrammingError
-    from unittest.mock import patch
-
-    from app.routers.initiatives import _run_and_track
-    from app.state import new_id
-
-    initiative_id = new_id()
-
-    # `started` synchronises deterministically with the task entering
-    # run_initiative — same flake fix as the sibling test.
-    started = asyncio.Event()
-
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> NoReturn:
-        started.set()
-        await asyncio.sleep(float('inf'))
-        raise AssertionError('unreachable: sleep(inf) only exits via cancellation')
-
-    async def fake_update(_id: str, **fields: object) -> None:
-        # Only the cancel-cleanup update should fail — the initial 'running'
-        # status update must succeed so we deterministically reach the
-        # CancelledError handler. Mirrors the in-cluster surface: when the
-        # engine pool's connection is closed mid-operation, sqlite3 raises
-        # ProgrammingError (and SQLAlchemy wraps it as
-        # sqlalchemy.exc.ProgrammingError). The catch tuple covers both;
-        # raising the raw sqlite3 variant here exercises the
-        # SQLiteProgrammingError leg of the tuple directly.
-        if fields.get('status') == 'cancelled':
-            raise SQLiteProgrammingError('Cannot operate on a closed database.')
-
-    yaml_path = Path('/tmp/dummy.yaml')  # noqa: S108 — test only, path not created
-    with (
-        patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative),
-        patch('app.routers.initiatives.update', side_effect=fake_update),
-    ):
-        task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
-
-        # Wait deterministically for the task to enter running state.
-        await started.wait()
-
-        # Cancel — _run_and_track's CancelledError handler will invoke update(),
-        # which now raises SQLiteProgrammingError. The broadened catch must
-        # swallow it and re-raise CancelledError cleanly.
-        task.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await task
-
-    # Warning must be logged. Substring 'DB engine already disposed' is the
-    # stable contract — same message structure as PR #35's log line, just
-    # surfaced for a different underlying exception class.
-    assert any(
-        'DB engine already disposed' in record.message for record in caplog.records if record.levelname == 'WARNING'
-    ), f'Expected warning "DB engine already disposed" in logs. Got: {caplog.messages}'

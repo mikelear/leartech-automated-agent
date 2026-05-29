@@ -8,9 +8,11 @@ commands (fire, runs cancel, runs status).
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
 import httpx
+import pytest
 from click.testing import CliRunner
 from fastapi.testclient import TestClient
 
@@ -42,13 +44,23 @@ def test_fire_unknown_initiative_lists_available() -> None:
     assert 'Available initiatives' in result.output
 
 
-def test_fire_valid_initiative_returns_run_id() -> None:
-    """fire a real initiative; expect 202 + a run ID returned."""
+def test_fire_valid_initiative_returns_run_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    """fire a real initiative; expect 202 + a run ID returned.
+
+    Phase F: POST /initiatives spawns a K8s Job, so we need POD_NAMESPACE
+    set and the spawn call mocked.
+    """
+    monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
+    monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
+
+    async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
+        return kwargs['run_id'], kwargs['namespace']
+
     runner = CliRunner()
-    with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
-        # Real initiative from the catalog; in TestClient the agent doesn't actually start
-        # (background task spawns but won't make real Anthropic calls in the test process before
-        # the test completes — at most it'll have started and we ignore that).
+    with (
+        patch('app.agent_cli.main.httpx.Client', _MockHttpxClient),
+        patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn),
+    ):
         result = runner.invoke(cli, ['fire', 'webcoder-ui-add-about-page'])
     assert result.exit_code == 0
     assert 'Fired' in result.output

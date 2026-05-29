@@ -40,8 +40,9 @@ class InitiativeRunRecord:
     error: str | None
     cluster: str | None
     created_by: str | None
-    # Phase D.4 — dual-path runtime fields. `runtime` is 'asyncio' or
-    # 'job'; `job_name` is the K8s Job name when runtime='job'.
+    # Phase F: runtime is always 'job' on new rows; legacy DB rows from
+    # before Phase F may still carry 'asyncio'. `job_name` is the K8s
+    # Job name (None only for legacy asyncio rows).
     runtime: str
     job_name: str | None
     updated_at: datetime
@@ -77,7 +78,7 @@ async def create_run(
     cluster: str | None = None,
     created_by: str | None = None,
     pr_repo: str | None = None,
-    runtime: str = 'asyncio',
+    runtime: str = 'job',
     job_name: str | None = None,
 ) -> InitiativeRunRecord:
     """Create a new DB-stored run row. Raises on IntegrityError for duplicate id.
@@ -190,8 +191,8 @@ async def list_in_flight_runs(session: AsyncSession) -> list[InitiativeRunRecord
 
     The returned records preserve ``runtime`` and ``job_name`` so the
     caller can branch on runtime when deciding the orphan-detection
-    strategy: asyncio-runtime rows are validated against in-memory
-    ``_tasks``; job-runtime rows must be validated against K8s.
+    strategy: legacy asyncio rows have no backing process and always
+    orphan; job-runtime rows are validated against K8s.
     """
     stmt = select(InitiativeRunRow).where(InitiativeRunRow.status.in_(['queued', 'running']))
     result = await session.execute(stmt)
@@ -201,10 +202,12 @@ async def list_in_flight_runs(session: AsyncSession) -> list[InitiativeRunRecord
 async def mark_orphaned_runs(session: AsyncSession, live_ids: set[str]) -> int:
     """Mark in-flight DB runs as 'orphaned' if their id is NOT in `live_ids`.
 
-    Called on FastAPI startup after a pod restart. A restarted pod has an
-    empty `_tasks` dict, so `live_ids` will typically be empty on first call.
-    Any run with status in ('queued', 'running') that has no live asyncio.Task
-    is unreachable — mark it orphaned so callers can detect the gap.
+    Called on FastAPI startup after a pod restart. `live_ids` carries the
+    set of run-ids whose backing K8s Job is still alive in POD_NAMESPACE
+    (Phase F: every run has a backing Job; legacy asyncio rows always
+    fall out of this set). Anything in 'queued'/'running' that's not in
+    the live set is unreachable — mark it orphaned so callers can detect
+    the gap.
 
     Returns the count of rows updated.
     """

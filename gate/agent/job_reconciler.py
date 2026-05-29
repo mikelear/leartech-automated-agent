@@ -1,10 +1,10 @@
 """Job status reconciler — D.5 surface.
 
-When `LEARTECH_INITIATIVE_RUNTIME=job`, D.3+D.4 spawn each initiative as
-its own K8s Job. The API pod no longer holds an asyncio.task for the
-run, so it has no in-process hook to update `initiative_runs.status` on
-completion. Without something else watching, the DB row stays at
-`queued` forever even though the agent ran successfully.
+Phase F: every initiative runs as its own K8s Job. The API pod holds
+no in-process task for the run, so it has no in-process hook to update
+`initiative_runs.status` on completion. Without something else
+watching, the DB row stays at `running` forever even though the agent
+finished cleanly.
 
 This module fills that gap. A background asyncio task polls Jobs labelled
 `leartech.io/component=initiative-runner` in `POD_NAMESPACE`, and for any
@@ -332,10 +332,9 @@ async def reconcile_once(namespace: str) -> int:
                 cost,
                 pr_number,
             )
-            # Post-success retrospective for Job-mode runs (D.5.2).
-            # The asyncio path's `_run_and_track` already fires this on
-            # successful completion; Job-mode goes through the reconciler
-            # and would otherwise skip the post-success Issue filing.
+            # Post-success retrospective (D.5.2). The reconciler is the
+            # only signal path for completion now (Phase F removed the
+            # in-process asyncio path that previously fired this hook).
             # Idempotency: the `record.status in TERMINAL_STATUSES` guard
             # above means each run flips non-terminal -> terminal at most
             # once per reconcile_once invocation, so retrospect fires at

@@ -56,7 +56,6 @@ async def db_enabled(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     monkeypatch.setenv(db_module.DSN_ENV, 'sqlite+aiosqlite:///:memory:')
     db_module._reset_for_tests()
     state_module._records.clear()
-    state_module._tasks.clear()
 
     engine = db_module.init_engine()
     async with engine.begin() as conn:
@@ -67,7 +66,6 @@ async def db_enabled(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     await db_module.dispose_engine()
     db_module._reset_for_tests()
     state_module._records.clear()
-    state_module._tasks.clear()
 
 
 @pytest.fixture(autouse=True)

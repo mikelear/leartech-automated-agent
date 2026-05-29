@@ -50,7 +50,6 @@ async def db_enabled(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     monkeypatch.setenv(db_module.DSN_ENV, 'sqlite+aiosqlite:///:memory:')
     db_module._reset_for_tests()
     state_module._records.clear()
-    state_module._tasks.clear()
 
     engine = db_module.init_engine()
     async with engine.begin() as conn:
@@ -61,7 +60,6 @@ async def db_enabled(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     await db_module.dispose_engine()
     db_module._reset_for_tests()
     state_module._records.clear()
-    state_module._tasks.clear()
 
 
 def _wire_k8s_mocks(
@@ -232,10 +230,11 @@ async def test_k8s_api_failure_does_not_orphan_job_runtime_records(
 
 
 @pytest.mark.asyncio
-async def test_asyncio_mode_record_uses_existing_orphan_path(db_enabled: None) -> None:
-    """Records with runtime='asyncio' (the historical default) must not
-    trigger any K8s calls. Their orphan-detection logic is unchanged:
-    if no live asyncio.Task entry exists for the id, the row is orphaned."""
+async def test_legacy_asyncio_mode_record_orphaned_without_k8s(db_enabled: None) -> None:
+    """Legacy DB rows with runtime='asyncio' (created before Phase F)
+    must not trigger any K8s calls — there's no backing Job to check —
+    and must always be orphaned. The API pod that owned their task is
+    gone; the row is stale by definition."""
     async with db_module.session() as s:
         await create_run(
             s,
@@ -243,10 +242,10 @@ async def test_asyncio_mode_record_uses_existing_orphan_path(db_enabled: None) -
             initiative='demo',
             status='running',
             started_at=_started_at(),
-            # runtime defaults to 'asyncio'
+            runtime='asyncio',  # legacy pre-Phase-F row
         )
 
-    # K8s mocks are wired but should NOT be invoked — runtime='asyncio'
+    # K8s mocks are wired but should NOT be invoked — non-'job' runtime
     # never reaches the Job-existence check.
     cfg, list_mock, client_mod, api_cls = _wire_k8s_mocks(jobs_items=[])
     with _sys_modules_patch(cfg, client_mod, api_cls):
@@ -266,9 +265,9 @@ async def test_asyncio_mode_record_uses_existing_orphan_path(db_enabled: None) -
 
 @pytest.mark.asyncio
 async def test_mixed_runtime_records_route_correctly(db_enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Sanity check: a mix of asyncio + job records, where only the
-    job-mode one has a live K8s Job, results in:
-      - asyncio-mode row → orphaned (no live Task)
+    """Sanity check: a mix of legacy asyncio + Phase-F job records,
+    where only the live job-mode one has a backing K8s Job, results in:
+      - legacy asyncio-mode row → orphaned (no K8s Job lookup)
       - job-mode w/ live Job → still running
       - job-mode w/o live Job → orphaned
     """
@@ -280,6 +279,7 @@ async def test_mixed_runtime_records_route_correctly(db_enabled: None, monkeypat
             initiative='demo',
             status='running',
             started_at=_started_at(),
+            runtime='asyncio',  # legacy pre-Phase-F row
         )
         await create_run(
             s,

@@ -1,28 +1,29 @@
-"""Tests for the Phase D.4 ``LEARTECH_INITIATIVE_RUNTIME`` dual-path branch.
+"""Tests for the Phase F Job-mode initiative spawn path.
 
-POST /initiatives now selects one of two code paths based on the
-``LEARTECH_INITIATIVE_RUNTIME`` env var:
+POST /initiatives now always spawns a K8s Job via
+``gate.agent.job_runner.spawn_initiative_job``; the in-process asyncio
+task path was removed in Phase F (the chart default ``agent.runtime``
+flipped to ``"job"`` and the dual-path branch in
+``app.routers.initiatives.start_initiative`` collapsed to a single
+Job-spawn code path).
 
-* ``asyncio`` (default, today's behaviour) — spawns an asyncio.Task in the
-  API pod's event loop; the run dies on pod restart.
-* ``job`` — calls ``gate.agent.job_runner.spawn_initiative_job`` to start a
-  K8s Job pod; the run lives outside the API pod and survives restarts.
+These tests pin the Job-spawn contract:
 
-These tests pin both branches:
+- ``spawn_initiative_job`` is called with the expected fan-out (image,
+  namespace, env, secret_refs, yaml_body).
+- The record returned to the caller carries ``runtime='job'``,
+  ``job_name`` equal to the run_id, and ``status='running'`` once the
+  K8s API has accepted the Job.
+- ``POD_NAMESPACE`` is required — without it the handler raises 500.
+- spawn failures (RBAC denied, network timeout) surface as 502 so
+  operators can act.
 
-1. Unset / explicit 'asyncio' → asyncio.Task path. No Job spawn occurs.
-   Record has ``runtime='asyncio'`` and ``job_name=None``.
-2. 'job' → spawn_initiative_job called with expected args; no asyncio.Task
-   is created locally; record has ``runtime='job'`` and ``job_name`` set
-   to the Job's name (=run_id by D.3 contract).
+The picker tests (``_pick_image_for_initiative``) are kept because they
+exercise an orthogonal contract (image selection) that the Job spawn
+relies on.
 
-We mock ``spawn_initiative_job`` rather than reach for a fake cluster — D.3's
-own tests already cover the K8s API surface. Here we're asserting the
-router's branching + record-construction contract.
-
-We mock ``run_initiative`` on the asyncio path so the background task
-returns immediately and the TestClient teardown doesn't race against a
-live agent loop.
+We mock ``spawn_initiative_job`` rather than reach for a fake cluster —
+the job_runner module has its own tests covering the K8s API surface.
 """
 
 from __future__ import annotations
@@ -35,12 +36,8 @@ from fastapi.testclient import TestClient
 
 from app import db as db_module
 from app.main import app
-from app.routers.initiatives import _current_runtime_mode, _pick_image_for_initiative
-from gate.agent.initiative import RunSummary
+from app.routers.initiatives import _pick_image_for_initiative
 
-# A filesystem-resolvable initiative — any will do; we use the same
-# 404-then-pick-first-available trick the sibling test_app_initiatives
-# tests use so this stays decoupled from any single YAML name.
 _client = TestClient(app)
 
 
@@ -73,28 +70,6 @@ def _pick_known_initiative_name() -> str:
 @pytest.fixture
 def initiative_name() -> str:
     return _pick_known_initiative_name()
-
-
-# ---------------------------------------------------------------------------
-# Branch selector — _current_runtime_mode
-# ---------------------------------------------------------------------------
-
-
-def test_runtime_mode_defaults_to_asyncio_when_unset(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv('LEARTECH_INITIATIVE_RUNTIME', raising=False)
-    assert _current_runtime_mode() == 'asyncio'
-
-
-def test_runtime_mode_lowercases_input(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv('LEARTECH_INITIATIVE_RUNTIME', 'Job')
-    assert _current_runtime_mode() == 'job'
-
-
-def test_runtime_mode_unknown_value_falls_back_to_asyncio(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A typo in chart values must NOT silently flip to a path the
-    operator didn't intend. Unknown → safe default."""
-    monkeypatch.setenv('LEARTECH_INITIATIVE_RUNTIME', 'definitely-not-real')
-    assert _current_runtime_mode() == 'asyncio'
 
 
 # ---------------------------------------------------------------------------
@@ -134,137 +109,29 @@ def test_pick_image_accepts_language_kwarg_no_behaviour_change(
 
 
 # ---------------------------------------------------------------------------
-# POST /initiatives — asyncio path (default, today's behaviour)
+# POST /initiatives — Job spawn contract (Phase F)
 # ---------------------------------------------------------------------------
 
 
-def test_post_unset_runtime_uses_asyncio_path(
+def test_post_spawns_k8s_job(
     initiative_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """When LEARTECH_INITIATIVE_RUNTIME is unset, the POST handler must
-    use the asyncio.Task path and NOT call spawn_initiative_job."""
-    monkeypatch.delenv('LEARTECH_INITIATIVE_RUNTIME', raising=False)
+    """POST /initiatives must call spawn_initiative_job with the expected
+    fan-out and surface the Job's name + a running status on the record.
 
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> RunSummary:
-        return RunSummary(exit_code=0)
-
-    fake_spawn = AsyncMock()
-    with (
-        patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative),
-        patch('gate.agent.job_runner.spawn_initiative_job', new=fake_spawn),
-    ):
-        resp = _client.post('/initiatives', json={'initiative': initiative_name})
-
-    assert resp.status_code == 202, resp.text
-    body = resp.json()
-    assert body['runtime'] == 'asyncio'
-    assert body['job_name'] is None
-    fake_spawn.assert_not_called()
-
-
-def test_post_explicit_asyncio_runtime_uses_asyncio_path(
-    initiative_name: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Explicit ``LEARTECH_INITIATIVE_RUNTIME=asyncio`` must behave the same
-    as unset — the env var being PRESENT shouldn't change behaviour, only
-    its VALUE."""
-    monkeypatch.setenv('LEARTECH_INITIATIVE_RUNTIME', 'asyncio')
-
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> RunSummary:
-        return RunSummary(exit_code=0)
-
-    fake_spawn = AsyncMock()
-    with (
-        patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative),
-        patch('gate.agent.job_runner.spawn_initiative_job', new=fake_spawn),
-    ):
-        resp = _client.post('/initiatives', json={'initiative': initiative_name})
-
-    assert resp.status_code == 202, resp.text
-    body = resp.json()
-    assert body['runtime'] == 'asyncio'
-    assert body['job_name'] is None
-    fake_spawn.assert_not_called()
-
-
-def test_post_asyncio_runtime_writes_running_status(
-    initiative_name: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Regression guard for Phase D.5.3 — the asyncio path writes
-    ``status='running'`` from ``_run_and_track`` on entry. Phase D.5.3
-    only restored this semantic for the Job path; this test pins the
-    asyncio behaviour so a future refactor that drops the
-    ``await update(..., status='running')`` line at the top of
-    ``_run_and_track`` surfaces immediately.
-
-    Spy on ``app.routers.initiatives.update`` and assert it was called
-    with ``status='running'`` (and the call landed BEFORE the terminal
-    ``status='complete'`` call) for the asyncio path.
-    """
-    monkeypatch.delenv('LEARTECH_INITIATIVE_RUNTIME', raising=False)
-
-    async def fake_run_initiative(*_args: object, **_kwargs: object) -> RunSummary:
-        return RunSummary(exit_code=0)
-
-    # Wrap the real update with a spy so we can inspect the sequence.
-    from app.routers.initiatives import update as real_update
-
-    update_calls: list[dict[str, Any]] = []
-
-    async def spy_update(initiative_id: str, **fields: Any) -> None:
-        update_calls.append(fields)
-        await real_update(initiative_id, **fields)
-
-    with (
-        patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative),
-        patch('app.routers.initiatives.update', side_effect=spy_update),
-    ):
-        resp = _client.post('/initiatives', json={'initiative': initiative_name})
-
-    assert resp.status_code == 202, resp.text
-    # The first update call must set status='running'. A terminal
-    # ('complete' / 'failed') update follows once the fake agent loop
-    # returns. The ORDER matters — flipping these lines would mean the
-    # catalog never observes a 'running' state for asyncio runs either,
-    # which is exactly the symptom D.5.3 fixed for the Job path.
-    statuses = [c.get('status') for c in update_calls if 'status' in c]
-    assert statuses, f'no status updates recorded; calls={update_calls!r}'
-    assert statuses[0] == 'running', (
-        f"asyncio path must write status='running' before any terminal transition; observed sequence: {statuses!r}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# POST /initiatives — Job path (Phase D.4 opt-in)
-# ---------------------------------------------------------------------------
-
-
-def test_post_job_runtime_spawns_k8s_job(
-    initiative_name: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """With LEARTECH_INITIATIVE_RUNTIME=job, the handler must call
-    spawn_initiative_job, NOT create an asyncio.Task, and surface the
-    Job's name on the record."""
-    monkeypatch.setenv('LEARTECH_INITIATIVE_RUNTIME', 'job')
+    Phase F: there is no asyncio fallback any more — every POST takes
+    this path."""
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
     monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
 
-    # Capture the spawn arguments so we can pin the contract.
     captured: dict[str, Any] = {}
 
     async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
         captured.update(kwargs)
         return kwargs['run_id'], kwargs['namespace']
 
-    fake_run_initiative = AsyncMock()
-    with (
-        patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn),
-        patch('app.routers.initiatives.run_initiative', new=fake_run_initiative),
-    ):
+    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
         resp = _client.post('/initiatives', json={'initiative': initiative_name})
 
     assert resp.status_code == 202, resp.text
@@ -275,10 +142,9 @@ def test_post_job_runtime_spawns_k8s_job(
     # Phase D.5.3 — once the K8s API has accepted the Job (= spawn
     # returned), the record's status must reflect that the run is in
     # flight. Before D.5.3 this stayed at 'queued' until the reconciler
-    # patched terminal, so the catalog never showed a 'running' state
-    # for Job-mode runs.
+    # patched terminal, so the catalog never showed a 'running' state.
     assert body['status'] == 'running', (
-        f'Job-mode POST must return status=running after a successful spawn (got {body["status"]!r}); see Phase D.5.3.'
+        f'POST must return status=running after a successful spawn (got {body["status"]!r}); see Phase D.5.3.'
     )
 
     # The catalog state was also updated, not just the response payload.
@@ -299,20 +165,15 @@ def test_post_job_runtime_spawns_k8s_job(
     assert isinstance(captured['env'], dict)
     assert isinstance(captured['secret_refs'], dict)
 
-    # Crucially: the asyncio agent loop is NOT invoked. The Job pod runs
-    # its own copy of run_initiative; the API pod must not start one too.
-    fake_run_initiative.assert_not_called()
 
-
-def test_post_job_runtime_requires_pod_namespace(
+def test_post_requires_pod_namespace(
     initiative_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POD_NAMESPACE must be set when runtime='job' — without it the Job
-    spawn has no target namespace. The chart's Deployment injects this
-    via downward-API fieldRef; missing it indicates a misconfiguration
-    that should fail loudly (500) rather than guess a fallback."""
-    monkeypatch.setenv('LEARTECH_INITIATIVE_RUNTIME', 'job')
+    """POD_NAMESPACE must be set — without it the Job spawn has no target
+    namespace. The chart's Deployment injects this via downward-API
+    fieldRef; missing it indicates a misconfiguration that should fail
+    loudly (500) rather than guess a fallback."""
     monkeypatch.delenv('POD_NAMESPACE', raising=False)
 
     fake_spawn = AsyncMock()
@@ -324,7 +185,7 @@ def test_post_job_runtime_requires_pod_namespace(
     fake_spawn.assert_not_called()
 
 
-def test_post_job_runtime_spawn_failure_surfaces_502(
+def test_post_spawn_failure_surfaces_502(
     initiative_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -332,7 +193,6 @@ def test_post_job_runtime_spawn_failure_surfaces_502(
     the handler must surface a 502 rather than letting the exception
     bubble as a generic 500. Operators reading the API logs need to
     know a Job spawn failed."""
-    monkeypatch.setenv('LEARTECH_INITIATIVE_RUNTIME', 'job')
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
 
     async def boom(**_kwargs: Any) -> tuple[str, str]:

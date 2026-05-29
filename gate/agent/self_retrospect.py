@@ -5,7 +5,9 @@ pushing?' Output filed as a GitHub Issue on the originating repo with
 the label ``self-retrospective``, containing structured findings each
 with a root cause + proposed enhancement.
 
-Triggered post-success from ``app.routers.initiatives._run_and_track``.
+Triggered post-success from the job_reconciler when a run reaches
+terminal=complete (Phase F: every run is a K8s Job, so the reconciler
+is the only completion signal).
 Non-blocking: any failure here MUST NOT affect the agent's main flow.
 The PR is already merged-eligible; the retrospective is enrichment.
 
