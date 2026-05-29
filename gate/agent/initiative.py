@@ -390,6 +390,22 @@ async def run_initiative(
             body=crash_sticky_body,
         )
 
+    # Final summary line — emitted AFTER PR resolution so the reconciler
+    # has an authoritative pr= field rather than greppy URL hunting. Per-turn
+    # ResultMessage summaries above don't know the PR yet (PR resolution
+    # happens once at the end). The reconciler picks the LAST `--- turns=`
+    # line, which is this one when present. Includes `pr=N` only when a PR
+    # actually exists — absence means "no PR opened" (e.g. agent decided
+    # no changes were needed), distinct from "PR opened but parse failed".
+    pr_suffix = f'  pr={pr_number}' if pr_number is not None else ''
+    click.echo(
+        click.style(
+            f'\n--- turns={last_turn_count or 0}  in=0  out=0  cost=${last_cost:.4f}{pr_suffix}',
+            fg='yellow',
+        ),
+        err=True,
+    )
+
     return RunSummary(
         exit_code=exit_code,
         turns=last_turn_count or None,

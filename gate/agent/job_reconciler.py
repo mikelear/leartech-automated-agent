@@ -47,15 +47,15 @@ LABEL_SELECTOR = 'leartech.io/component=initiative-runner'
 TERMINAL_STATUSES = frozenset({'complete', 'failed', 'cancelled', 'orphaned', 'timed_out'})
 LOG_TAIL_LINES = 200
 
-# `--- turns=10  in=15  out=2945  cost=$0.5230` — emitted by the agent's
-# CLI at the very end of run_initiative. Floats + ints both accepted.
+# `--- turns=10  in=15  out=2945  cost=$0.5230` — per-turn summary lines.
+# The FINAL line emitted by run_initiative (after PR resolution) appends
+# `  pr=N` when a PR was opened. Capture both turns/cost and optional pr.
+# Floats + ints both accepted on cost.
 _SUMMARY_RE = re.compile(
-    r'^---\s*turns=(?P<turns>\d+)\s+in=\d+\s+out=\d+\s+cost=\$(?P<cost>\d+(?:\.\d+)?)',
+    r'^---\s*turns=(?P<turns>\d+)\s+in=\S+\s+out=\S+\s+cost=\$(?P<cost>\d+(?:\.\d+)?)'
+    r'(?:\s+pr=(?P<pr>\d+))?',
     re.MULTILINE,
 )
-# Captures the LAST `gh pr create` output URL — agent's stdout includes
-# `https://github.com/<org>/<repo>/pull/<N>` from gh CLI.
-_PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
 
 
 def _now() -> datetime:
@@ -113,20 +113,24 @@ async def _fetch_pod_log_tail(core: client.CoreV1Api, namespace: str, job_name: 
         return ''
 
 
-def _parse_summary(log_text: str) -> tuple[int | None, float | None]:
-    """Extract (turns, cost_usd) from the trailing agent summary line."""
+def _parse_summary(log_text: str) -> tuple[int | None, float | None, int | None]:
+    """Extract (turns, cost_usd, pr_number) from the trailing agent summary.
+
+    The agent's `gate.agent.initiative` CLI emits a final summary line after
+    PR resolution: `--- turns=X  in=...  out=...  cost=$W  pr=N` (pr=N is
+    present only when a PR was opened). We pick the LAST `--- turns=` line
+    so per-turn summaries don't overshadow the final authoritative one.
+    """
     matches = list(_SUMMARY_RE.finditer(log_text))
     if not matches:
-        return None, None
+        return None, None, None
     last = matches[-1]
-    return int(last.group('turns')), float(last.group('cost'))
-
-
-def _parse_pr_number(log_text: str) -> int | None:
-    matches = list(_PR_URL_RE.finditer(log_text))
-    if not matches:
-        return None
-    return int(matches[-1].group(1))
+    pr_raw = last.group('pr')
+    return (
+        int(last.group('turns')),
+        float(last.group('cost')),
+        int(pr_raw) if pr_raw else None,
+    )
 
 
 async def reconcile_once(namespace: str) -> int:
@@ -149,8 +153,7 @@ async def reconcile_once(namespace: str) -> int:
             if record.status in TERMINAL_STATUSES:
                 continue
             log_text = await _fetch_pod_log_tail(core, namespace, run_id)
-            turns, cost = _parse_summary(log_text)
-            pr_number = _parse_pr_number(log_text)
+            turns, cost, pr_number = _parse_summary(log_text)
             await update(
                 run_id,
                 status=terminal,
