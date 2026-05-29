@@ -28,6 +28,7 @@ from claude_agent_sdk.types import (
     ThinkingBlock,
     ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from gate.agent.initiative_prompt import INITIATIVE_SYSTEM_PROMPT
@@ -415,6 +416,30 @@ async def run_initiative(
     # later tool calls that also surface the URL.
     pr_url_pattern = _build_pr_url_pattern(primary.qualified_repo)
     pr_emitted: int | None = None
+
+    def _maybe_emit_pr_open(block: object) -> int | None:
+        # The watcher only fires on ToolResultBlock — that's where `gh pr create`
+        # stdout (or any MCP tool's output) surfaces the PR URL. Per the SDK
+        # protocol ToolResultBlock arrives in UserMessage.content (the role
+        # that returns tool output to the model), NOT AssistantMessage.content.
+        # Inlined here to keep `pr_emitted` and the marker emit in one place.
+        nonlocal pr_emitted
+        if pr_emitted is not None or not isinstance(block, ToolResultBlock):
+            return None
+        candidate = _extract_pr_from_tool_result(block.content, pr_url_pattern)
+        if candidate is None:
+            return None
+        pr_emitted = candidate
+        click.echo(
+            click.style(
+                f'\n--- pr_open pr={pr_emitted} repo={primary.qualified_repo}',
+                fg='yellow',
+            ),
+            err=True,
+        )
+        _write_pr_number_hint(pr_emitted)
+        return pr_emitted
+
     try:
         async for message in query(prompt=user_prompt, options=options):
             if isinstance(message, AssistantMessage):
@@ -423,21 +448,16 @@ async def run_initiative(
                         click.echo(block.text)
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
-                    elif isinstance(block, ToolResultBlock):
-                        if pr_emitted is None:
-                            candidate = _extract_pr_from_tool_result(block.content, pr_url_pattern)
-                            if candidate is not None:
-                                pr_emitted = candidate
-                                click.echo(
-                                    click.style(
-                                        f'\n--- pr_open pr={pr_emitted} repo={primary.qualified_repo}',
-                                        fg='yellow',
-                                    ),
-                                    err=True,
-                                )
-                                _write_pr_number_hint(pr_emitted)
                     elif isinstance(block, ThinkingBlock):
                         pass
+            elif isinstance(message, UserMessage):
+                # UserMessage.content carries ToolResultBlock entries returning
+                # tool output to the model. The SDK types `content` as
+                # `str | list[ContentBlock]` — string-content user turns
+                # (e.g. the initial user prompt) have no blocks to scan.
+                if isinstance(message.content, list):
+                    for block in message.content:
+                        _maybe_emit_pr_open(block)
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
                 usage = message.usage or {}
