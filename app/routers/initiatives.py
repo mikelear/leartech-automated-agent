@@ -653,8 +653,17 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
             job_name=job_name,
         )
         await register(record, task=None)
+        # Phase D.5.3 — reflect that the Job is in flight. Without this, the
+        # DB record sits at 'queued' until the reconciler patches it to
+        # terminal (`complete` / `failed`), so the catalog never shows a
+        # 'running' state for Job-mode runs even while the pod has been
+        # executing for minutes. The asyncio path writes 'running' from
+        # _run_and_track on entry; this restores the same semantics here
+        # now that the K8s API has accepted the Job (= spawn returned).
+        await update(initiative_id, status='running')
+        record = record.model_copy(update={'status': 'running'})
         logger.info(
-            'initiative %s queued (runtime=job): %s — Job %s/%s',
+            'initiative %s running (runtime=job): %s — Job %s/%s',
             initiative_id,
             request.initiative,
             namespace,

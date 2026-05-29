@@ -189,6 +189,54 @@ def test_post_explicit_asyncio_runtime_uses_asyncio_path(
     fake_spawn.assert_not_called()
 
 
+def test_post_asyncio_runtime_writes_running_status(
+    initiative_name: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard for Phase D.5.3 — the asyncio path writes
+    ``status='running'`` from ``_run_and_track`` on entry. Phase D.5.3
+    only restored this semantic for the Job path; this test pins the
+    asyncio behaviour so a future refactor that drops the
+    ``await update(..., status='running')`` line at the top of
+    ``_run_and_track`` surfaces immediately.
+
+    Spy on ``app.routers.initiatives.update`` and assert it was called
+    with ``status='running'`` (and the call landed BEFORE the terminal
+    ``status='complete'`` call) for the asyncio path.
+    """
+    monkeypatch.delenv('LEARTECH_INITIATIVE_RUNTIME', raising=False)
+
+    async def fake_run_initiative(*_args: object, **_kwargs: object) -> RunSummary:
+        return RunSummary(exit_code=0)
+
+    # Wrap the real update with a spy so we can inspect the sequence.
+    from app.routers.initiatives import update as real_update
+
+    update_calls: list[dict[str, Any]] = []
+
+    async def spy_update(initiative_id: str, **fields: Any) -> None:
+        update_calls.append(fields)
+        await real_update(initiative_id, **fields)
+
+    with (
+        patch('app.routers.initiatives.run_initiative', side_effect=fake_run_initiative),
+        patch('app.routers.initiatives.update', side_effect=spy_update),
+    ):
+        resp = _client.post('/initiatives', json={'initiative': initiative_name})
+
+    assert resp.status_code == 202, resp.text
+    # The first update call must set status='running'. A terminal
+    # ('complete' / 'failed') update follows once the fake agent loop
+    # returns. The ORDER matters — flipping these lines would mean the
+    # catalog never observes a 'running' state for asyncio runs either,
+    # which is exactly the symptom D.5.3 fixed for the Job path.
+    statuses = [c.get('status') for c in update_calls if 'status' in c]
+    assert statuses, f'no status updates recorded; calls={update_calls!r}'
+    assert statuses[0] == 'running', (
+        f"asyncio path must write status='running' before any terminal transition; observed sequence: {statuses!r}"
+    )
+
+
 # ---------------------------------------------------------------------------
 # POST /initiatives — Job path (Phase D.4 opt-in)
 # ---------------------------------------------------------------------------
@@ -224,6 +272,22 @@ def test_post_job_runtime_spawns_k8s_job(
     assert body['runtime'] == 'job'
     # job_name equals the run_id by D.3 contract.
     assert body['job_name'] == body['id']
+    # Phase D.5.3 — once the K8s API has accepted the Job (= spawn
+    # returned), the record's status must reflect that the run is in
+    # flight. Before D.5.3 this stayed at 'queued' until the reconciler
+    # patched terminal, so the catalog never showed a 'running' state
+    # for Job-mode runs.
+    assert body['status'] == 'running', (
+        f'Job-mode POST must return status=running after a successful spawn (got {body["status"]!r}); see Phase D.5.3.'
+    )
+
+    # The catalog state was also updated, not just the response payload.
+    # Future regressions where the response is mutated but the underlying
+    # state isn't would surface here (the GET endpoint calls get_record,
+    # which reads the same in-memory dict the response was built from).
+    status_resp = _client.get(f'/initiatives/{body["id"]}')
+    assert status_resp.status_code == 200, status_resp.text
+    assert status_resp.json()['status'] == 'running'
 
     # spawn_initiative_job was called with the expected fan-out.
     assert captured['initiative_name'] == initiative_name
