@@ -1,0 +1,406 @@
+"""Tests for the leartech-tekton MCP server (`gate.mcp_servers.tekton`).
+
+We mock the kubectl shellout via `_run_kubectl` — the single seam that all
+higher-level helpers go through. Tests assert on parsed dict-of-strings shapes
+returned by the public helpers, NOT on the MCP tool wrappers themselves (those
+are thin re-encoders and are smoke-checked via `build_tekton_server`).
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from typing import Any
+
+import pytest
+
+from gate.mcp_servers import tekton
+from gate.mcp_servers.tekton import (
+    _KubectlResult,
+    build_tekton_server,
+    cancel_pipelinerun,
+    cancel_superseded_for_pr,
+    list_pipelineruns_for_pr,
+    step_logs,
+    step_status,
+)
+
+# ─── Fixtures ─────────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+def mock_kubectl(monkeypatch: pytest.MonkeyPatch) -> Iterator[list[dict[str, Any]]]:
+    """Capture every `_run_kubectl` call and return a queue of canned results.
+
+    Tests append result dicts onto the returned `recorded` list as well so they
+    can assert on the cmd args passed to kubectl. Each call pops one canned
+    response in FIFO order.
+    """
+    recorded: list[dict[str, Any]] = []
+    canned: list[_KubectlResult] = []
+
+    def fake_run_kubectl(args: list[str], cluster: str, timeout: int = 30) -> _KubectlResult:
+        recorded.append({'args': list(args), 'cluster': cluster, 'timeout': timeout})
+        if canned:
+            return canned.pop(0)
+        return _KubectlResult(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(tekton, '_run_kubectl', fake_run_kubectl)
+    # Expose the canned-queue back to the test via the recorded list's metadata.
+    # We attach it as the first item's `_canned_ref` if needed — but tests prefer
+    # to mutate `canned` directly via the returned reference below.
+    recorded.append({'_canned_ref': canned})  # sentinel; tests pop it before assertions
+    yield recorded
+
+
+def _queue_canned(mock_kubectl: list[dict[str, Any]], *results: _KubectlResult) -> None:
+    """Append canned results into the fake kubectl's FIFO queue."""
+    sentinel = mock_kubectl[0]
+    assert '_canned_ref' in sentinel
+    sentinel['_canned_ref'].extend(results)
+
+
+def _calls(mock_kubectl: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the recorded kubectl calls minus the canned-queue sentinel."""
+    return [c for c in mock_kubectl if '_canned_ref' not in c]
+
+
+# ─── Sample payloads ──────────────────────────────────────────────────────────
+
+
+_PR_LIST_TWO_RUNS = {
+    'items': [
+        {
+            'metadata': {
+                'name': 'webcoder-ui-pr-7-lint-abc',
+                'labels': {
+                    'lighthouse.jenkins-x.io/lastCommitSHA': 'sha-OLD',
+                    'lighthouse.jenkins-x.io/context': 'lint',
+                    'tekton.dev/pipeline': 'lint',
+                },
+            },
+            'status': {
+                'startTime': '2026-05-29T10:00:00Z',
+                'completionTime': '2026-05-29T10:02:00Z',
+                'conditions': [{'status': 'True', 'reason': 'Succeeded'}],
+            },
+        },
+        {
+            'metadata': {
+                'name': 'webcoder-ui-pr-7-pr-def',
+                'labels': {
+                    'lighthouse.jenkins-x.io/lastCommitSHA': 'sha-NEW',
+                    'lighthouse.jenkins-x.io/context': 'pr',
+                    'tekton.dev/pipeline': 'pullrequest',
+                },
+            },
+            'status': {
+                'startTime': '2026-05-29T10:10:00Z',
+                'conditions': [{'status': 'Unknown', 'reason': 'Running'}],
+            },
+        },
+    ]
+}
+
+
+_PR_WITH_FAILED_STEP = {
+    'status': {
+        'taskRuns': {
+            'lint-tr-1': {
+                'pipelineTaskName': 'lint',
+                'status': {
+                    'podName': 'lint-tr-1-pod',
+                    'steps': [
+                        {
+                            'name': 'git-clone',
+                            'terminated': {'exitCode': 0, 'reason': 'Completed'},
+                        },
+                        {
+                            'name': 'ruff',
+                            'terminated': {'exitCode': 1, 'reason': 'Error'},
+                        },
+                        {
+                            'name': 'mypy',
+                            # never ran — earlier step failed
+                            'waiting': {'reason': 'PodInitializing'},
+                        },
+                    ],
+                },
+            }
+        }
+    }
+}
+
+
+_PR_WITH_RUNNING_STEPS = {
+    'status': {
+        'taskRuns': {
+            'pr-tr-1': {
+                'pipelineTaskName': 'pr',
+                'status': {
+                    'podName': 'pr-tr-1-pod',
+                    'steps': [
+                        {'name': 'git-clone', 'terminated': {'exitCode': 0, 'reason': 'Completed'}},
+                        {'name': 'pytest', 'running': {}},
+                    ],
+                },
+            }
+        }
+    }
+}
+
+
+# ─── list_pipelineruns_for_pr ─────────────────────────────────────────────────
+
+
+def test_list_pipelineruns_parses_json_and_orders_newest_first(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(
+        mock_kubectl,
+        _KubectlResult(returncode=0, stdout=json.dumps(_PR_LIST_TWO_RUNS), stderr=''),
+    )
+    rows = list_pipelineruns_for_pr('webcoder-ui', 7, 'gcp')
+    assert len(rows) == 2
+    # Newest first by startTime
+    assert rows[0]['name'] == 'webcoder-ui-pr-7-pr-def'
+    assert rows[0]['status'] == 'Running'
+    assert rows[0]['sha'] == 'sha-NEW'
+    assert rows[1]['name'] == 'webcoder-ui-pr-7-lint-abc'
+    assert rows[1]['status'] == 'Succeeded'
+    assert rows[1]['sha'] == 'sha-OLD'
+    # And the call used the right selector + cluster (kubectl ctx is added by
+    # _run_kubectl after our seam, so we assert on the cluster name we passed
+    # to the seam, not on the resolved context).
+    call = _calls(mock_kubectl)[0]
+    assert call['cluster'] == 'gcp'
+    assert 'lighthouse.jenkins-x.io/refs.pull=7' in ' '.join(call['args'])
+    assert 'lighthouse.jenkins-x.io/refs.repo=mikelear/webcoder-ui' in ' '.join(call['args'])
+
+
+def test_list_pipelineruns_empty_on_no_results(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(mock_kubectl, _KubectlResult(returncode=0, stdout='', stderr=''))
+    assert list_pipelineruns_for_pr('webcoder-ui', 999, 'az') == []
+
+
+def test_list_pipelineruns_empty_when_kubectl_errors(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(mock_kubectl, _KubectlResult(returncode=1, stdout='', stderr='no such resource'))
+    assert list_pipelineruns_for_pr('webcoder-ui', 7, 'az') == []
+
+
+def test_list_pipelineruns_unknown_cluster_raises() -> None:
+    # Reaches into _context_for via the kubectl seam — but list_pipelineruns_for_pr
+    # calls _run_kubectl which validates the cluster. Tests that error surfaces.
+    with pytest.raises(ValueError, match='Unknown cluster'):
+        list_pipelineruns_for_pr('webcoder-ui', 7, 'aws')
+
+
+# ─── step_status ──────────────────────────────────────────────────────────────
+
+
+def test_step_status_surfaces_failed_step_with_reason(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(
+        mock_kubectl,
+        _KubectlResult(returncode=0, stdout=json.dumps(_PR_WITH_FAILED_STEP), stderr=''),
+    )
+    rows = step_status('webcoder-ui-pr-7-lint-abc', 'az')
+    by_step = {r['step']: r for r in rows}
+    assert by_step['git-clone']['state'] == 'Succeeded'
+    assert by_step['ruff']['state'] == 'Failed'
+    assert by_step['ruff']['exit_code'] == 1
+    assert by_step['mypy']['state'] == 'Pending'
+    # Pod is surfaced so step_logs can find it
+    assert all(r['pod'] == 'lint-tr-1-pod' for r in rows)
+
+
+def test_step_status_handles_running_steps(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(
+        mock_kubectl,
+        _KubectlResult(returncode=0, stdout=json.dumps(_PR_WITH_RUNNING_STEPS), stderr=''),
+    )
+    rows = step_status('webcoder-ui-pr-7-pr-def', 'gcp')
+    by_step = {r['step']: r for r in rows}
+    assert by_step['git-clone']['state'] == 'Succeeded'
+    assert by_step['pytest']['state'] == 'Running'
+    assert by_step['pytest']['exit_code'] is None
+
+
+def test_step_status_empty_when_kubectl_errors(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(mock_kubectl, _KubectlResult(returncode=1, stdout='', stderr='not found'))
+    assert step_status('does-not-exist', 'az') == []
+
+
+# ─── step_logs ────────────────────────────────────────────────────────────────
+
+
+def test_step_logs_returns_log_text_when_pod_resolves(mock_kubectl: list[dict[str, Any]]) -> None:
+    # First call: step_status lookup; second call: kubectl logs.
+    _queue_canned(
+        mock_kubectl,
+        _KubectlResult(returncode=0, stdout=json.dumps(_PR_WITH_FAILED_STEP), stderr=''),
+        _KubectlResult(returncode=0, stdout='E901 SyntaxError: invalid syntax\n', stderr=''),
+    )
+    text = step_logs('webcoder-ui-pr-7-lint-abc', 'ruff', 'az', tail=50)
+    assert 'SyntaxError' in text
+    # Confirm second call shape: `kubectl logs <pod> -c step-<name> --tail=50`
+    logs_call = _calls(mock_kubectl)[1]
+    assert 'logs' in logs_call['args']
+    assert 'lint-tr-1-pod' in logs_call['args']
+    assert 'step-ruff' in logs_call['args']
+    assert '--tail=50' in logs_call['args']
+
+
+def test_step_logs_returns_empty_when_pod_missing(mock_kubectl: list[dict[str, Any]]) -> None:
+    # The step exists in the payload but has no pod attached.
+    payload_no_pod = {
+        'status': {
+            'taskRuns': {
+                'lint-tr-1': {
+                    'pipelineTaskName': 'lint',
+                    'status': {
+                        'podName': '',  # GC'd
+                        'steps': [{'name': 'ruff', 'terminated': {'exitCode': 1}}],
+                    },
+                }
+            }
+        }
+    }
+    _queue_canned(mock_kubectl, _KubectlResult(returncode=0, stdout=json.dumps(payload_no_pod), stderr=''))
+    assert step_logs('some-run', 'ruff', 'az') == ''
+
+
+def test_step_logs_returns_empty_when_step_name_wrong(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(
+        mock_kubectl,
+        _KubectlResult(returncode=0, stdout=json.dumps(_PR_WITH_FAILED_STEP), stderr=''),
+    )
+    assert step_logs('webcoder-ui-pr-7-lint-abc', 'no-such-step', 'az') == ''
+
+
+# ─── cancel_pipelinerun ───────────────────────────────────────────────────────
+
+
+def test_cancel_pipelinerun_returns_true_on_success(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(mock_kubectl, _KubectlResult(returncode=0, stdout='patched', stderr=''))
+    assert cancel_pipelinerun('webcoder-ui-pr-7-lint-abc', 'az') is True
+    call = _calls(mock_kubectl)[0]
+    assert 'patch' in call['args']
+    assert 'webcoder-ui-pr-7-lint-abc' in call['args']
+    # The merge-patch body carries PipelineRunCancelled
+    body = next((a for a in call['args'] if 'PipelineRunCancelled' in a), '')
+    assert 'PipelineRunCancelled' in body
+
+
+def test_cancel_pipelinerun_returns_false_when_patch_fails(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(mock_kubectl, _KubectlResult(returncode=1, stdout='', stderr='not found'))
+    assert cancel_pipelinerun('does-not-exist', 'gcp') is False
+
+
+# ─── cancel_superseded_for_pr ─────────────────────────────────────────────────
+
+
+def test_cancel_superseded_only_cancels_non_matching_sha(mock_kubectl: list[dict[str, Any]]) -> None:
+    """Two runs on different SHAs, neither terminal → only the non-keep one is cancelled."""
+    payload = {
+        'items': [
+            {
+                'metadata': {
+                    'name': 'old-run',
+                    'labels': {'lighthouse.jenkins-x.io/lastCommitSHA': 'sha-OLD'},
+                },
+                'status': {
+                    'startTime': '2026-05-29T10:00:00Z',
+                    'conditions': [{'status': 'Unknown', 'reason': 'Running'}],
+                },
+            },
+            {
+                'metadata': {
+                    'name': 'new-run',
+                    'labels': {'lighthouse.jenkins-x.io/lastCommitSHA': 'sha-NEW'},
+                },
+                'status': {
+                    'startTime': '2026-05-29T10:10:00Z',
+                    'conditions': [{'status': 'Unknown', 'reason': 'Running'}],
+                },
+            },
+        ]
+    }
+    _queue_canned(
+        mock_kubectl,
+        _KubectlResult(returncode=0, stdout=json.dumps(payload), stderr=''),  # list call
+        _KubectlResult(returncode=0, stdout='patched', stderr=''),  # cancel old-run
+    )
+    n = cancel_superseded_for_pr('webcoder-ui', 7, keep_sha='sha-NEW', cluster='az')
+    assert n == 1
+    # Verify we patched the OLD run, not the new one
+    calls = _calls(mock_kubectl)
+    assert len(calls) == 2
+    patch_call = calls[1]
+    assert 'old-run' in patch_call['args']
+    assert 'new-run' not in patch_call['args']
+
+
+def test_cancel_superseded_skips_already_terminal_runs(mock_kubectl: list[dict[str, Any]]) -> None:
+    """A Succeeded run on an old SHA should not be patched — it's already done."""
+    payload = {
+        'items': [
+            {
+                'metadata': {
+                    'name': 'old-but-succeeded',
+                    'labels': {'lighthouse.jenkins-x.io/lastCommitSHA': 'sha-OLD'},
+                },
+                'status': {
+                    'startTime': '2026-05-29T10:00:00Z',
+                    'completionTime': '2026-05-29T10:01:00Z',
+                    'conditions': [{'status': 'True', 'reason': 'Succeeded'}],
+                },
+            },
+        ]
+    }
+    _queue_canned(mock_kubectl, _KubectlResult(returncode=0, stdout=json.dumps(payload), stderr=''))
+    n = cancel_superseded_for_pr('webcoder-ui', 7, keep_sha='sha-NEW', cluster='az')
+    assert n == 0
+    # Only the list call should have happened — no patch
+    assert len(_calls(mock_kubectl)) == 1
+
+
+def test_cancel_superseded_returns_zero_when_no_runs(mock_kubectl: list[dict[str, Any]]) -> None:
+    _queue_canned(mock_kubectl, _KubectlResult(returncode=0, stdout='', stderr=''))
+    assert cancel_superseded_for_pr('webcoder-ui', 7, keep_sha='sha-NEW', cluster='gcp') == 0
+
+
+# ─── Builder smoke test ───────────────────────────────────────────────────────
+
+
+def test_build_tekton_server_constructs_with_six_tools() -> None:
+    """The MCP builder wires every tool the catalog promises."""
+    server = build_tekton_server()
+    assert server is not None
+    # Best-effort tool-name extraction — same shape as test_mcp_servers.py.
+    instance = server['instance'] if isinstance(server, dict) else getattr(server, 'instance', None)
+    if instance is not None and hasattr(instance, '_tool_handlers'):
+        names = [t.name for t in instance._tool_handlers.values()]
+        expected = {
+            'list_pipelineruns_for_pr',
+            'step_status',
+            'step_logs',
+            'cancel_pipelinerun',
+            'cancel_superseded_for_pr',
+            'wait_first_failure',
+        }
+        assert set(names) == expected
+
+
+def test_catalog_registers_leartech_tekton() -> None:
+    """The committed catalog YAML wires leartech-tekton into initiative_agent."""
+    from gate.agent.mcp_catalog import get_role, load_catalog
+
+    load_catalog.cache_clear()
+    catalog = load_catalog()
+    assert 'leartech-tekton' in catalog.mcp_servers
+    mcp = catalog.mcp_servers['leartech-tekton']
+    assert mcp.type == 'sdk'
+    assert mcp.builder == 'gate.mcp_servers.tekton:build_tekton_server'
+    role = get_role('initiative_agent')
+    assert 'leartech-tekton' in role.mcps
+    # Other roles must NOT get it — initiative-runner-only per the goal spec.
+    for other in ('review_agent', 'ba_agent', 'forensic_agent'):
+        assert 'leartech-tekton' not in get_role(other).mcps

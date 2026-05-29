@@ -42,6 +42,15 @@ mcp_servers:
     builder: gate.mcp_servers.artifacts_server:build_artifacts_server
     description: Playwright videos, traces, screenshots from GCS test-artifacts bucket.
 
+  leartech-tekton:
+    type: sdk
+    builder: gate.mcp_servers.tekton:build_tekton_server
+    description: |
+      Step-aware Tekton PipelineRun inspection via kubectl (no GitHub GraphQL).
+      Surfaces WHICH STEP failed (git-clone vs ruff vs pytest), tails per-step
+      logs, and cancels superseded runs on force-push. Phase G.1 — initiative
+      role only; consumer wiring lands in Phase G.2.
+
   # Stdio (subprocess) — for external tools and future cross-process agents.
   # Marked `status: not_built` until the wrapper repo exists.
   stitch:
@@ -95,6 +104,7 @@ roles:
       - leartech-criteria
       - leartech-pr-context
       - leartech-test-artifacts
+      - leartech-tekton
     tools:
       - Read
       - Write
