@@ -16,6 +16,7 @@ an initiative on AZ and watching the DB row transition queued -> complete.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -27,7 +28,6 @@ from gate.agent.job_reconciler import (
     reconcile_once,
 )
 
-
 # ---------------------------------------------------------------------------
 # Log parsing
 # ---------------------------------------------------------------------------
@@ -35,12 +35,7 @@ from gate.agent.job_reconciler import (
 
 def test_parse_summary_extracts_last_summary_line() -> None:
     """Agent emits one summary per iteration; we use the final one."""
-    log = (
-        '→ Bash\n'
-        '--- turns=2  in=15  out=10  cost=$0.001\n'
-        'more work\n'
-        '--- turns=10  in=15  out=2945  cost=$0.5230\n'
-    )
+    log = '→ Bash\n--- turns=2  in=15  out=10  cost=$0.001\nmore work\n--- turns=10  in=15  out=2945  cost=$0.5230\n'
     turns, cost = _parse_summary(log)
     assert turns == 10
     assert cost == 0.5230
@@ -78,9 +73,7 @@ def _make_job(name: str, conditions: list[tuple[str, str]]) -> SimpleNamespace:
     return SimpleNamespace(
         metadata=SimpleNamespace(name=name),
         status=SimpleNamespace(
-            conditions=[
-                SimpleNamespace(type=ctype, status=cstatus) for ctype, cstatus in conditions
-            ],
+            conditions=[SimpleNamespace(type=ctype, status=cstatus) for ctype, cstatus in conditions],
         ),
     )
 

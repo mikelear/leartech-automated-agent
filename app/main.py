@@ -117,12 +117,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         namespace = os.environ.get('POD_NAMESPACE')
         if namespace and is_db_enabled():
             from gate.agent.job_reconciler import reconciler_loop
+
             reconciler_task = asyncio.create_task(reconciler_loop(namespace))
             _logger.info('job reconciler launched (namespace=%s)', namespace)
         else:
             _logger.warning(
-                'LEARTECH_INITIATIVE_RUNTIME=job but reconciler not launched '
-                '(POD_NAMESPACE=%s, db_enabled=%s)', namespace, is_db_enabled(),
+                'LEARTECH_INITIATIVE_RUNTIME=job but reconciler not launched (POD_NAMESPACE=%s, db_enabled=%s)',
+                namespace,
+                is_db_enabled(),
             )
     try:
         yield

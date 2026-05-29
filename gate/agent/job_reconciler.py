@@ -31,13 +31,14 @@ import asyncio
 import logging
 import os
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client.api_client import ApiClient
 
-from app.state import get as get_record, update
+from app.state import get as get_record
+from app.state import update
 
 logger = logging.getLogger(__name__)
 
@@ -58,12 +59,13 @@ _PR_URL_RE = re.compile(r'https://github\.com/[^/\s]+/[^/\s]+/pull/(\d+)')
 
 
 def _now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def _list_runner_jobs(batch: client.BatchV1Api, namespace: str) -> list[Any]:
     resp = await batch.list_namespaced_job(namespace=namespace, label_selector=LABEL_SELECTOR)
-    return resp.items
+    items: list[Any] = list(resp.items)
+    return items
 
 
 def _job_terminal_state(job: Any) -> str | None:
@@ -100,11 +102,12 @@ async def _fetch_pod_log_tail(core: client.CoreV1Api, namespace: str, job_name: 
         if not pods.items:
             return ''
         pod_name = pods.items[0].metadata.name
-        return await core.read_namespaced_pod_log(
+        log_text: str = await core.read_namespaced_pod_log(
             name=pod_name,
             namespace=namespace,
             tail_lines=LOG_TAIL_LINES,
         )
+        return log_text
     except Exception as exc:  # noqa: BLE001 — logs are best-effort
         logger.debug('reconciler: log fetch failed for %s: %s', job_name, exc)
         return ''
@@ -159,7 +162,11 @@ async def reconcile_once(namespace: str) -> int:
             updates += 1
             logger.info(
                 'reconciler: patched %s -> %s (turns=%s cost=%s pr=%s)',
-                run_id, terminal, turns, cost, pr_number,
+                run_id,
+                terminal,
+                turns,
+                cost,
+                pr_number,
             )
     return updates
 
@@ -172,7 +179,9 @@ async def reconciler_loop(namespace: str, *, interval_seconds: int = POLL_INTERV
     """
     logger.info(
         'reconciler: starting (namespace=%s, interval=%ds, label=%s)',
-        namespace, interval_seconds, LABEL_SELECTOR,
+        namespace,
+        interval_seconds,
+        LABEL_SELECTOR,
     )
     while True:
         try:
