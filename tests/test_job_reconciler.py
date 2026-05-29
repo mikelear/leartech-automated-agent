@@ -23,7 +23,6 @@ import pytest
 
 from gate.agent.job_reconciler import (
     _job_terminal_state,
-    _parse_pr_number,
     _parse_summary,
     reconcile_once,
 )
@@ -34,33 +33,48 @@ from gate.agent.job_reconciler import (
 
 
 def test_parse_summary_extracts_last_summary_line() -> None:
-    """Agent emits one summary per iteration; we use the final one."""
-    log = '→ Bash\n--- turns=2  in=15  out=10  cost=$0.001\nmore work\n--- turns=10  in=15  out=2945  cost=$0.5230\n'
-    turns, cost = _parse_summary(log)
+    """Agent emits one summary per iteration AND a final post-PR-resolution
+    summary. We always use the final one — that's the authoritative entry
+    that includes pr=N when a PR was opened."""
+    log = (
+        '→ Bash\n'
+        '--- turns=2  in=15  out=10  cost=$0.001\n'
+        'more work\n'
+        '--- turns=10  in=15  out=2945  cost=$0.5230\n'
+        '--- turns=10  in=0  out=0  cost=$0.5230  pr=237\n'
+    )
+    turns, cost, pr_number = _parse_summary(log)
     assert turns == 10
     assert cost == 0.5230
+    assert pr_number == 237
 
 
 def test_parse_summary_handles_missing_summary() -> None:
-    """No summary line — e.g. crash before completion. Return (None, None)."""
-    assert _parse_summary('some garbage\nno summary here\n') == (None, None)
+    """No summary line — e.g. crash before completion. Return all-None."""
+    assert _parse_summary('some garbage\nno summary here\n') == (None, None, None)
 
 
-def test_parse_pr_number_picks_last_github_url() -> None:
-    """gh pr create echoes the URL on stdout; the agent's prose may
-    reference older PR URLs too. Use the LAST one."""
+def test_parse_summary_returns_none_pr_when_absent() -> None:
+    """Final summary without `pr=N` — e.g. agent decided no changes needed.
+    Don't fabricate a number, and don't go grepping URLs (PR #1 false-positive
+    on prior run d93b17a6b82f surfaced this exact case)."""
+    log = 'all done\n--- turns=2  in=0  out=0  cost=$0.0\n'
+    turns, cost, pr_number = _parse_summary(log)
+    assert turns == 2
+    assert cost == 0.0
+    assert pr_number is None
+
+
+def test_parse_summary_ignores_url_references_in_prose() -> None:
+    """A GitHub URL mentioned by the agent's prose (e.g. referencing a
+    pre-existing PR for context) must NOT poison pr_number. Only the
+    final `--- turns=...  pr=N` line is authoritative."""
     log = (
-        'Earlier reference: https://github.com/owner/repo/pull/100\n'
-        'Pushed branch\n'
-        'https://github.com/mikelear/leartech-mortgages-gw/pull/237\n'
+        'Existing PR for context: https://github.com/owner/repo/pull/100\n'
+        '--- turns=3  in=10  out=20  cost=$0.05\n'
     )
-    assert _parse_pr_number(log) == 237
-
-
-def test_parse_pr_number_returns_none_when_absent() -> None:
-    """No PR URL in log — e.g. agent decided no changes needed.
-    Don't fabricate a number."""
-    assert _parse_pr_number('all done\n--- turns=2  in=0  out=0  cost=$0\n') is None
+    _, _, pr_number = _parse_summary(log)
+    assert pr_number is None
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +171,9 @@ async def test_reconcile_once_patches_non_terminal_row_with_parsed_fields(
     core.read_namespaced_pod_log = AsyncMock(
         return_value=(
             'agent prose\n'
-            'https://github.com/mikelear/leartech-mortgages-gw/pull/513\n'
+            'PR opened: https://github.com/mikelear/leartech-mortgages-gw/pull/513\n'
             '--- turns=12  in=20  out=3500  cost=$0.78\n'
+            '--- turns=12  in=0  out=0  cost=$0.78  pr=513\n'
         ),
     )
 
