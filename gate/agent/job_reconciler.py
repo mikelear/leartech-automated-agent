@@ -40,6 +40,7 @@ from kubernetes_asyncio.client.api_client import ApiClient
 from app.routers.initiatives import _run_self_retrospect
 from app.state import get as get_record
 from app.state import update
+from gate.agent.initiative import _post_crash_sticky
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ POLL_INTERVAL_SECONDS = int(os.environ.get('LEARTECH_JOB_RECONCILER_POLL_SECONDS
 LABEL_SELECTOR = 'leartech.io/component=initiative-runner'
 TERMINAL_STATUSES = frozenset({'complete', 'failed', 'cancelled', 'orphaned', 'timed_out'})
 LOG_TAIL_LINES = 200
+# Crash-sticky body shows the last 50 log lines — short enough to stay readable
+# in a PR comment, long enough to capture the actual stack / cause for the
+# common crash shapes (OOMKilled signal, Python traceback, image-pull error).
+CRASH_LOG_TAIL_LINES = 50
 
 # `--- turns=10  in=15  out=2945  cost=$0.5230` — per-turn summary lines.
 # The FINAL line emitted by run_initiative (after PR resolution) appends
@@ -112,6 +117,88 @@ async def _fetch_pod_log_tail(core: client.CoreV1Api, namespace: str, job_name: 
     except Exception as exc:  # noqa: BLE001 — logs are best-effort
         logger.debug('reconciler: log fetch failed for %s: %s', job_name, exc)
         return ''
+
+
+async def _fetch_pod_crash_info(core: client.CoreV1Api, namespace: str, run_id: str) -> tuple[str, str]:
+    """Best-effort fetch of ``(exit_reason, log_tail)`` for a crashed pod.
+
+    Used only on the ``terminal=='failed'`` branch to compose the crash sticky.
+    The preStop hook in ``crash_sticky.py`` only fires on graceful SIGTERM —
+    for hard crashes (OOMKilled, Error, ImagePullBackOff) the pod is killed
+    before any user-defined hook runs, so this reconciler-side path is the
+    only signal that surfaces the crash to the PR thread.
+
+    Exit reason comes from ``pod.status.container_statuses[0].state.terminated.reason``
+    which K8s populates for OOMKilled / Error / ContainerCannotRun / etc. We
+    fall back to ``'unknown'`` if the field is missing — the sticky is still
+    posted (log tail is the primary signal anyway).
+
+    The log fetch is a SEPARATE call from ``_fetch_pod_log_tail`` because:
+
+    * Crash logs need only the last 50 lines (PR comment readability) while
+      summary parsing needs 200 (the ``--- turns=...`` line may be far back).
+    * The failed-path is rare relative to the complete-path; the duplicate
+      API call's cost is negligible and keeps the helper boundaries clean.
+
+    Returns ``('unknown', '')`` on any failure rather than raising — the
+    reconciler-row update still succeeds, the crash sticky just becomes
+    partial / skipped. Better than blocking row-status patching on best-
+    effort log fetches that may flake during cluster pressure.
+    """
+    exit_reason = 'unknown'
+    log_text = ''
+    try:
+        pods = await core.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f'leartech.io/run-id={run_id}',
+        )
+        if not pods.items:
+            return exit_reason, log_text
+        pod = pods.items[0]
+        statuses = getattr(pod.status, 'container_statuses', None) or []
+        if statuses:
+            terminated = getattr(statuses[0].state, 'terminated', None) if statuses[0].state else None
+            if terminated is not None:
+                reason = getattr(terminated, 'reason', None)
+                if reason:
+                    exit_reason = reason
+        try:
+            log_text = await core.read_namespaced_pod_log(
+                name=pod.metadata.name,
+                namespace=namespace,
+                tail_lines=CRASH_LOG_TAIL_LINES,
+            )
+        except Exception as exc:  # noqa: BLE001 — best-effort log fetch
+            logger.debug('reconciler: crash log fetch failed for %s: %s', run_id, exc)
+    except Exception as exc:  # noqa: BLE001 — best-effort pod lookup
+        logger.debug('reconciler: crash pod lookup failed for %s: %s', run_id, exc)
+    return exit_reason, log_text
+
+
+def _build_job_crash_sticky_body(*, run_id: str, exit_reason: str, log_tail: str) -> str:
+    """Render the Job-pod crash sticky markdown.
+
+    Different shape from ``gate.agent.initiative._build_crash_sticky_body`` —
+    that one is posted in-process when the SDK loop raises (we have turn /
+    cost context). This one is posted by the reconciler when the pod crashed
+    hard before the SDK could report anything (no turn / cost context); we
+    surface the K8s exit reason + the last 50 log lines instead.
+
+    Marker is shared so future tooling can find both shapes via the same
+    ``<!-- leartech-agent-run -->`` anchor.
+    """
+    stripped = log_tail.strip()
+    tail_block = stripped if stripped else '(no log output captured)'
+    return (
+        '<!-- leartech-agent-run -->\n'
+        '## ⚠ Agent Job pod crashed\n\n'
+        f'**Run**: {run_id}\n\n'
+        f'**Pod exit reason**: {exit_reason}\n\n'
+        '**Last log lines**:\n\n'
+        '```\n'
+        f'{tail_block}\n'
+        '```\n'
+    )
 
 
 def _parse_summary(log_text: str) -> tuple[int | None, float | None, int | None]:
@@ -186,6 +273,46 @@ async def reconcile_once(namespace: str) -> int:
                     await _run_self_retrospect(run_id)
                 except Exception as exc:  # noqa: BLE001 — best-effort
                     logger.warning('reconciler: self_retrospect failed for %s: %s', run_id, exc)
+            # D.crash-detection — post a crash sticky on hard pod termination
+            # (OOMKilled, Error, ImagePullBackOff, etc.). The preStop hook
+            # only fires on graceful SIGTERM; hard crashes skip it entirely.
+            # The reconciler is the only signal path for those, and we have
+            # to do it here because the API pod no longer holds a task that
+            # could observe the failure.
+            #
+            # Idempotency: same row-status short-circuit as retrospect — the
+            # ``record.status in TERMINAL_STATUSES`` guard above ensures
+            # each terminal Job triggers the sticky path at most once.
+            if terminal == 'failed':
+                # Prefer the freshly-parsed pr_number (from the same log we
+                # just summarised) — that's the most up-to-date signal. Fall
+                # back to whatever was already on the DB row in case parsing
+                # missed it (e.g. agent opened the PR but crashed before the
+                # final summary line landed in the tail window).
+                pr_for_sticky = pr_number if pr_number is not None else record.pr_number
+                pr_repo = record.pr_repo
+                if pr_for_sticky is None or not pr_repo:
+                    logger.info(
+                        'reconciler: crash sticky skipped for %s — no PR resolved (pr=%s repo=%s)',
+                        run_id,
+                        pr_for_sticky,
+                        pr_repo,
+                    )
+                else:
+                    exit_reason, log_tail = await _fetch_pod_crash_info(core, namespace, run_id)
+                    body = _build_job_crash_sticky_body(
+                        run_id=run_id,
+                        exit_reason=exit_reason,
+                        log_tail=log_tail,
+                    )
+                    try:
+                        _post_crash_sticky(
+                            qualified_repo=pr_repo,
+                            pr_number=pr_for_sticky,
+                            body=body,
+                        )
+                    except Exception as exc:  # noqa: BLE001 — best-effort
+                        logger.warning('reconciler: crash sticky post failed for %s: %s', run_id, exc)
     return updates
 
 
