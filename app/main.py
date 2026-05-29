@@ -17,7 +17,9 @@ invoked with.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -94,7 +96,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     `is_db_enabled()` reads `LEARTECH_INITIATIVE_DB_DSN`. Production sets it
     via the chart's ExternalSecret; dev/CI runs without it and the
     initiative-catalog endpoints return 503.
+
+    When `LEARTECH_INITIATIVE_RUNTIME=job`, a background reconciler task
+    polls K8s for finished runner Jobs and patches the corresponding
+    `initiative_runs` rows (D.5). Without it, Job-mode runs stay 'queued'
+    in the DB forever even after the agent has completed cleanly.
     """
+    reconciler_task: asyncio.Task[None] | None = None
     if is_db_enabled():
         _logger.info('initialising DB engine (LEARTECH_INITIATIVE_DB_DSN set)')
         init_engine()
@@ -104,9 +112,30 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         await seed_catalog_from_filesystem()
     else:
         _logger.info('DB DSN not configured — running in filesystem-only mode')
+
+    if os.environ.get('LEARTECH_INITIATIVE_RUNTIME', '').lower() == 'job':
+        namespace = os.environ.get('POD_NAMESPACE')
+        if namespace and is_db_enabled():
+            from gate.agent.job_reconciler import reconciler_loop
+
+            reconciler_task = asyncio.create_task(reconciler_loop(namespace))
+            _logger.info('job reconciler launched (namespace=%s)', namespace)
+        else:
+            _logger.warning(
+                'LEARTECH_INITIATIVE_RUNTIME=job but reconciler not launched (POD_NAMESPACE=%s, db_enabled=%s)',
+                namespace,
+                is_db_enabled(),
+            )
     try:
         yield
     finally:
+        if reconciler_task is not None:
+            reconciler_task.cancel()
+            try:
+                await reconciler_task
+            except asyncio.CancelledError:
+                pass
+            _logger.info('job reconciler stopped')
         if is_db_enabled():
             await dispose_engine()
             _logger.info('DB engine disposed')

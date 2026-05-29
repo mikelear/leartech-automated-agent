@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 # tail_agent_log.sh — follow the live agent pod's stdout/stderr.
 #
+# Default: tails the API pod (asyncio-runtime mode where the agent loop
+# runs in the same pod as FastAPI). Pass `--run <run-id>` to tail the
+# Job pod for a specific Job-runtime run instead (D.4+).
+#
 # Auto-discovers the current pod via label selector — survives rolling
-# deploys (will reattach to the NEW pod after a restart).
+# deploys when tailing the API pod. Job pods don't roll so the run-id
+# pins to a specific pod.
 #
 # Modes (see below for what each filter):
 #   agent     (default) what the agent is doing: prose + tool calls + iteration summaries
@@ -12,28 +17,39 @@
 #   full      everything from kubectl logs, raw (incl. HTTP request log lines)
 #
 # Usage:
-#   scripts/tail_agent_log.sh gcp                # default `agent` mode
-#   scripts/tail_agent_log.sh az  narrative      # only the prose
-#   scripts/tail_agent_log.sh gcp tools          # tool-call markers
-#   scripts/tail_agent_log.sh gcp full           # raw, unfiltered
+#   scripts/tail_agent_log.sh gcp                       # API pod, default mode
+#   scripts/tail_agent_log.sh az  narrative             # API pod, prose only
+#   scripts/tail_agent_log.sh az  agent --run abc12345  # Job pod for run abc12345
 
 set -uo pipefail
 
 CLUSTER="${1:-}"
 MODE="${2:-agent}"
+RUN_ID=""
+# Optional --run <id> selects the Job pod for that run-id rather than the API pod.
+# Job-mode runs (D.4+) live in their own pods, labelled leartech.io/run-id=<id>.
+if [ "${3:-}" = "--run" ] && [ -n "${4:-}" ]; then
+  RUN_ID="$4"
+fi
 
 case "$CLUSTER" in
   gcp) CTX="gke_product-first_us-east1-b_tf-jx-usable-bird" ;;
   az)  CTX="modern-burro" ;;
-  *)   echo "Usage: $0 <gcp|az> [agent|narrative|tools|results|full]"; exit 2 ;;
+  *)   echo "Usage: $0 <gcp|az> [mode] [--run <run-id>]"; exit 2 ;;
 esac
 
 NS=jx-staging
-SELECTOR='app.kubernetes.io/instance=leartech-automated-agent'
+if [ -n "$RUN_ID" ]; then
+  SELECTOR="leartech.io/run-id=$RUN_ID"
+  POD_DESC="Job pod for run $RUN_ID"
+else
+  SELECTOR='app.kubernetes.io/instance=leartech-automated-agent'
+  POD_DESC='API pod'
+fi
 
 POD=$(kubectl --context=$CTX -n $NS get pod -l "$SELECTOR" -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)
 if [ -z "$POD" ]; then
-  echo "No agent pod found via selector on $CLUSTER. Check 'kubectl --context=$CTX -n $NS get pods'."
+  echo "No $POD_DESC found on $CLUSTER. Check 'kubectl --context=$CTX -n $NS get pods'."
   exit 1
 fi
 
