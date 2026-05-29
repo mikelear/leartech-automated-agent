@@ -97,10 +97,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     via the chart's ExternalSecret; dev/CI runs without it and the
     initiative-catalog endpoints return 503.
 
-    When `LEARTECH_INITIATIVE_RUNTIME=job`, a background reconciler task
-    polls K8s for finished runner Jobs and patches the corresponding
-    `initiative_runs` rows (D.5). Without it, Job-mode runs stay 'queued'
-    in the DB forever even after the agent has completed cleanly.
+    Phase F: every run is a K8s Job, so the reconciler is always required
+    in production (POD_NAMESPACE + DB both set). When either is missing
+    (dev / preview), the reconciler is skipped and we log a warning —
+    Job-mode runs would otherwise sit at 'running' in the DB forever
+    even after the agent has completed cleanly.
     """
     reconciler_task: asyncio.Task[None] | None = None
     if is_db_enabled():
@@ -113,19 +114,18 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     else:
         _logger.info('DB DSN not configured — running in filesystem-only mode')
 
-    if os.environ.get('LEARTECH_INITIATIVE_RUNTIME', '').lower() == 'job':
-        namespace = os.environ.get('POD_NAMESPACE')
-        if namespace and is_db_enabled():
-            from gate.agent.job_reconciler import reconciler_loop
+    namespace = os.environ.get('POD_NAMESPACE')
+    if namespace and is_db_enabled():
+        from gate.agent.job_reconciler import reconciler_loop
 
-            reconciler_task = asyncio.create_task(reconciler_loop(namespace))
-            _logger.info('job reconciler launched (namespace=%s)', namespace)
-        else:
-            _logger.warning(
-                'LEARTECH_INITIATIVE_RUNTIME=job but reconciler not launched (POD_NAMESPACE=%s, db_enabled=%s)',
-                namespace,
-                is_db_enabled(),
-            )
+        reconciler_task = asyncio.create_task(reconciler_loop(namespace))
+        _logger.info('job reconciler launched (namespace=%s)', namespace)
+    else:
+        _logger.warning(
+            'job reconciler not launched (POD_NAMESPACE=%s, db_enabled=%s)',
+            namespace,
+            is_db_enabled(),
+        )
     try:
         yield
     finally:

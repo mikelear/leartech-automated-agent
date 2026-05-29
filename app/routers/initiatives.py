@@ -1,34 +1,31 @@
 """Initiative endpoints — start, status, list, cancel.
 
-Phase B v2: async state ops wired through write-through-DB. Each
-POST /initiatives spawns an asyncio.Task that runs
-`gate.agent.initiative.run_initiative`. State lives in `app.state` —
-durable in Postgres when `LEARTECH_INITIATIVE_DB_DSN` is set, in-memory
-fallback when not (dev/CI/preview).
+Phase F: every POST /initiatives spawns a K8s Job pod (Job-per-run is
+the only runtime now; the in-process asyncio task path was removed in
+this phase). State lives in `app.state` — durable in Postgres when
+`LEARTECH_INITIATIVE_DB_DSN` is set, in-memory fallback when not
+(dev/CI/preview).
 
 Catalog-first resolution (feat: catalog-fire-fallback):
   POST /initiatives checks the DB catalog FIRST (when `is_db_enabled()`),
   materialises the yaml_body to /tmp/agent-catalog/<name>.yaml, and passes
-  that path to run_initiative. If not in DB, falls back to the baked-in
-  filesystem initiatives/*.yaml. DB-stored entries WIN over same-named
-  filesystem entries — DB is the live editable source of truth, filesystem
-  is the "starter pack" from the current image.
+  that path to the spawned Job pod. If not in DB, falls back to the
+  baked-in filesystem initiatives/*.yaml. DB-stored entries WIN over
+  same-named filesystem entries — DB is the live editable source of
+  truth, filesystem is the "starter pack" from the current image.
 """
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import os
 import subprocess
 from pathlib import Path
-from sqlite3 import ProgrammingError as SQLiteProgrammingError
 
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
-from sqlalchemy.exc import ProgrammingError as SAProgrammingError
 
 from app.db import is_db_enabled
 from app.db import session as db_session
@@ -43,12 +40,8 @@ from app.state import (
     update,
 )
 from app.state import (
-    cancel as cancel_initiative_task,
-)
-from app.state import (
     get as get_record,
 )
-from gate.agent.initiative import run_initiative
 from gate.agent.self_retrospect import (
     fetch_ai_review_verdict,
     fetch_gate_state,
@@ -66,27 +59,9 @@ router = APIRouter()
 # Set via the chart's Deployment env — falls back to 'unknown' in local/CI runs.
 _CLUSTER = os.environ.get('CLUSTER', 'unknown')
 
-# Directory where DB-resolved initiatives are materialised so run_initiative
-# can consume them as a plain Path.
+# Directory where DB-resolved initiatives are materialised so the spawned
+# Job pod can consume them as a plain Path.
 _CATALOG_TMP_DIR = Path('/tmp/agent-catalog')  # noqa: S108 — intentional service-internal tmp dir
-
-# Phase D.4 — dual-path runtime selector. 'asyncio' (default) keeps today's
-# behaviour: the run lives inside the API pod's event loop. 'job' delegates
-# to D.3's spawn_initiative_job — the run lives in its own K8s Job pod and
-# survives API pod restarts. Read once per POST so a chart edit + rollout
-# can flip a cluster without bouncing in-flight runs.
-_RUNTIME_ENV = 'LEARTECH_INITIATIVE_RUNTIME'
-
-
-def _current_runtime_mode() -> str:
-    """Returns 'asyncio' or 'job' based on LEARTECH_INITIATIVE_RUNTIME.
-
-    Unknown values fall back to 'asyncio' (the safe, today's-default path) —
-    a typo in chart values should NOT silently switch a cluster to a path
-    the operator didn't intend.
-    """
-    mode = os.environ.get(_RUNTIME_ENV, 'asyncio').lower()
-    return mode if mode in {'asyncio', 'job'} else 'asyncio'
 
 
 # Phase E.1 — known language hints. Each entry maps the language string
@@ -504,82 +479,23 @@ async def _run_self_retrospect(initiative_id: str) -> None:
         logger.info('self_retrospect filed Issue for %s: %s', initiative_id, issue_url)
 
 
-async def _run_and_track(initiative_id: str, yaml_path: Path) -> None:
-    """Background task body — runs the initiative, updates state on completion."""
-    await update(initiative_id, status='running')
-    try:
-        summary = await run_initiative(yaml_path)
-        # Re-fetch the record so we can preserve pr_repo through the
-        # completion update. pr_repo is set at register time from
-        # loaded.primary.qualified_repo, but the primary fix lives in
-        # app.state.register (now passes it to create_run at INSERT). This
-        # is a belt-and-braces preservation: if some future code path
-        # nulls pr_repo or starts the row without it, the completion
-        # update still carries the in-memory value through. Do NOT drop
-        # this — the self_retrospect hook needs pr_repo + pr_number on
-        # the final record to file Issues (regression on run
-        # 44120e445abd 2026-05-28: pr_repo arrived None and every run
-        # skipped retrospect).
-        current = await get_record(initiative_id)
-        pr_repo = current.pr_repo if current is not None else None
-        await update(
-            initiative_id,
-            status='complete' if summary.exit_code == 0 else 'failed',
-            finished_at=now(),
-            turns=summary.turns,
-            cost_usd=summary.cost_usd,
-            pr_number=summary.pr_number,
-            pr_repo=pr_repo,
-        )
-        logger.info('initiative %s finished with exit_code=%d', initiative_id, summary.exit_code)
-        # Post-success retrospective — non-blocking, best-effort. See
-        # gate/agent/self_retrospect.py for the rationale (PR #46/#1
-        # incident 2026-05-28).
-        #
-        # The success status was written above, so we must NOT let a
-        # cancellation in the retrospect propagate to the outer
-        # CancelledError handler — that would re-mark this 'complete'
-        # run as 'cancelled' just because TestClient/pod teardown
-        # interrupted the enrichment. Swallow CancelledError here
-        # (the only place this exception to "always re-raise" is OK,
-        # because the run itself already succeeded).
-        if summary.exit_code == 0:
-            try:
-                await _run_self_retrospect(initiative_id)
-            except asyncio.CancelledError:
-                logger.info('self_retrospect cancelled for %s — status already complete', initiative_id)
-            except Exception as exc:  # noqa: BLE001 — must never affect main flow
-                logger.warning('self_retrospect failed (non-blocking) for %s: %s', initiative_id, exc)
-    except asyncio.CancelledError:
-        # Best-effort: if the engine is gone (pod shutdown raced with cancellation),
-        # the next pod's orphan-detection on startup will mark this run terminal —
-        # don't crash here. Two disposal surfaces are tolerated:
-        #   * RuntimeError — session factory was cleared (PR #35).
-        #   * (SA|SQLite)ProgrammingError — engine connection is closed mid-cleanup
-        #     under cluster contention (GCP release tb8t6, 2026-05-27).
-        try:
-            await update(initiative_id, status='cancelled', finished_at=now())
-        except (RuntimeError, SAProgrammingError, SQLiteProgrammingError) as exc:
-            logger.warning(
-                'cancel-cleanup skipped — DB engine already disposed (will be marked orphaned on next pod start): %s',
-                exc,
-            )
-        logger.info('initiative %s cancelled', initiative_id)
-        raise
-    except Exception as exc:  # noqa: BLE001 — we want to surface any agent failure to the consumer
-        await update(initiative_id, status='failed', error=str(exc), finished_at=now())
-        logger.exception('initiative %s failed', initiative_id)
-
-
 @router.post('', response_model=InitiativeRecord, status_code=202)
 async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
-    """Validate the initiative YAML and spawn a background task to execute it.
+    """Validate the initiative YAML and spawn a K8s Job to execute it.
 
-    Resolution order: DB catalog first (when LEARTECH_INITIATIVE_DB_DSN is set),
-    filesystem fallback. DB-stored entries win over same-named filesystem entries.
+    Phase F: runtime is always 'job' — the run lives in its own K8s Job
+    pod and survives API pod restarts. The asyncio in-process path was
+    removed in this phase. The Job's lifecycle is owned by K8s; status
+    reconciliation back into the DB is the reconciler's surface
+    (``gate/agent/job_reconciler.py``).
 
-    Returns 202 with the initial record (status=queued). Poll
-    GET /initiatives/{id} for terminal status.
+    Resolution order: DB catalog first (when ``LEARTECH_INITIATIVE_DB_DSN``
+    is set), filesystem fallback. DB-stored entries win over same-named
+    filesystem entries.
+
+    Returns 202 with the initial record (status=running once the Job has
+    been accepted by K8s). Poll ``GET /initiatives/{id}`` for terminal
+    status.
     """
     yaml_path = await _resolve_yaml_path(request.initiative)
     if yaml_path is None:
@@ -595,89 +511,57 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
 
     initiative_id = new_id()
-    runtime_mode = _current_runtime_mode()
 
-    if runtime_mode == 'job':
-        # Phase D.4 — Job-per-run path. The run executes in its own K8s
-        # Job pod and survives API pod restarts. The structural fix for
-        # pod-restart-kills-run.
-        #
-        # We do not create an asyncio.Task here: there's nothing to await
-        # locally. The Job's lifecycle is owned by K8s; status reconciliation
-        # back into the DB is D.5's surface (a watcher that observes Job
-        # terminal state and patches initiative_runs.status).
-        from gate.agent.job_runner import spawn_initiative_job
+    # Phase F — Job-per-run is the only path. The run executes in its
+    # own K8s Job pod and survives API pod restarts. The structural fix
+    # for pod-restart-kills-run.
+    #
+    # We do not create an asyncio.Task here: there's nothing to await
+    # locally. The Job's lifecycle is owned by K8s; status reconciliation
+    # back into the DB is the reconciler's surface (a watcher that
+    # observes Job terminal state and patches initiative_runs.status).
+    from gate.agent.job_runner import spawn_initiative_job
 
-        namespace = os.environ.get('POD_NAMESPACE')
-        if not namespace:
-            raise HTTPException(
-                status_code=500,
-                detail='POD_NAMESPACE env var is required when '
-                f'{_RUNTIME_ENV}=job; chart deployment must inject it via '
-                'fieldRef metadata.namespace.',
-            )
-        try:
-            # Inline the YAML body so the Job pod doesn't need DB access
-            # to resolve the initiative. yaml_path was just loaded above so
-            # the read is essentially free (filesystem cache hot).
-            job_name, _ns = await spawn_initiative_job(
-                initiative_name=request.initiative,
-                run_id=initiative_id,
-                # Phase E.1/E.2/E.3 image routing:
-                #   image: override (E.3) > language: hint (E.2) > repo
-                #   auto-detect (E.1) > LEARTECH_INITIATIVE_DEFAULT_IMAGE.
-                # `qualified_repo` is the primary repo so the picker can
-                # sniff its root manifests when neither `image:` nor
-                # `language:` is set.
-                image=_pick_image_for_initiative(
-                    request.initiative,
-                    language=loaded.language,
-                    image_override=loaded.image,
-                    qualified_repo=loaded.primary.qualified_repo,
-                ),
-                namespace=namespace,
-                env=_initiative_env(),
-                secret_refs=_initiative_secret_refs(),
-                yaml_body=yaml_path.read_text(),
-                # D.7 — propagate qualified repo so the Job's preStop hook
-                # can post a "cancelled" sticky to the PR when an operator
-                # cancels mid-run. The agent itself writes /tmp/run_pr_number
-                # once it resolves the PR; the hook reads from there.
-                pr_repo=loaded.primary.qualified_repo,
-            )
-        except Exception as exc:  # noqa: BLE001 — surface spawn failures as 502 so the consumer sees them
-            logger.exception('Job spawn failed for initiative %s', initiative_id)
-            raise HTTPException(status_code=502, detail=f'Failed to spawn initiative Job: {exc}') from exc
-        record = InitiativeRecord(
-            id=initiative_id,
-            initiative=request.initiative,
-            status='queued',
-            started_at=now(),
+    namespace = os.environ.get('POD_NAMESPACE')
+    if not namespace:
+        raise HTTPException(
+            status_code=500,
+            detail='POD_NAMESPACE env var is required to spawn an initiative '
+            'Job; chart deployment must inject it via fieldRef '
+            'metadata.namespace.',
+        )
+    try:
+        # Inline the YAML body so the Job pod doesn't need DB access
+        # to resolve the initiative. yaml_path was just loaded above so
+        # the read is essentially free (filesystem cache hot).
+        job_name, _ns = await spawn_initiative_job(
+            initiative_name=request.initiative,
+            run_id=initiative_id,
+            # Phase E.1/E.2/E.3 image routing:
+            #   image: override (E.3) > language: hint (E.2) > repo
+            #   auto-detect (E.1) > LEARTECH_INITIATIVE_DEFAULT_IMAGE.
+            # `qualified_repo` is the primary repo so the picker can
+            # sniff its root manifests when neither `image:` nor
+            # `language:` is set.
+            image=_pick_image_for_initiative(
+                request.initiative,
+                language=loaded.language,
+                image_override=loaded.image,
+                qualified_repo=loaded.primary.qualified_repo,
+            ),
+            namespace=namespace,
+            env=_initiative_env(),
+            secret_refs=_initiative_secret_refs(),
+            yaml_body=yaml_path.read_text(),
+            # D.7 — propagate qualified repo so the Job's preStop hook
+            # can post a "cancelled" sticky to the PR when an operator
+            # cancels mid-run. The agent itself writes /tmp/run_pr_number
+            # once it resolves the PR; the hook reads from there.
             pr_repo=loaded.primary.qualified_repo,
-            cluster=_CLUSTER,
-            runtime='job',
-            job_name=job_name,
         )
-        await register(record, task=None)
-        # Phase D.5.3 — reflect that the Job is in flight. Without this, the
-        # DB record sits at 'queued' until the reconciler patches it to
-        # terminal (`complete` / `failed`), so the catalog never shows a
-        # 'running' state for Job-mode runs even while the pod has been
-        # executing for minutes. The asyncio path writes 'running' from
-        # _run_and_track on entry; this restores the same semantics here
-        # now that the K8s API has accepted the Job (= spawn returned).
-        await update(initiative_id, status='running')
-        record = record.model_copy(update={'status': 'running'})
-        logger.info(
-            'initiative %s running (runtime=job): %s — Job %s/%s',
-            initiative_id,
-            request.initiative,
-            namespace,
-            job_name,
-        )
-        return record
-
-    # Default asyncio path — unchanged from pre-D.4 behaviour.
+    except Exception as exc:  # noqa: BLE001 — surface spawn failures as 502 so the consumer sees them
+        logger.exception('Job spawn failed for initiative %s', initiative_id)
+        raise HTTPException(status_code=502, detail=f'Failed to spawn initiative Job: {exc}') from exc
     record = InitiativeRecord(
         id=initiative_id,
         initiative=request.initiative,
@@ -685,11 +569,24 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         started_at=now(),
         pr_repo=loaded.primary.qualified_repo,
         cluster=_CLUSTER,
-        runtime='asyncio',
+        runtime='job',
+        job_name=job_name,
     )
-    task = asyncio.create_task(_run_and_track(initiative_id, yaml_path))
-    await register(record, task)
-    logger.info('initiative %s queued (runtime=asyncio): %s', initiative_id, request.initiative)
+    await register(record)
+    # Phase D.5.3 — reflect that the Job is in flight. Without this, the
+    # DB record sits at 'queued' until the reconciler patches it to
+    # terminal (`complete` / `failed`), so the catalog never shows a
+    # 'running' state even while the Job pod has been executing for
+    # minutes.
+    await update(initiative_id, status='running')
+    record = record.model_copy(update={'status': 'running'})
+    logger.info(
+        'initiative %s running: %s — Job %s/%s',
+        initiative_id,
+        request.initiative,
+        namespace,
+        job_name,
+    )
     return record
 
 
@@ -716,16 +613,19 @@ async def get_initiative_logs(initiative_id: str, tail_lines: int = 500) -> Plai
     API as the catalog so operators don't need direct ``kubectl logs`` access
     via ``scripts/tail_agent_log.sh``.
 
-    For ``runtime=job`` runs: looks up the run's pod via the
-    ``leartech.io/run-id=<id>`` label in ``POD_NAMESPACE`` and streams the
-    tail back as text/plain. Uses the same in-cluster credentials the
-    job_reconciler uses (D.5) — the API pod's ServiceAccount is bound to
-    the job-runner Role which already grants ``pods/log get``.
+    Looks up the run's pod via the ``leartech.io/run-id=<id>`` label in
+    ``POD_NAMESPACE`` and streams the tail back as text/plain. Uses the
+    same in-cluster credentials the job_reconciler uses (D.5) — the API
+    pod's ServiceAccount is bound to the job-runner Role which already
+    grants ``pods/log get``.
 
-    For ``runtime=asyncio`` runs: returns 501. These runs share the API
-    pod's stdout/stderr so per-run isolation isn't possible from here;
-    operators can use ``scripts/tail_agent_log.sh --run <id>`` directly
-    against the API pod.
+    Phase F: every run is runtime='job' so the historical
+    asyncio-runtime 501 branch was removed. Legacy DB rows that still
+    carry ``runtime='asyncio'`` (created pre-F before this PR landed) are
+    treated as 'job' for log-fetching — they may have no backing K8s
+    Job, in which case the pod-lookup returns 404 and operators are
+    pointed at ``scripts/tail_agent_log.sh --run <id>`` via the error
+    detail.
 
     NOTE: ``kubernetes_asyncio.config.load_incluster_config`` is synchronous
     in this library (do NOT await it). The async sibling is
@@ -735,16 +635,6 @@ async def get_initiative_logs(initiative_id: str, tail_lines: int = 500) -> Plai
     record = await get_record(initiative_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
-
-    if record.runtime != 'job':
-        raise HTTPException(
-            status_code=501,
-            detail=(
-                f'Log streaming endpoint only supports runtime=job runs '
-                f'(this run is runtime={record.runtime!r}). For asyncio-mode '
-                'runs, use scripts/tail_agent_log.sh --run <id> against the API pod.'
-            ),
-        )
 
     namespace = os.environ.get('POD_NAMESPACE')
     if not namespace:
@@ -793,21 +683,14 @@ async def get_initiative_logs(initiative_id: str, tail_lines: int = 500) -> Plai
 async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
     """Request cancellation of a running initiative. Idempotent for terminal records.
 
-    Phase D.7 — dual-path cancel.
-
-    For ``runtime=asyncio`` runs (the historical path) we still call
-    ``app.state.cancel`` which targets the in-process asyncio.Task; the
-    ``_run_and_track`` CancelledError handler writes the terminal status.
-
-    For ``runtime=job`` runs the API pod holds no in-process task — the run
-    lives in its own K8s Job pod. We delete the Job (propagationPolicy
-    Background so the pod is GC'd asynchronously); K8s will SIGTERM the
-    pod, give it ``terminationGracePeriodSeconds`` to write the preStop
-    "cancelled" sticky comment to the PR (see D.7 preStop hook in
-    ``gate/agent/job_runner.py``), then kill it. We immediately write the
+    Phase F: cancellation deletes the run's K8s Job (propagationPolicy
+    Background so the pod is GC'd asynchronously); K8s SIGTERMs the pod,
+    gives it ``terminationGracePeriodSeconds`` to write the preStop
+    "cancelled" sticky comment to the PR (see preStop hook in
+    ``gate/agent/job_runner.py``), then kills it. We immediately write the
     cancelled status to the DB so the next ``GET`` reflects the operator's
-    intent — the reconciler (D.5) sees the now-terminal row and skips it,
-    so the brief race where the Job has gone but the pod is still posting
+    intent — the reconciler sees the now-terminal row and skips it, so
+    the brief race where the Job has gone but the pod is still posting
     its preStop sticky does NOT mark the row 'failed'.
 
     NOTE: ``kubernetes_asyncio.config.load_incluster_config`` is synchronous
@@ -820,80 +703,60 @@ async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
 
     if record.status in {'cancelled', 'complete', 'failed', 'orphaned', 'timed_out'}:
-        # Idempotent: terminal records short-circuit. Mirrors the asyncio
-        # path's behaviour before D.7 (cancel_initiative_task returned False
-        # but the 409 was suppressed for terminal records).
+        # Idempotent: terminal records short-circuit.
         return record
 
-    if record.runtime == 'job':
-        # Delete the K8s Job — Kubernetes propagates SIGTERM to the pod,
-        # respects terminationGracePeriodSeconds (set on the Job manifest by
-        # D.7), then kills. The preStop hook posts a "cancelled" sticky to
-        # the PR (when one was resolved by the mid-run write to
-        # /tmp/run_pr_number) before the pod is GC'd.
-        namespace = os.environ.get('POD_NAMESPACE')
-        if not namespace:
-            raise HTTPException(
-                status_code=500,
-                detail='POD_NAMESPACE env var is required to cancel runtime=job runs; '
-                'chart deployment must inject it via fieldRef metadata.namespace.',
-            )
-        if not record.job_name:  # pragma: no cover — invariant: runtime=job ⇒ job_name set at register()
-            raise HTTPException(
-                status_code=500,
-                detail=f'runtime=job record {initiative_id!r} is missing job_name; cannot delete K8s Job.',
-            )
+    # Delete the K8s Job — Kubernetes propagates SIGTERM to the pod,
+    # respects terminationGracePeriodSeconds (set on the Job manifest),
+    # then kills. The preStop hook posts a "cancelled" sticky to the PR
+    # (when one was resolved by the mid-run write to /tmp/run_pr_number)
+    # before the pod is GC'd.
+    namespace = os.environ.get('POD_NAMESPACE')
+    if not namespace:
+        raise HTTPException(
+            status_code=500,
+            detail='POD_NAMESPACE env var is required to cancel a run; '
+            'chart deployment must inject it via fieldRef metadata.namespace.',
+        )
+    if not record.job_name:  # pragma: no cover — invariant: job_name set at register()
+        raise HTTPException(
+            status_code=500,
+            detail=f'Record {initiative_id!r} is missing job_name; cannot delete K8s Job.',
+        )
 
-        # Late import: kubernetes_asyncio is only needed on this code path; keeps
-        # `from app.routers.initiatives import ...` cheap for in-process tests.
-        from kubernetes_asyncio import client as k8s_client
-        from kubernetes_asyncio import config as k8s_config
-        from kubernetes_asyncio.client.api_client import ApiClient
-        from kubernetes_asyncio.client.exceptions import ApiException
+    # Late import: kubernetes_asyncio is only needed on this code path; keeps
+    # `from app.routers.initiatives import ...` cheap for in-process tests.
+    from kubernetes_asyncio import client as k8s_client
+    from kubernetes_asyncio import config as k8s_config
+    from kubernetes_asyncio.client.api_client import ApiClient
+    from kubernetes_asyncio.client.exceptions import ApiException
 
-        k8s_config.load_incluster_config()  # synchronous — do NOT await
-        try:
-            async with ApiClient() as api:
-                batch = k8s_client.BatchV1Api(api)
-                await batch.delete_namespaced_job(
-                    name=record.job_name,
-                    namespace=namespace,
-                    propagation_policy='Background',
-                )
-        except ApiException as exc:
-            # 404 means the Job is already gone (TTL'd out, or a prior
-            # cancel + delete completed). Treat as success — the operator's
-            # intent ("this run should be cancelled") is already satisfied.
-            if exc.status != 404:
-                logger.exception('Job delete failed for initiative %s', initiative_id)
-                raise HTTPException(status_code=502, detail=f'Failed to delete initiative Job: {exc}') from exc
-            logger.info(
-                'initiative %s: Job %s already absent — recording cancelled status', initiative_id, record.job_name
+    k8s_config.load_incluster_config()  # synchronous — do NOT await
+    try:
+        async with ApiClient() as api:
+            batch = k8s_client.BatchV1Api(api)
+            await batch.delete_namespaced_job(
+                name=record.job_name,
+                namespace=namespace,
+                propagation_policy='Background',
             )
-        except Exception as exc:  # noqa: BLE001 — surface K8s API failures as 502
+    except ApiException as exc:
+        # 404 means the Job is already gone (TTL'd out, or a prior
+        # cancel + delete completed). Treat as success — the operator's
+        # intent ("this run should be cancelled") is already satisfied.
+        if exc.status != 404:
             logger.exception('Job delete failed for initiative %s', initiative_id)
             raise HTTPException(status_code=502, detail=f'Failed to delete initiative Job: {exc}') from exc
+        logger.info('initiative %s: Job %s already absent — recording cancelled status', initiative_id, record.job_name)
+    except Exception as exc:  # noqa: BLE001 — surface K8s API failures as 502
+        logger.exception('Job delete failed for initiative %s', initiative_id)
+        raise HTTPException(status_code=502, detail=f'Failed to delete initiative Job: {exc}') from exc
 
-        # Synchronously write terminal status. The reconciler (D.5) sees
-        # this on its next pass and skips the run — no race where it sees
-        # the Job gone and writes 'failed'.
-        await update(initiative_id, status='cancelled', finished_at=now())
-        logger.info(
-            'initiative %s cancelled (runtime=job): Job %s/%s deleted', initiative_id, namespace, record.job_name
-        )
-
-        refreshed = await get_record(initiative_id)
-        if refreshed is None:  # pragma: no cover — record was just confirmed above
-            raise HTTPException(status_code=500, detail='Record disappeared between get and refresh')
-        return refreshed
-
-    # runtime=asyncio path — unchanged from pre-D.7 behaviour.
-    cancelled = await cancel_initiative_task(initiative_id)
-    if not cancelled and record.status not in {'cancelled', 'complete', 'failed'}:
-        raise HTTPException(
-            status_code=409,
-            detail=f'Initiative {initiative_id!r} is in status {record.status!r}; cannot cancel',
-        )
+    # Synchronously write terminal status. The reconciler sees this on its
+    # next pass and skips the run — no race where it sees the Job gone and
+    # writes 'failed'.
+    await update(initiative_id, status='cancelled', finished_at=now())
+    logger.info('initiative %s cancelled: Job %s/%s deleted', initiative_id, namespace, record.job_name)
 
     refreshed = await get_record(initiative_id)
     if refreshed is None:  # pragma: no cover — record was just confirmed above

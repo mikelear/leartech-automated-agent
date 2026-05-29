@@ -243,11 +243,10 @@ async def test_reconcile_once_handles_log_fetch_failure_gracefully(
 # D.5.2 — self_retrospect hook on Job-mode terminal+success
 # ---------------------------------------------------------------------------
 #
-# The asyncio path's `_run_and_track` fires `_run_self_retrospect` after
-# writing status='complete'. Job-mode runs reach terminal state through the
-# reconciler (D.4 task=None branch never executes `_run_and_track`), so
-# without an explicit hook here the post-success Issue is never filed —
-# silent regression vs the asyncio path. These tests pin the contract:
+# Phase F: every run is Job-mode and reaches terminal state through the
+# reconciler. The reconciler is the only signal path for completion, so
+# without an explicit hook here the post-success Issue is never filed.
+# These tests pin the contract:
 #
 #   - complete   -> retrospect fires (with run_id)
 #   - failed     -> retrospect does NOT fire (only success runs)
@@ -272,7 +271,8 @@ async def test_reconcile_once_runs_self_retrospect_on_complete(
     _mock_k8s_ok: Any,  # type: ignore[valid-type]
 ) -> None:
     """terminal=='complete' on a non-terminal DB row must trigger
-    _run_self_retrospect with the run_id (Job-mode parity with _run_and_track)."""
+    _run_self_retrospect with the run_id (Phase F: reconciler is the only
+    signal path)."""
     batch, core = _mock_k8s_ok
     job = _make_job('run-success-1', [('Complete', 'True')])
     batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))

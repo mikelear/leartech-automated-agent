@@ -11,7 +11,6 @@ Covers:
 
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
@@ -64,7 +63,6 @@ async def db_enabled(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     monkeypatch.setenv(db_module.DSN_ENV, 'sqlite+aiosqlite:///:memory:')
     db_module._reset_for_tests()
     state_module._records.clear()
-    state_module._tasks.clear()
 
     engine = db_module.init_engine()
     async with engine.begin() as conn:
@@ -75,7 +73,6 @@ async def db_enabled(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[None]:
     await db_module.dispose_engine()
     db_module._reset_for_tests()
     state_module._records.clear()
-    state_module._tasks.clear()
 
 
 @pytest.fixture(autouse=False)
@@ -251,14 +248,9 @@ async def test_mark_orphaned_runs_idempotent(db_session: AsyncSession) -> None:
 
 @pytest.mark.asyncio
 async def test_state_register_writes_to_db(db_enabled: None) -> None:
-    async def noop() -> int:
-        return 0
-
     run_id = new_id()
-    task = asyncio.create_task(noop())
     rec = InitiativeRecord(id=run_id, initiative='db-write-test', status='queued', started_at=now())
-    await register(rec, task)
-    await task
+    await register(rec)
 
     # Verify written to DB via direct CRUD read.
     async with db_module.session() as s:
@@ -284,12 +276,7 @@ async def test_state_register_persists_pr_repo_to_db(db_enabled: None) -> None:
     to create_run() so the DB row has it from the start, before any
     completion update.
     """
-
-    async def noop() -> int:
-        return 0
-
     run_id = new_id()
-    task = asyncio.create_task(noop())
     rec = InitiativeRecord(
         id=run_id,
         initiative='pr-repo-persist-test',
@@ -297,8 +284,7 @@ async def test_state_register_persists_pr_repo_to_db(db_enabled: None) -> None:
         started_at=now(),
         pr_repo='mikelear/leartech-automated-agent',
     )
-    await register(rec, task)
-    await task
+    await register(rec)
 
     # Clear in-memory cache so we PROVE the DB row carries pr_repo
     # (simulates a pod restart between INSERT and any subsequent read).
@@ -315,14 +301,9 @@ async def test_state_register_persists_pr_repo_to_db(db_enabled: None) -> None:
 
 @pytest.mark.asyncio
 async def test_state_get_reads_from_db(db_enabled: None) -> None:
-    async def noop() -> int:
-        return 0
-
     run_id = new_id()
-    task = asyncio.create_task(noop())
     rec = InitiativeRecord(id=run_id, initiative='db-read-test', status='queued', started_at=now())
-    await register(rec, task)
-    await task
+    await register(rec)
 
     # Clear in-memory cache to prove we're reading from DB.
     state_module._records.clear()
@@ -335,14 +316,9 @@ async def test_state_get_reads_from_db(db_enabled: None) -> None:
 
 @pytest.mark.asyncio
 async def test_state_update_propagates_to_db(db_enabled: None) -> None:
-    async def noop() -> int:
-        return 0
-
     run_id = new_id()
-    task = asyncio.create_task(noop())
     rec = InitiativeRecord(id=run_id, initiative='db-update-test', status='queued', started_at=now())
-    await register(rec, task)
-    await task
+    await register(rec)
 
     await update(run_id, status='complete', turns=5, cost_usd=0.12)
 
@@ -356,15 +332,10 @@ async def test_state_update_propagates_to_db(db_enabled: None) -> None:
 
 @pytest.mark.asyncio
 async def test_state_list_reads_from_db(db_enabled: None) -> None:
-    async def noop() -> int:
-        return 0
-
     for name in ('alpha', 'beta', 'gamma'):
         run_id = new_id()
-        task = asyncio.create_task(noop())
         rec = InitiativeRecord(id=run_id, initiative=name, status='queued', started_at=now())
-        await register(rec, task)
-        await task
+        await register(rec)
 
     records = await list_records()
     initiatives_seen = {r.initiative for r in records}
@@ -376,14 +347,9 @@ async def test_state_list_reads_from_db(db_enabled: None) -> None:
 
 @pytest.mark.asyncio
 async def test_state_fallback_register_and_get(no_db: None) -> None:
-    async def noop() -> int:
-        return 0
-
     run_id = new_id()
-    task = asyncio.create_task(noop())
     rec = InitiativeRecord(id=run_id, initiative='mem-test', status='queued', started_at=now())
-    await register(rec, task)
-    await task
+    await register(rec)
 
     fetched = await get(run_id)
     assert fetched is not None
@@ -392,14 +358,9 @@ async def test_state_fallback_register_and_get(no_db: None) -> None:
 
 @pytest.mark.asyncio
 async def test_state_fallback_update(no_db: None) -> None:
-    async def noop() -> int:
-        return 0
-
     run_id = new_id()
-    task = asyncio.create_task(noop())
     rec = InitiativeRecord(id=run_id, initiative='mem-upd', status='queued', started_at=now())
-    await register(rec, task)
-    await task
+    await register(rec)
 
     await update(run_id, status='complete', turns=3)
     fetched = await get(run_id)
@@ -421,14 +382,18 @@ async def test_reconcile_returns_zero_when_db_disabled(no_db: None) -> None:
 
 @pytest.mark.asyncio
 async def test_reconcile_marks_stale_rows_on_startup(db_enabled: None) -> None:
+    """Legacy runtime='asyncio' rows (created before Phase F) must be
+    orphaned on startup — there's no backing K8s Job and the API pod
+    that owned their asyncio.Task is gone."""
     from app.state import reconcile_orphaned_runs
 
-    # Simulate two runs that were in-flight when the pod died.
-    # They are in the DB but NOT in _tasks (no asyncio.Task in memory).
     async with db_module.session() as s:
         ts = _started_at()
-        await create_run(s, id='stale-1', initiative='x', status='running', started_at=ts)
-        await create_run(s, id='stale-2', initiative='x', status='queued', started_at=ts)
+        # Use runtime='asyncio' so reconcile doesn't try to verify these
+        # against K8s (no POD_NAMESPACE set in this test, the conservative
+        # job-runtime branch would otherwise keep them live).
+        await create_run(s, id='stale-1', initiative='x', status='running', started_at=ts, runtime='asyncio')
+        await create_run(s, id='stale-2', initiative='x', status='queued', started_at=ts, runtime='asyncio')
         await create_run(s, id='done-1', initiative='x', status='complete', started_at=ts)
 
     count = await reconcile_orphaned_runs()

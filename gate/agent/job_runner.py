@@ -1,9 +1,9 @@
 """Spawn a K8s Job per initiative — D.3 infra primitive.
 
-Used by POST /initiatives once `LEARTECH_INITIATIVE_RUNTIME=job` is set
-(D.4 wires the call site behind that feature flag). This module is pure
-function: build a `batch/v1` Job manifest and submit it. No watching,
-no log streaming, no status reconciliation — D.5 owns that surface.
+Used by POST /initiatives unconditionally (Phase F made Job-per-run the
+only path). This module is pure function: build a `batch/v1` Job
+manifest and submit it. No watching, no log streaming, no status
+reconciliation — D.5 owns that surface.
 
 The manifest shape mirrors the chart's named template at
 `charts/leartech-automated-agent/templates/_job-template.tpl` (added in

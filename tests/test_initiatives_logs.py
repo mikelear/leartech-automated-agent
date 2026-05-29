@@ -3,15 +3,17 @@
 Coverage matrix:
 
 1. **404** when initiative_id is unknown.
-2. **501** when the record's runtime is not 'job' (asyncio-mode runs share
-   the API pod's stdout and can't be isolated from here).
-3. **Happy path** — runtime=job, mocked K8s client returns pod log text;
-   response carries the body with content-type text/plain.
-4. **tail_lines query param** is forwarded to ``read_namespaced_pod_log``
+2. **Happy path** — mocked K8s client returns pod log text; response
+   carries the body with content-type text/plain.
+3. **tail_lines query param** is forwarded to ``read_namespaced_pod_log``
    so operators can ask for arbitrarily long log tails.
-5. **No pod found** — runtime=job with no matching pod returns 404 (Job
-   pod GC'd, or pod hasn't been scheduled yet).
-6. **POD_NAMESPACE missing** — 500 with a clear chart-deployment hint.
+4. **No pod found** — no matching pod returns 404 (Job pod GC'd, or pod
+   hasn't been scheduled yet).
+5. **POD_NAMESPACE missing** — 500 with a clear chart-deployment hint.
+
+Phase F: every run is runtime='job' so the historical 501-for-asyncio
+branch is gone. Legacy asyncio records that happen to be in the DB
+flow through the same K8s lookup; they return 404 (no matching pod).
 
 K8s is NOT exercised here; everything routes through unittest.mock.patch
 against the lazily-imported ``kubernetes_asyncio.{client,config}``.
@@ -49,25 +51,11 @@ def test_get_logs_returns_404_when_unknown() -> None:
     assert 'unknown-id-xyz' in response.json()['detail']
 
 
-async def test_get_logs_returns_501_when_runtime_is_asyncio() -> None:
-    """Asyncio-mode runs share the API pod's stdout — can't isolate from here.
-
-    Operators are pointed at scripts/tail_agent_log.sh for that surface.
-    """
-    record = _make_record(initiative_id='asyncio-run-aaa', runtime='asyncio')
-    await register(record, task=None)
-
-    response = client.get('/initiatives/asyncio-run-aaa/logs')
-    assert response.status_code == 501
-    assert 'runtime=job' in response.json()['detail']
-    assert 'tail_agent_log.sh' in response.json()['detail']
-
-
 async def test_get_logs_happy_path_returns_text_plain(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mock the K8s client; the endpoint returns the log body as text/plain."""
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
     record = _make_record(initiative_id='job-run-bbb', runtime='job')
-    await register(record, task=None)
+    await register(record)
 
     log_text = 'agent boot\n--- turns=2  in=10  out=20  cost=$0.01\nPR opened: https://github.com/owner/repo/pull/777\n'
 
@@ -117,7 +105,7 @@ async def test_get_logs_forwards_tail_lines_to_k8s(monkeypatch: pytest.MonkeyPat
     """The ``tail_lines`` query param must flow through to read_namespaced_pod_log."""
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
     record = _make_record(initiative_id='job-run-ccc', runtime='job')
-    await register(record, task=None)
+    await register(record)
 
     core_mock = MagicMock()
     core_mock.list_namespaced_pod = AsyncMock(
@@ -160,7 +148,7 @@ async def test_get_logs_returns_404_when_no_pod_matches(monkeypatch: pytest.Monk
     """Job pod GC'd (TTL fired) or pod scheduling not yet complete — surface as 404."""
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
     record = _make_record(initiative_id='job-run-ddd', runtime='job')
-    await register(record, task=None)
+    await register(record)
 
     core_mock = MagicMock()
     core_mock.list_namespaced_pod = AsyncMock(return_value=SimpleNamespace(items=[]))
@@ -194,7 +182,7 @@ async def test_get_logs_returns_500_when_pod_namespace_missing(monkeypatch: pyte
     """Without POD_NAMESPACE we can't address the right namespace — fail loud."""
     monkeypatch.delenv('POD_NAMESPACE', raising=False)
     record = _make_record(initiative_id='job-run-eee', runtime='job')
-    await register(record, task=None)
+    await register(record)
 
     response = client.get('/initiatives/job-run-eee/logs')
     assert response.status_code == 500

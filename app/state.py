@@ -2,23 +2,25 @@
 
 Write-through-DB when `LEARTECH_INITIATIVE_DB_DSN` is configured; falls
 back to in-memory dict when not. The in-memory dict is always maintained
-as a fast-path cache — so interim `update()` calls from background tasks
-never race against an incomplete DB INSERT (the dict is updated first,
-then the DB write follows).
+as a fast-path cache — so interim `update()` calls never race against an
+incomplete DB INSERT (the dict is updated first, then the DB write
+follows).
 
 Reads prefer DB when enabled (persistence across pod restarts); fall back
 to `_records` when not (dev / CI / preview without Postgres).
 
-`_tasks` is always in-memory — asyncio.Task objects cannot be persisted.
+Phase F: every run is a K8s Job; the in-process asyncio.Task path was
+removed. Liveness for orphan detection is determined purely by K8s
+(`_job_exists_for_run`).
 
-v2: pod restart leaves DB rows in 'running'/'queued'. `reconcile_orphaned_runs()`
-is called on FastAPI startup and marks those rows 'orphaned' so API consumers
-can detect the gap.
+Pod restart leaves DB rows in 'running'/'queued'.
+`reconcile_orphaned_runs()` is called on FastAPI startup and marks those
+rows 'orphaned' so API consumers can detect the gap when the K8s Job has
+also disappeared.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import os
 import uuid
@@ -55,19 +57,17 @@ class InitiativeRecord(BaseModel):
     error: str | None = None
     cluster: str | None = None
     created_by: str | None = None
-    # Phase D.4 — which spawn path created this run.
-    # 'asyncio' (default): run lives inside the API pod's event loop.
-    # 'job':                run lives in its own K8s Job pod (survives
-    #                       API pod restarts). Set at register() time by
-    #                       the router from LEARTECH_INITIATIVE_RUNTIME.
-    runtime: str = 'asyncio'
-    # K8s Job name when runtime='job' — equals run_id by D.3 contract.
-    # None on the asyncio path.
+    # Phase F — every run is 'job' now (the in-process asyncio path was
+    # removed). Kept on the model for backwards-compat with DB rows
+    # created before this phase (default still 'job' since legacy rows
+    # carry the original 'asyncio' string but new ones never do).
+    runtime: str = 'job'
+    # K8s Job name — equals run_id by D.3 contract. None only for legacy
+    # asyncio rows from before Phase F.
     job_name: str | None = None
 
 
 _records: dict[str, InitiativeRecord] = {}
-_tasks: dict[str, asyncio.Task[Any]] = {}
 
 
 def new_id() -> str:
@@ -99,23 +99,17 @@ def _run_record_to_initiative_record(run: InitiativeRunRecord) -> InitiativeReco
     )
 
 
-async def register(record: InitiativeRecord, task: asyncio.Task[Any] | None) -> None:
+async def register(record: InitiativeRecord) -> None:
     """Register a new initiative run — in-memory always, DB when configured.
 
-    The in-memory write happens first (no await), so background tasks that
-    call update() immediately after creation never race against an incomplete
-    DB INSERT.
+    The in-memory write happens first (no await), so subsequent update()
+    calls never race against an incomplete DB INSERT.
 
-    Phase D.4: ``task`` is optional. On the asyncio runtime path the caller
-    passes the live asyncio.Task so cancellation can target it. On the Job
-    runtime path the run lives in a separate K8s Job pod — there's no local
-    Task to track, so the caller passes None and ``_tasks`` is left untouched
-    for this run. Cancellation of Job-runtime runs flows through K8s (D.5
-    will wire that surface).
+    Phase F: every run lives in a separate K8s Job pod, so there's no
+    in-process task to track. Cancellation flows through K8s (the cancel
+    endpoint deletes the Job).
     """
     _records[record.id] = record
-    if task is not None:
-        _tasks[record.id] = task
     if is_db_enabled():
         async with db_session() as s:
             await create_run(
@@ -133,8 +127,7 @@ async def register(record: InitiativeRecord, task: asyncio.Task[Any] | None) -> 
                 # pr_repo for self_retrospect — fixes the skip-every-run
                 # regression observed on run 44120e445abd (2026-05-28).
                 pr_repo=record.pr_repo,
-                # Phase D.4 — dual-path runtime fields, set once at INSERT
-                # and never mutated afterwards.
+                # Runtime fields set once at INSERT and never mutated.
                 runtime=record.runtime,
                 job_name=record.job_name,
             )
@@ -166,15 +159,6 @@ async def update(initiative_id: str, **fields: Any) -> None:
             await update_run(s, id=initiative_id, **fields)
 
 
-async def cancel(initiative_id: str) -> bool:
-    """Request cancellation of a running task. Returns True if cancelled."""
-    task = _tasks.get(initiative_id)
-    if task is None or task.done():
-        return False
-    task.cancel()
-    return True
-
-
 async def list_records() -> list[InitiativeRecord]:
     """List all run records — from DB when configured, in-memory fallback otherwise."""
     if is_db_enabled():
@@ -194,31 +178,27 @@ async def reconcile_orphaned_runs(older_than_seconds: int | None = None) -> int:
     rectifies the state so API consumers can detect the gap and act
     accordingly.
 
-    Liveness is determined per-runtime:
-
-    - ``runtime='asyncio'``: row is live iff its id is in the in-memory
-      ``_tasks`` dict. On a fresh pod start that dict is empty, so any
-      asyncio-mode in-flight rows are correctly orphaned.
-    - ``runtime='job'``: row is live iff K8s reports a Job in ``POD_NAMESPACE``
-      labelled ``leartech.io/run-id=<id>``. This was added 2026-05-29 after
-      the D.5.2 fire: when the API pod rolls mid-Job, the new pod's
-      ``_tasks`` is empty BUT the Job pod is still alive and making
-      progress. Marking such records orphaned creates a stale catalog
-      verdict (DB says ``orphaned`` while the Job completes successfully
-      and opens a PR).
+    Liveness: a row is live iff K8s reports a Job in ``POD_NAMESPACE``
+    labelled ``leartech.io/run-id=<id>``. This is the post-Phase-F
+    contract — every run is runtime='job', so every liveness verdict
+    routes through the K8s API. Legacy DB rows from pre-Phase-F that
+    carry ``runtime='asyncio'`` (and have no backing K8s Job) get
+    orphaned on the next reconcile, which is the correct outcome
+    (their asyncio task was killed when the API pod that owned it
+    rolled).
 
     K8s API failures are treated conservatively — we DO NOT orphan
-    job-runtime records when we cannot verify Job liveness. They will be
-    re-evaluated on the next startup. False-orphaning a live Job is
-    a worse outcome than briefly delaying orphan detection.
+    runs when we cannot verify Job liveness. They will be re-evaluated
+    on the next startup. False-orphaning a live Job is a worse outcome
+    than briefly delaying orphan detection.
 
     When ``older_than_seconds`` is not None, candidates whose
     ``started_at`` is more recent than that threshold are treated as live
     — keeping them safe from the orphan marker even when there's no
     backing K8s Job yet (e.g. a Job that has been Pending for 30s after
     spawn, before the pod is scheduled). The startup callsite passes None
-    because pod restart unconditionally invalidates the in-memory task
-    map; the operator cleanup passes 86400 (default 24h) so the endpoint
+    (pod restart invalidates every in-memory assumption about liveness);
+    the operator cleanup passes 86400 (default 24h) so the endpoint
     can't accidentally sweep healthy mid-run state.
 
     Returns the count of rows marked orphaned (0 when DB is not configured).
@@ -226,10 +206,8 @@ async def reconcile_orphaned_runs(older_than_seconds: int | None = None) -> int:
     if not is_db_enabled():
         return 0
 
-    live_ids: set[str] = set(_tasks.keys())
+    live_ids: set[str] = set()
 
-    # Enumerate in-flight job-runtime candidates so we can ask K8s about each.
-    # Asyncio-runtime rows skip this entirely — they have no Job to check.
     async with db_session() as s:
         in_flight = await list_in_flight_runs(s)
 
@@ -248,6 +226,9 @@ async def reconcile_orphaned_runs(older_than_seconds: int | None = None) -> int:
             if started > cutoff:
                 live_ids.add(record.id)
 
+    # Only runtime='job' rows have a backing K8s Job to check. Legacy
+    # 'asyncio' rows always fall through to mark_orphaned_runs (correct:
+    # the API pod that owned their task is gone).
     job_candidates = [r for r in in_flight if r.runtime == 'job' and r.id not in live_ids]
 
     for record in job_candidates:
@@ -258,7 +239,7 @@ async def reconcile_orphaned_runs(older_than_seconds: int | None = None) -> int:
             # Conservative: don't orphan when we can't verify. Re-evaluated
             # on next reconcile cycle. See module docstring for rationale.
             logger.warning(
-                'K8s Job-existence check failed for runtime=job run %s (%s); '
+                'K8s Job-existence check failed for run %s (%s); '
                 'conservatively treating as live to avoid false orphan. '
                 'Will be re-evaluated on the next startup reconcile.',
                 record.id,
