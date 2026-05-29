@@ -140,7 +140,17 @@ def _build_job_manifest(
                             },
                             'env': env_list,
                             'resources': resources,
+                            # Writable workspace at /workspace — agent loop clones
+                            # consumer repos into here (see initiative.py::_clone_repo).
+                            # The image's /workspace path is not writable by UID 1000;
+                            # emptyDir gives a per-Job scratch space with fsGroup=1000.
+                            'volumeMounts': [
+                                {'name': 'workspace', 'mountPath': '/workspace'},
+                            ],
                         }
+                    ],
+                    'volumes': [
+                        {'name': 'workspace', 'emptyDir': {}},
                     ],
                 },
             },

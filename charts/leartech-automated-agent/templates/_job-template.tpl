@@ -89,4 +89,13 @@ spec:
           limits:
             cpu: {{ .resources.limits.cpu | default "4" }}
             memory: {{ .resources.limits.memory | default "8Gi" }}
+        # Writable workspace at /workspace — agent loop clones consumer
+        # repos here. The image's /workspace path is not writable by UID
+        # 1000; emptyDir gives a per-Job scratch space with fsGroup=1000.
+        volumeMounts:
+        - name: workspace
+          mountPath: /workspace
+      volumes:
+      - name: workspace
+        emptyDir: {}
 {{- end -}}
