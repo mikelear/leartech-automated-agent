@@ -39,7 +39,24 @@ from gate.mcp_servers import (
     build_criteria_server,
     build_pipeline_server,
     build_pr_context_server,
+    build_tekton_server,
 )
+
+# Phase G.2 — step-aware failure diagnosis tools wired ONLY into the
+# initiative role (the read-only review_agent in `gate/agent/main.py` keeps
+# the slimmer MCP_ALLOWED_TOOLS set). Catalog (`mcp_catalog.yaml`) is the
+# source of truth for role→MCP wiring; this list mirrors the
+# `leartech-tekton` MCP's tool surface (see `gate/mcp_servers/tekton.py`).
+INITIATIVE_TEKTON_TOOLS = [
+    'mcp__leartech-tekton__list_pipelineruns_for_pr',
+    'mcp__leartech-tekton__step_status',
+    'mcp__leartech-tekton__step_logs',
+    'mcp__leartech-tekton__cancel_pipelinerun',
+    'mcp__leartech-tekton__cancel_superseded_for_pr',
+    'mcp__leartech-tekton__wait_first_failure',
+    'mcp__leartech-tekton__classify_step_failure',
+    'mcp__leartech-tekton__rebase_branch_on_base',
+]
 
 
 @dataclass(frozen=True)
@@ -364,8 +381,9 @@ async def run_initiative(
             'leartech-pr-context': build_pr_context_server(),
             'leartech-test-artifacts': build_artifacts_server(),
             'leartech-criteria': build_criteria_server(),
+            'leartech-tekton': build_tekton_server(),
         },
-        allowed_tools=[*WRITE_MODE_TOOLS, *MCP_ALLOWED_TOOLS],
+        allowed_tools=[*WRITE_MODE_TOOLS, *MCP_ALLOWED_TOOLS, *INITIATIVE_TEKTON_TOOLS],
         permission_mode='bypassPermissions',
         max_turns=max_turns,
         model=model,

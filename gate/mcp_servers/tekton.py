@@ -51,6 +51,10 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 
+from gate.agent.step_failure_diagnosis import (
+    classify_step_failure as _classify_step_failure,
+)
+
 # ─── Cluster mapping ──────────────────────────────────────────────────────────
 
 _CLUSTER_CONTEXTS: dict[str, str] = {
@@ -461,10 +465,132 @@ async def _wait_first_failure(args: dict[str, Any]) -> dict[str, Any]:
     return {'content': [{'type': 'text', 'text': json.dumps(payload, indent=2)}]}
 
 
+# ─── G.2 — classification + rebase helpers ────────────────────────────────────
+
+
+@tool(
+    'classify_step_failure',
+    'Diagnose ONE failed Tekton step. Inputs: step_name (e.g. "ruff", "git-clone", "pytest") '
+    'and log_tail (the last ~200 lines from step_logs). '
+    'Returns {"classification": "git_merge_conflict|ruff_format_error|ruff_lint_error|mypy_type_error|'
+    'pytest_test_failure|kaniko_build_failure|image_pull_backoff|ai_review_red_finding|tekton_step_oom|'
+    'tekton_step_timeout|preview_deploy_failure|security_scan_finding|unknown", '
+    '"action": "rebase|fix_code|fix_test|retry|escalate", "pipelinerun": str, "step_name": str}. '
+    'Use this AFTER step_logs so the agent dispatches on the canonical failure shape '
+    'rather than retrying blindly. Unknown failure → action=escalate (do NOT retry).',
+    {'step_name': str, 'log_tail': str, 'pipelinerun': str},
+)
+async def _classify_step_failure_tool(args: dict[str, Any]) -> dict[str, Any]:
+    failure = _classify_step_failure(
+        step_name=str(args['step_name']),
+        log_tail=str(args['log_tail']),
+        pipelinerun=str(args.get('pipelinerun') or ''),
+    )
+    return {'content': [{'type': 'text', 'text': json.dumps(failure.to_dict(), indent=2)}]}
+
+
+def _run_git(args: list[str], cwd: str, timeout: int = 60) -> _KubectlResult:
+    """Run a git command in `cwd`. Single seam — tests monkeypatch this.
+
+    Re-uses ``_KubectlResult`` for the (returncode, stdout, stderr) shape;
+    nothing about that struct is kubectl-specific in practice.
+    """
+    proc = subprocess.run(['git', *args], cwd=cwd, capture_output=True, text=True, check=False, timeout=timeout)
+    return _KubectlResult(returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+
+
+def rebase_branch_on_base(repo_cwd: str, branch: str, base: str = 'main') -> dict[str, Any]:
+    """Rebase ``branch`` onto ``origin/<base>`` and force-push-with-lease.
+
+    Strategy: ``git fetch origin <base>`` → ``git rebase -Xtheirs origin/<base>``.
+    The ``-Xtheirs`` flag asks git to auto-resolve content conflicts in favour
+    of the rebased branch (the agent's own commits), which is the correct
+    choice in 99% of cases: the agent's PR is the source of truth, main has
+    only moved forward independently.
+
+    A UU (unmerged) conflict — typical when both sides modified the same
+    range of the same file — cannot be auto-resolved even with ``-Xtheirs``.
+    In that case we abort the rebase and return ``{"status": "conflict",
+    "conflicted_files": [...]}`` so the agent can post a sticky and escalate.
+
+    On a clean rebase we push with ``--force-with-lease`` (NOT plain
+    ``--force``) so a concurrent human push to the same branch isn't
+    silently clobbered.
+
+    Returns:
+        ``{"status": "rebased" | "conflict" | "error", "pushed": bool,
+        "conflicted_files": [...], "message": str}``
+
+    Replaces the standalone `self-rebase-on-conflict` initiative (deferred
+    in Phase G planning); kept as a Python helper so the agent can invoke
+    it via one MCP call rather than orchestrating four git commands.
+    """
+    fetch = _run_git(['fetch', 'origin', base], cwd=repo_cwd)
+    if fetch.returncode != 0:
+        return {
+            'status': 'error',
+            'pushed': False,
+            'conflicted_files': [],
+            'message': f'git fetch origin {base} failed: {fetch.stderr.strip()}',
+        }
+
+    rebase = _run_git(['rebase', '-Xtheirs', f'origin/{base}'], cwd=repo_cwd)
+    if rebase.returncode != 0:
+        # Check for UU paths — paths git couldn't auto-resolve.
+        status = _run_git(['status', '--porcelain'], cwd=repo_cwd)
+        conflicted = [line[3:].strip() for line in status.stdout.splitlines() if line.startswith('UU ')]
+        # Abort to leave the worktree in a sane state for the next step.
+        _run_git(['rebase', '--abort'], cwd=repo_cwd)
+        return {
+            'status': 'conflict',
+            'pushed': False,
+            'conflicted_files': conflicted,
+            'message': (
+                f'Rebase onto origin/{base} produced unmergeable conflicts in '
+                f'{len(conflicted)} file(s); aborted. {rebase.stderr.strip()}'
+            ),
+        }
+
+    push = _run_git(['push', '--force-with-lease', 'origin', branch], cwd=repo_cwd)
+    if push.returncode != 0:
+        return {
+            'status': 'error',
+            'pushed': False,
+            'conflicted_files': [],
+            'message': f'force-with-lease push failed: {push.stderr.strip()}',
+        }
+
+    return {
+        'status': 'rebased',
+        'pushed': True,
+        'conflicted_files': [],
+        'message': f'Rebased {branch} onto origin/{base} and force-pushed-with-lease.',
+    }
+
+
+@tool(
+    'rebase_branch_on_base',
+    'Rebase the current PR branch onto origin/<base> (default `main`) and force-push-with-lease. '
+    'Uses `-Xtheirs` to auto-resolve content conflicts in favour of the PR branch. '
+    'Returns {"status": "rebased"|"conflict"|"error", "pushed": bool, "conflicted_files": [...], '
+    '"message": str}. Use this when `classify_step_failure` returns action=rebase '
+    '(git_merge_conflict during git-clone step). On `status: conflict` the agent must NOT '
+    'retry — post a sticky listing the conflicted files and escalate.',
+    {'repo_cwd': str, 'branch': str, 'base': str},
+)
+async def _rebase_branch_on_base(args: dict[str, Any]) -> dict[str, Any]:
+    result = rebase_branch_on_base(
+        repo_cwd=str(args['repo_cwd']),
+        branch=str(args['branch']),
+        base=str(args.get('base') or 'main'),
+    )
+    return {'content': [{'type': 'text', 'text': json.dumps(result, indent=2)}]}
+
+
 def build_tekton_server() -> McpSdkServerConfig:
     return create_sdk_mcp_server(
         name='leartech-tekton',
-        version='0.1.0',
+        version='0.2.0',
         tools=[
             _list_pipelineruns_for_pr,
             _step_status,
@@ -472,5 +598,7 @@ def build_tekton_server() -> McpSdkServerConfig:
             _cancel_pipelinerun,
             _cancel_superseded_for_pr,
             _wait_first_failure,
+            _classify_step_failure_tool,
+            _rebase_branch_on_base,
         ],
     )
