@@ -203,8 +203,8 @@ def _build_job_crash_sticky_body(*, run_id: str, exit_reason: str, log_tail: str
     )
 
 
-def _lookup_pr_by_branch(qualified_repo: str, initiative: str, run_id: str) -> int | None:
-    """Fallback PR resolver — query GitHub by the initiative's branch convention.
+def _lookup_pr_by_branch(qualified_repo: str, branch: str, run_id: str) -> int | None:
+    """Fallback PR resolver — query GitHub by the initiative's branch.
 
     D.5.1.1 — the agent's ``wait_for_terminal`` may block until the pod is
     SIGTERM-killed before the final ``--- turns=...  pr=N`` summary line is
@@ -213,16 +213,21 @@ def _lookup_pr_by_branch(qualified_repo: str, initiative: str, run_id: str) -> i
     silently skips ("pr_repo/pr_number not set"). Closing that gap is the
     point of this helper.
 
-    The leartech initiative convention is one branch per initiative, named
-    ``agent/<initiative-name>``. ``gh pr list --head <branch> --state open``
-    returns the open PR for that branch if one exists. We pick the first
-    (limit=1) since the convention is one PR per branch.
+    D.5.1.2 — the original D.5.1.1 version derived the branch from
+    ``f'agent/{initiative}'``. That convention doesn't match the YAML
+    (e.g. initiative ``agent-f-default-job-drop-asyncio`` declares branch
+    ``agent/f-default-job-drop-asyncio`` — the prefix gets doubled), so the
+    fallback always missed. We now read the authoritative branch from the
+    DB row (persisted at register time) and pass it in directly.
+
+    ``gh pr list --head <branch> --state open`` returns the open PR for
+    that branch if one exists. We pick the first (limit=1) since the
+    convention is one PR per branch.
 
     Returns ``None`` on any failure — caller leaves ``pr_number`` as-is.
     Failures are logged at DEBUG (this is a best-effort enrichment; the row
     update has already committed the rest of the run state).
     """
-    branch = f'agent/{initiative}'
     try:
         result = subprocess.run(
             [
@@ -310,11 +315,16 @@ async def reconcile_once(namespace: str) -> int:
             turns, cost, pr_number = _parse_summary(log_text)
             # D.5.1.1 fallback — log parse missed `pr=N` (agent never emitted
             # the final post-PR-resolution summary line before pod termination).
-            # Query GitHub by the initiative's branch convention so the row
-            # still gets the pr_number it would have had from the log. Without
-            # this, D.5.2's self_retrospect silently skips every job-mode run.
-            if pr_number is None and record.pr_repo:
-                pr_number = _lookup_pr_by_branch(record.pr_repo, record.initiative, run_id)
+            # Query GitHub by the initiative's declared branch (persisted on
+            # the DB row by D.5.1.2) so the row still gets the pr_number it
+            # would have had from the log. Without this, D.5.2's
+            # self_retrospect silently skips every job-mode run.
+            #
+            # Skip the lookup entirely when the row has no branch
+            # (`record.branch is None`) — that's a pre-D.5.1.2 row from
+            # before the column existed; log-parse is all we have for those.
+            if pr_number is None and record.pr_repo and record.branch:
+                pr_number = _lookup_pr_by_branch(record.pr_repo, record.branch, run_id)
             await update(
                 run_id,
                 status=terminal,

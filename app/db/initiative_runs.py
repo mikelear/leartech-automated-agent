@@ -45,6 +45,9 @@ class InitiativeRunRecord:
     # Job name (None only for legacy asyncio rows).
     runtime: str
     job_name: str | None
+    # Phase D.5.1.2 — initiative YAML's declared `branch` field, used by
+    # the job_reconciler's GH-side PR fallback. NULL on old rows.
+    branch: str | None
     updated_at: datetime
 
     @classmethod
@@ -64,6 +67,7 @@ class InitiativeRunRecord:
             created_by=row.created_by,
             runtime=row.runtime,
             job_name=row.job_name,
+            branch=row.branch,
             updated_at=row.updated_at,
         )
 
@@ -80,6 +84,7 @@ async def create_run(
     pr_repo: str | None = None,
     runtime: str = 'job',
     job_name: str | None = None,
+    branch: str | None = None,
 ) -> InitiativeRunRecord:
     """Create a new DB-stored run row. Raises on IntegrityError for duplicate id.
 
@@ -105,6 +110,7 @@ async def create_run(
         pr_repo=pr_repo,
         runtime=runtime,
         job_name=job_name,
+        branch=branch,
     )
     session.add(row)
     await session.flush()

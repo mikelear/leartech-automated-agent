@@ -244,7 +244,15 @@ async def test_reconcile_age_filter_protects_recent_records(
     """A runtime=asyncio row younger than the cutoff must NOT be orphaned
     even when no live Task backs it — the age filter keeps the operator
     cleanup endpoint from sweeping legitimately mid-flight rows."""
+    from app import state as state_mod
     from app.state import reconcile_orphaned_runs
+
+    # D-orphan-respect-live-jobs: bypass the in-cluster K8s check in unit tests
+    # (no incluster config; would conservatively treat all as live).
+    async def _no_live_jobs(_run_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(state_mod, '_job_exists_for_run', _no_live_jobs)
 
     now = datetime.now(UTC)
     async with db_module.session() as s:
@@ -277,12 +285,19 @@ async def test_reconcile_age_filter_protects_recent_records(
 @pytest.mark.asyncio
 async def test_reconcile_default_no_age_filter_sweeps_every_stale_row(
     db_enabled: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Backwards-compatibility: when ``older_than_seconds`` is None the
     function preserves the historical behaviour (every in-flight row
     without backing is orphaned). Pinned because the startup callsite
     relies on this."""
+    from app import state as state_mod
     from app.state import reconcile_orphaned_runs
+
+    async def _no_live_jobs(_run_id: str) -> bool:
+        return False
+
+    monkeypatch.setattr(state_mod, '_job_exists_for_run', _no_live_jobs)
 
     async with db_module.session() as s:
         await create_run(

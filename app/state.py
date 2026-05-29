@@ -65,6 +65,14 @@ class InitiativeRecord(BaseModel):
     # K8s Job name — equals run_id by D.3 contract. None only for legacy
     # asyncio rows from before Phase F.
     job_name: str | None = None
+    # Phase D.5.1.2 — the initiative YAML's declared `branch` field
+    # (e.g. `agent/d5-1-2-persist-branch-on-record`). Persisted at register
+    # time so the job_reconciler's GH-side PR fallback (D.5.1.1) can look up
+    # the open PR by `--head <branch>` without re-deriving the branch name
+    # from `record.initiative` (which doesn't match the YAML convention
+    # cleanly — see migration 0004 + the reconciler comment). NULL on old
+    # rows pre-migration; the reconciler treats NULL as "skip fallback".
+    branch: str | None = None
 
 
 _records: dict[str, InitiativeRecord] = {}
@@ -96,6 +104,7 @@ def _run_record_to_initiative_record(run: InitiativeRunRecord) -> InitiativeReco
         created_by=run.created_by,
         runtime=run.runtime,
         job_name=run.job_name,
+        branch=run.branch,
     )
 
 
@@ -130,6 +139,9 @@ async def register(record: InitiativeRecord) -> None:
                 # Runtime fields set once at INSERT and never mutated.
                 runtime=record.runtime,
                 job_name=record.job_name,
+                # Phase D.5.1.2 — YAML-declared branch, set once at INSERT
+                # and read back by the job_reconciler's PR fallback.
+                branch=record.branch,
             )
 
 
