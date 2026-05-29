@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ from gate.mcp_servers.tekton import (
     cancel_pipelinerun,
     cancel_superseded_for_pr,
     list_pipelineruns_for_pr,
+    rebase_branch_on_base,
     step_logs,
     step_status,
 )
@@ -370,8 +372,8 @@ def test_cancel_superseded_returns_zero_when_no_runs(mock_kubectl: list[dict[str
 # ─── Builder smoke test ───────────────────────────────────────────────────────
 
 
-def test_build_tekton_server_constructs_with_six_tools() -> None:
-    """The MCP builder wires every tool the catalog promises."""
+def test_build_tekton_server_constructs_with_g2_tools() -> None:
+    """The MCP builder wires every tool the catalog promises — G.1 + G.2."""
     server = build_tekton_server()
     assert server is not None
     # Best-effort tool-name extraction — same shape as test_mcp_servers.py.
@@ -379,14 +381,138 @@ def test_build_tekton_server_constructs_with_six_tools() -> None:
     if instance is not None and hasattr(instance, '_tool_handlers'):
         names = [t.name for t in instance._tool_handlers.values()]
         expected = {
+            # G.1 — Tekton inspection
             'list_pipelineruns_for_pr',
             'step_status',
             'step_logs',
             'cancel_pipelinerun',
             'cancel_superseded_for_pr',
             'wait_first_failure',
+            # G.2 — step-aware diagnosis + rebase
+            'classify_step_failure',
+            'rebase_branch_on_base',
         }
         assert set(names) == expected
+
+
+# ─── G.2: rebase_branch_on_base ──────────────────────────────────────────────
+
+
+@pytest.fixture
+def mock_git(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
+    """Mirror of `mock_kubectl` for the `_run_git` seam.
+
+    Tests append canned `_KubectlResult` responses via `_queue_canned_git`
+    and read the call shape back via `_git_calls`.
+    """
+    recorded: list[dict[str, Any]] = []
+    canned: list[_KubectlResult] = []
+
+    def fake_run_git(args: list[str], cwd: str, timeout: int = 60) -> _KubectlResult:
+        recorded.append({'args': list(args), 'cwd': cwd, 'timeout': timeout})
+        if canned:
+            return canned.pop(0)
+        return _KubectlResult(returncode=0, stdout='', stderr='')
+
+    monkeypatch.setattr(tekton, '_run_git', fake_run_git)
+    recorded.append({'_canned_ref': canned})
+    return recorded
+
+
+def _queue_canned_git(mock_git: list[dict[str, Any]], *results: _KubectlResult) -> None:
+    sentinel = mock_git[0]
+    assert '_canned_ref' in sentinel
+    sentinel['_canned_ref'].extend(results)
+
+
+def _git_calls(mock_git: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [c for c in mock_git if '_canned_ref' not in c]
+
+
+def test_rebase_clean_pushes_with_force_with_lease(mock_git: list[dict[str, Any]], tmp_path: Path) -> None:
+    """No conflicts → fetch + rebase + force-with-lease push, all green."""
+    _queue_canned_git(
+        mock_git,
+        _KubectlResult(returncode=0, stdout='', stderr=''),  # fetch
+        _KubectlResult(returncode=0, stdout='Successfully rebased', stderr=''),  # rebase
+        _KubectlResult(returncode=0, stdout='everything up-to-date', stderr=''),  # push
+    )
+    result = rebase_branch_on_base(str(tmp_path), 'agent/foo')
+    assert result['status'] == 'rebased'
+    assert result['pushed'] is True
+    assert result['conflicted_files'] == []
+    calls = _git_calls(mock_git)
+    assert calls[0]['args'] == ['fetch', 'origin', 'main']
+    assert calls[1]['args'] == ['rebase', '-Xtheirs', 'origin/main']
+    # CRITICAL: force-with-lease, not plain force (safety against concurrent human push)
+    assert calls[2]['args'] == ['push', '--force-with-lease', 'origin', 'agent/foo']
+
+
+def test_rebase_with_unmergeable_conflicts_aborts_and_returns_files(
+    mock_git: list[dict[str, Any]],
+    tmp_path: Path,
+) -> None:
+    """UU paths → abort + return conflicted file list. NO push attempted."""
+    porcelain_output = 'UU gate/foo.py\nUU tests/test_foo.py\n M unrelated.py\n'
+    _queue_canned_git(
+        mock_git,
+        _KubectlResult(returncode=0, stdout='', stderr=''),  # fetch
+        _KubectlResult(returncode=1, stdout='', stderr='CONFLICT (content)'),  # rebase fails
+        _KubectlResult(returncode=0, stdout=porcelain_output, stderr=''),  # status
+        _KubectlResult(returncode=0, stdout='', stderr=''),  # abort
+    )
+    result = rebase_branch_on_base(str(tmp_path), 'agent/foo', base='main')
+    assert result['status'] == 'conflict'
+    assert result['pushed'] is False
+    assert sorted(result['conflicted_files']) == ['gate/foo.py', 'tests/test_foo.py']
+    calls = _git_calls(mock_git)
+    # 4 calls: fetch, rebase, status, abort. No push.
+    assert len(calls) == 4
+    assert ['push', '--force-with-lease', 'origin', 'agent/foo'] not in [c['args'] for c in calls]
+    # Abort was called to leave the worktree sane.
+    assert calls[3]['args'] == ['rebase', '--abort']
+
+
+def test_rebase_fetch_failure_returns_error(mock_git: list[dict[str, Any]], tmp_path: Path) -> None:
+    _queue_canned_git(
+        mock_git,
+        _KubectlResult(returncode=1, stdout='', stderr='Could not resolve host'),
+    )
+    result = rebase_branch_on_base(str(tmp_path), 'agent/foo')
+    assert result['status'] == 'error'
+    assert result['pushed'] is False
+    assert 'Could not resolve host' in result['message']
+    # We bail BEFORE attempting rebase — only the fetch call should have run.
+    assert len(_git_calls(mock_git)) == 1
+
+
+def test_rebase_push_failure_returns_error(mock_git: list[dict[str, Any]], tmp_path: Path) -> None:
+    """Clean rebase but `--force-with-lease` push rejected (concurrent push) → error."""
+    _queue_canned_git(
+        mock_git,
+        _KubectlResult(returncode=0, stdout='', stderr=''),  # fetch
+        _KubectlResult(returncode=0, stdout='', stderr=''),  # rebase clean
+        _KubectlResult(returncode=1, stdout='', stderr='stale info'),  # push rejected
+    )
+    result = rebase_branch_on_base(str(tmp_path), 'agent/foo')
+    assert result['status'] == 'error'
+    assert result['pushed'] is False
+    assert 'stale info' in result['message']
+
+
+def test_rebase_uses_custom_base(mock_git: list[dict[str, Any]], tmp_path: Path) -> None:
+    """`base='release/v2'` → fetch + rebase against that ref."""
+    _queue_canned_git(
+        mock_git,
+        _KubectlResult(returncode=0, stdout='', stderr=''),
+        _KubectlResult(returncode=0, stdout='', stderr=''),
+        _KubectlResult(returncode=0, stdout='', stderr=''),
+    )
+    result = rebase_branch_on_base(str(tmp_path), 'agent/foo', base='release/v2')
+    assert result['status'] == 'rebased'
+    calls = _git_calls(mock_git)
+    assert calls[0]['args'] == ['fetch', 'origin', 'release/v2']
+    assert calls[1]['args'] == ['rebase', '-Xtheirs', 'origin/release/v2']
 
 
 def test_catalog_registers_leartech_tekton() -> None:

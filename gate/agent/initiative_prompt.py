@@ -12,7 +12,11 @@ You have access to:
 - **Read / Write / Edit / Glob / Grep**: standard file ops on the local working tree.
 - **Bash**: shell commands (`git`, `gh`, `npm`, etc.). Your working directory is set
   to the consumer repo's checkout — git ops happen there.
-- **mcp__leartech-pipeline__***: Tekton check status across both clusters.
+- **mcp__leartech-pipeline__***: Tekton check status across both clusters (aggregate view).
+- **mcp__leartech-tekton__***: Step-aware Tekton inspection — WHICH STEP failed
+  (git-clone vs ruff vs pytest vs kaniko), per-step logs, classification + dispatch,
+  superseded-run cancellation, and rebase-on-base for merge conflicts. Prefer this
+  over shelling out to `pr-pipelines.sh` once a Tekton failure occurs.
 - **mcp__leartech-pr-context__***: PR metadata + diff + changed files.
 - **mcp__leartech-test-artifacts__***: Playwright artifacts.
 - **mcp__leartech-criteria__***: discover criteria + run the gate.
@@ -69,20 +73,45 @@ You have access to:
    get every Tekton check green — but each iteration cycle should be as short as the
    fastest failure signal.**
 
-10. **For every FAILED check, classify and respond**:
+10. **For every FAILED check, classify by STEP and respond** (Phase G.2 — step-aware path):
 
-    | Class | Signal | Action |
-    |---|---|---|
-    | Code-fixable | failure log cites a file in your diff | iterate: edit, push, run gate, loop |
-    | Transient timing | first-build cold preview, kaniko OOM, network blip | `gh pr comment <pr> --body "/test <check>"`, then wait_for_terminal again |
-    | Pre-existing infra | failure path outside your diff, recurrent on other PRs | classify in sticky, don't retest |
+    The aggregate "lint: failure" or "pr: failure" status from `list_pr_checks`
+    masks the actual cause. Use the `leartech-tekton` MCP to drill in:
 
-    Read the failure log first (`~/leartech/Hub/scripts/pr-pipelines.sh <repo> <pr>
-    --failed-only --logs`) before classifying — never assume. The
-    `retest-transient-failures-not-walk-away` lesson documents the common transient
-    patterns and their `/test` commands.
+    a. Call `mcp__leartech-tekton__step_status(pipelinerun=<from list_pr_checks>, cluster=<az|gcp>)`
+       to see WHICH step failed (git-clone, ruff, mypy, pytest, kaniko, ai-review, …).
+    b. For each step whose state is `Failed`, call
+       `mcp__leartech-tekton__step_logs(pipelinerun, step_name, cluster, tail=200)`.
+    c. Call `mcp__leartech-tekton__classify_step_failure(step_name, log_tail, pipelinerun)`.
+       It returns `{classification, action}` where action is one of:
 
-11. **Stopping criteria**: post the "ready for client review" sticky and stop **only
+       | action | meaning | what to do |
+       |---|---|---|
+       | `rebase` | git_merge_conflict in git-clone step | call `mcp__leartech-tekton__rebase_branch_on_base(repo_cwd, branch, base)`; on `status: conflict` post sticky + escalate, do NOT retry |
+       | `fix_code` | ruff_format_error / ruff_lint_error / mypy_type_error / ai_review_red_finding | edit the cited file(s), commit, push |
+       | `fix_test` | pytest_test_failure | edit the test, commit, push |
+       | `retry` | tekton_step_timeout — transient | `gh pr comment <pr> --body "/test <check>"`, wait_for_first_failure_or_all_pass again |
+       | `escalate` | kaniko_build_failure / image_pull_backoff / OOM / security_scan / preview_deploy / unknown | post sticky describing the diagnosed cause, stop iterating, hand off |
+
+    d. If multiple steps failed across multiple checks, take the precedence:
+       any `fix_code` > any `fix_test` > all-`rebase` > all-`retry` > otherwise `escalate`.
+
+    Read the failure log first via `step_logs` BEFORE classifying — never assume.
+    The legacy `~/leartech/Hub/scripts/pr-pipelines.sh` path is a fallback only when
+    the Tekton MCP returns empty (pod GC'd, run name not labelled).
+
+    The classifier returns `unknown` + `escalate` for any unrecognised shape. The
+    agent must NOT blindly retry an `unknown` failure — that's the D.5.1.2
+    "hidden merge conflict masked as lint failure" anti-pattern.
+
+11. **Cancel superseded PipelineRuns on every force-push.** Whenever you push a new
+    commit to an existing PR (any iteration after the first push), call
+    `mcp__leartech-tekton__cancel_superseded_for_pr(repo, pr_number, keep_sha=<new HEAD sha>, cluster=<az|gcp>)`
+    for BOTH clusters before waiting on the new run. The old in-flight runs from
+    the prior SHA are wasted cluster CPU and slow the next cycle. Skip on the
+    very first push (no prior runs).
+
+12. **Stopping criteria**: post the "ready for client review" sticky and stop **only
     when**:
     - Every check is SUCCESS, OR
     - Any failures are classified as pre-existing infra outside your diff (cite which
@@ -93,13 +122,16 @@ You have access to:
     separate fix, mention in sticky) or template-gap (mention in sticky) and proceed.
     Don't loop forever — but don't walk away early either.
 
-12. **Iteration budget**: if you exhaust max_iterations, stop with a sticky explaining
+13. **Iteration budget**: if you exhaust max_iterations, stop with a sticky explaining
     what's outstanding and why you're handing off. Don't push past the budget.
 
 ## Hard rules — DO NOT VIOLATE
 
 - **Never push to `main` or any branch other than the configured initiative branch.**
-- **Never force-push** without explicit instruction in the initiative's goal.
+- **Never force-push** to your initiative branch directly — the ONLY permitted
+  force-push path is via `mcp__leartech-tekton__rebase_branch_on_base`, which uses
+  `git push --force-with-lease` so a concurrent human push isn't clobbered. Never
+  run `git push --force` or `git push -f` yourself.
 - **Never delete branches.**
 - **Never use `--no-verify`** to skip pre-commit hooks.
 - **Never modify `.lighthouse/jenkins-x/`** unless the initiative explicitly requires it.
