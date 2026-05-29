@@ -65,6 +65,14 @@ _SUMMARY_RE = re.compile(
     re.MULTILINE,
 )
 
+# D.5.1.4 — early-emit marker line written by ``run_initiative`` as soon as a
+# PR URL appears in any tool result, BEFORE the long blocking waits. The final
+# summary line is the authoritative source when present, but if the run exits
+# abnormally (wait_for_terminal blocks past pod SIGTERM, SDK exception
+# mid-loop) it may never be emitted — the marker is then the only log-side
+# signal carrying pr=N, sparing us the GH-fallback subprocess call.
+_PR_OPEN_RE = re.compile(r'^---\s*pr_open\s+pr=(?P<pr>\d+)', re.MULTILINE)
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
@@ -279,17 +287,31 @@ def _parse_summary(log_text: str) -> tuple[int | None, float | None, int | None]
     PR resolution: `--- turns=X  in=...  out=...  cost=$W  pr=N` (pr=N is
     present only when a PR was opened). We pick the LAST `--- turns=` line
     so per-turn summaries don't overshadow the final authoritative one.
+
+    D.5.1.4 — when the final summary is missing or lacks ``pr=N`` (e.g. the
+    agent exited via SDK exception, or ``wait_for_terminal`` blocked past pod
+    SIGTERM), we additionally consult the early-emit ``--- pr_open pr=N``
+    marker. The summary's pr wins when both are present (same value in
+    practice; precedence keeps the summary as the canonical contract); the
+    marker is the fallback that turns the GH-side ``_lookup_pr_by_branch``
+    subprocess call into a rare last resort instead of the steady-state path.
     """
     matches = list(_SUMMARY_RE.finditer(log_text))
-    if not matches:
-        return None, None, None
-    last = matches[-1]
-    pr_raw = last.group('pr')
-    return (
-        int(last.group('turns')),
-        float(last.group('cost')),
-        int(pr_raw) if pr_raw else None,
-    )
+    turns: int | None = None
+    cost: float | None = None
+    pr_number: int | None = None
+    if matches:
+        last = matches[-1]
+        turns = int(last.group('turns'))
+        cost = float(last.group('cost'))
+        pr_raw = last.group('pr')
+        if pr_raw:
+            pr_number = int(pr_raw)
+    if pr_number is None:
+        marker = _PR_OPEN_RE.search(log_text)
+        if marker:
+            pr_number = int(marker.group('pr'))
+    return turns, cost, pr_number
 
 
 async def reconcile_once(namespace: str) -> int:

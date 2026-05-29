@@ -78,6 +78,77 @@ def test_parse_summary_ignores_url_references_in_prose() -> None:
 
 
 # ---------------------------------------------------------------------------
+# D.5.1.4 — early-emit `--- pr_open pr=N` marker
+# ---------------------------------------------------------------------------
+#
+# Slice fix: the agent's final `--- turns=...  pr=N` summary line is emitted
+# at the very end of `run_initiative`, AFTER all the gate waits. If the agent
+# exits abnormally (wait_for_terminal blocks past pod SIGTERM, SDK exception
+# mid-loop) the final summary never lands and pr=N is invisible to log parse —
+# forcing every job-mode run onto the D.5.1.2 GH-fallback subprocess path.
+#
+# `run_initiative` now also emits a `--- pr_open pr=N repo=...` line the
+# moment a PR URL appears in any tool result, giving log-parse a second
+# emit point that fires *before* any blocking wait. Contract:
+#
+#   - marker only (no final summary)     → pr captured from marker
+#   - marker AND summary with pr=N       → summary wins (canonical contract)
+#   - neither marker nor summary pr=N    → pr is None; reconciler then falls
+#                                          through to the D.5.1.2 GH fallback
+
+
+def test_parse_summary_extracts_pr_from_pr_open_marker_when_summary_lacks_pr() -> None:
+    """The headline win — log has the early marker but the final summary
+    line carries no pr= (e.g. agent exited via exception before the post-loop
+    emit). Reconciler still recovers the PR from log parse without paying for
+    a `gh pr list` subprocess fork on the steady-state path."""
+    log = (
+        'opening PR...\n'
+        '--- pr_open pr=42 repo=mikelear/example-svc\n'
+        'iterating on lint...\n'
+        '--- turns=8  in=100  out=200  cost=$0.40\n'
+    )
+    turns, cost, pr_number = _parse_summary(log)
+    assert turns == 8
+    assert cost == 0.40
+    assert pr_number == 42
+
+
+def test_parse_summary_summary_pr_wins_over_pr_open_marker() -> None:
+    """Precedence guard: when both signals are present (the healthy-finish
+    case) the final summary's pr is canonical. In practice both carry the
+    same number, but pinning the order here prevents a future maintainer
+    from accidentally flipping it and degrading to a marker-priority world
+    that's harder to reason about."""
+    log = '--- pr_open pr=42 repo=mikelear/example-svc\n--- turns=5  in=0  out=0  cost=$0.10  pr=42\n'
+    _, _, pr_number = _parse_summary(log)
+    assert pr_number == 42
+
+
+def test_parse_summary_returns_none_when_neither_marker_nor_summary_pr() -> None:
+    """No early marker AND the summary line lacks pr= (the pre-D.5.1.4 shape
+    on an abnormal exit). _parse_summary returns pr=None; the reconciler
+    then falls through to the D.5.1.2 ``_lookup_pr_by_branch`` GH fallback —
+    proven by the `test_reconcile_once_uses_gh_fallback_when_log_pr_missing`
+    integration test below."""
+    log = '--- turns=3  in=0  out=0  cost=$0.05\n'
+    _, _, pr_number = _parse_summary(log)
+    assert pr_number is None
+
+
+def test_parse_summary_pr_open_marker_only_no_summary_line_at_all() -> None:
+    """Edge case: pod was SIGTERM-killed so fast that ONLY the pr_open marker
+    landed in the log tail — no summary line at all. We still recover the
+    PR; turns + cost remain None (legitimately unknown, since no summary
+    was ever emitted). Better than dropping pr_number on the floor."""
+    log = 'starting...\n--- pr_open pr=777 repo=mikelear/example-svc\n(pod killed here)\n'
+    turns, cost, pr_number = _parse_summary(log)
+    assert turns is None
+    assert cost is None
+    assert pr_number == 777
+
+
+# ---------------------------------------------------------------------------
 # Terminal-state classification
 # ---------------------------------------------------------------------------
 
@@ -776,6 +847,60 @@ async def test_reconcile_once_uses_gh_fallback_when_log_pr_missing(
     mock_update.assert_awaited_once()
     kwargs = mock_update.await_args.kwargs
     assert kwargs['pr_number'] == 789
+
+
+@pytest.mark.asyncio
+async def test_reconcile_once_uses_pr_open_marker_skips_gh_fallback(
+    _mock_k8s_ok: Any,  # type: ignore[valid-type]
+) -> None:
+    """D.5.1.4 integration — log has the early ``--- pr_open pr=N`` marker but
+    no final summary pr= (e.g. agent exited via SDK exception before the
+    post-loop summary emit). Reconciler must capture pr from the marker via
+    ``_parse_summary`` and skip the GH-side ``_lookup_pr_by_branch`` entirely.
+
+    This is the headline win: on the abnormal-exit path that used to ALWAYS
+    fork ``gh pr list``, log-parse now suffices, sparing the reconciler a
+    subprocess call per failed-finish run."""
+    batch, core = _mock_k8s_ok
+    job = _make_job('run-pr-open-marker', [('Complete', 'True')])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+    core.list_namespaced_pod = AsyncMock(
+        return_value=SimpleNamespace(items=[SimpleNamespace(metadata=SimpleNamespace(name='pod'))]),
+    )
+    # Marker present, summary without pr= — the canonical D.5.1.4 case.
+    core.read_namespaced_pod_log = AsyncMock(
+        return_value=(
+            '--- pr_open pr=987 repo=mikelear/example-svc\niterating...\n--- turns=4  in=10  out=20  cost=$0.15\n'
+        ),
+    )
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch(
+            'gate.agent.job_reconciler.get_record',
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    status='running',
+                    pr_number=None,
+                    pr_repo='mikelear/example-svc',
+                    initiative='pr-open-test',
+                    branch='agent/pr-open-test',
+                ),
+            ),
+        ),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+        patch('gate.agent.job_reconciler._lookup_pr_by_branch') as mock_lookup,
+        patch('gate.agent.job_reconciler._run_self_retrospect', new=AsyncMock()),
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        count = await reconcile_once('jx-staging')
+
+    assert count == 1
+    # The marker captured pr=987 — GH fallback must NOT be invoked.
+    mock_lookup.assert_not_called()
+    assert mock_update.await_args.kwargs['pr_number'] == 987
 
 
 @pytest.mark.asyncio
