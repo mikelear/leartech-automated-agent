@@ -11,7 +11,7 @@ source:
   reference: leartech-orchestrator init #5 PR #7 → CrashLoop on init #5 cascade, fixed by PR #10
   observer: mike.lear@leartech
   latency_to_capture: minutes
-category: deliverable_gap
+category: criteria_gap
 slipped_past_criteria: []
 proposed_criterion: |
   When an initiative authors code that adds new behavior (endpoints, modules,
