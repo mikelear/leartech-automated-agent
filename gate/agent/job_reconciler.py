@@ -39,6 +39,9 @@ from typing import Any
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client.api_client import ApiClient
 
+from app.db import is_db_enabled
+from app.db import session as db_session
+from app.db.initiative_runs import list_runs
 from app.routers.initiatives import _run_self_retrospect
 from app.state import get as get_record
 from app.state import update
@@ -417,7 +420,66 @@ async def reconcile_once(namespace: str) -> int:
                         )
                     except Exception as exc:  # noqa: BLE001 — best-effort
                         logger.warning('reconciler: crash sticky post failed for %s: %s', run_id, exc)
+    # D.5.1.5 — second pass: enrich `cancelled` rows that finalised with
+    # `pr_number=null`. The cancel endpoint (POST /initiatives/{id}/cancel)
+    # deletes the K8s Job via Background propagation (gone immediately from
+    # the API) AND writes `status='cancelled'` synchronously — so the Job-
+    # iteration above never sees these runs. But the agent may have already
+    # pushed + run `gh pr create` before SIGTERM (push+create typically
+    # completes in ~30s, well inside the terminationGracePeriodSeconds=30
+    # grace window), leaving an open PR with no link in the DB row.
+    #
+    # The D.5.1.1 fallback `_lookup_pr_by_branch` recovers the link from
+    # GitHub's side by querying `gh pr list --head <branch>`. Run it for
+    # every cancelled+missing-pr row whose pr_repo + branch are populated
+    # (pre-migration NULL branches skipped, same contract as Job-iteration
+    # path). Status stays `cancelled` — this only enriches metadata.
+    #
+    # Live hit example: leartech-orchestrator PR #4 (run 36465f844cc0,
+    # 2026-05-30) — agent was cancelled mid-flight (dynamic-scan hang),
+    # PR #4 existed + later merged, but the run row showed pr_number=null.
+    # Backfilling that historical row is out of scope; future cancels are
+    # covered by this fallback.
+    updates += await _enrich_cancelled_rows_missing_pr()
     return updates
+
+
+async def _enrich_cancelled_rows_missing_pr() -> int:
+    """Walk DB for cancelled rows missing pr_number; patch via GH lookup.
+
+    Idempotency: once ``pr_number`` is set, the row falls out of the
+    cancelled+missing-pr filter and the next pass skips it. A failed
+    lookup (returns None) also no-ops — the row stays in the filter and
+    we'll retry on the next pass, which is fine (GH `pr list` is cheap
+    and cancellation is rare).
+
+    Returns the count of rows patched. No-op (returns 0) when DB is not
+    configured — the in-memory fallback store has no separate iteration
+    path because tests targeting cancel always exercise the DB path.
+    """
+    if not is_db_enabled():
+        return 0
+    async with db_session() as s:
+        cancelled = await list_runs(s, status='cancelled')
+    patched = 0
+    for record in cancelled:
+        if record.pr_number is not None:
+            continue
+        if not record.pr_repo or not record.branch:
+            continue
+        pr_number = _lookup_pr_by_branch(record.pr_repo, record.branch, record.id)
+        if pr_number is None:
+            continue
+        await update(record.id, pr_number=pr_number)
+        patched += 1
+        logger.info(
+            'reconciler: D.5.1.5 enriched cancelled row %s with pr=%s (repo=%s branch=%s)',
+            record.id,
+            pr_number,
+            record.pr_repo,
+            record.branch,
+        )
+    return patched
 
 
 async def reconciler_loop(namespace: str, *, interval_seconds: int = POLL_INTERVAL_SECONDS) -> None:
