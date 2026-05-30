@@ -11,7 +11,7 @@ source:
   reference: leartech-orchestrator init #6 PR #11 release pipeline — AZ build-python-test flake; GCP passed same test same commit
   observer: mike.lear@leartech
   latency_to_capture: minutes
-category: diagnostic_reflex
+category: calibration
 slipped_past_criteria: []
 proposed_criterion: |
   Before the agent iterates on code in response to a single-cluster check

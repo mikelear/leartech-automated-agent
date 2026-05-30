@@ -11,7 +11,7 @@ source:
   reference: leartech-orchestrator init #4 cascade — schema correct, runtime broken
   observer: mike.lear@leartech
   latency_to_capture: minutes
-category: test_environment_gap
+category: criteria_gap
 slipped_past_criteria: []
 proposed_criterion: |
   When initiative_agent uses aiosqlite for tests against code that runs

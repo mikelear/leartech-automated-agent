@@ -12,7 +12,7 @@ source:
   reference: orchestrator init #5 PR #7 retrospect + fix-import-and-add-e2e PR #10 retrospect + init #6 PR #11 retrospect
   observer: mike.lear@leartech
   latency_to_capture: hours
-category: data_model_refinement
+category: architecture
 slipped_past_criteria: []
 proposed_criterion: |
   Every retrospect finding must be tagged with three fields:

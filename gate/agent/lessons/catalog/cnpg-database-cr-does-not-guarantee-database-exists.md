@@ -11,7 +11,7 @@ source:
   reference: leartech-orchestrator init #4 cascade — pod stuck in initContainer waiting for database that didn't exist
   observer: mike.lear@leartech
   latency_to_capture: minutes
-category: shared_infra_race
+category: tool_bug
 slipped_past_criteria: []
 proposed_criterion: |
   When an initiative adds or modifies a CNPG `Database` CR (via chart
