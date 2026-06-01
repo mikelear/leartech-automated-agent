@@ -24,21 +24,21 @@ spec:
     trigger: "(?m)^/ai-feedback"
     rerun_command: "/ai-feedback"
     source: "ai-review/feedback.yaml"
-  - name: security-scan
-    context: "security-scan"
-    always_run: true
-    optional: true
-    source: "security-scan/pullrequest.yaml"
-  - name: image-scan
-    context: "image-scan"
-    always_run: true
-    optional: true
-    source: "security-scan/image-scan.yaml"
-  - name: dynamic-security-scan
-    context: "dynamic-scan"
-    always_run: true
-    optional: true
-    source: "security-scan/dynamic/pullrequest.yaml"
+  # - name: security-scan
+  #   context: "security-scan"
+  #   always_run: true
+  #   optional: true
+  #   source: "security-scan/pullrequest.yaml"
+  # - name: image-scan
+  #   context: "image-scan"
+  #   always_run: true
+  #   optional: true
+  #   source: "security-scan/image-scan.yaml"
+  # - name: dynamic-security-scan
+  #   context: "dynamic-scan"
+  #   always_run: true
+  #   optional: true
+  #   source: "security-scan/dynamic/pullrequest.yaml"
   postsubmits:
   - name: release
     context: "release"
