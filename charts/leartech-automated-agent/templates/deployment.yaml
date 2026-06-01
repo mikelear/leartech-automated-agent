@@ -160,6 +160,18 @@ spec:
             secretKeyRef:
               name: {{ .Values.secrets.ghToken.secretName }}
               key: {{ .Values.secrets.ghToken.secretKey }}
+        # Forward the GH_TOKEN secret-NAME + KEY to spawned plan-runner Job
+        # pods so the Job-spawn code in app/routers/initiatives.py can build
+        # the Job pod's GH_TOKEN secretKeyRef from the live values instead of
+        # falling back to its hardcoded `tekton-git/password` default. Mirrors
+        # the leartech-orchestrator chart's pattern. Without this, the per-bot
+        # identity (LeartechAgentBot) plumbed in `secrets.ghToken` only lands
+        # in the API pod — spawned Job pods would still auth as the universal
+        # pipeline bot via tekton-git.
+        - name: LEARTECH_JOB_GH_TOKEN_SECRET_NAME
+          value: {{ .Values.secrets.ghToken.secretName | quote }}
+        - name: LEARTECH_JOB_GH_TOKEN_SECRET_KEY
+          value: {{ .Values.secrets.ghToken.secretKey | quote }}
         {{- if and .Values.secrets.adminToken.secretName .Values.secrets.adminToken.secretKey }}
         # Phase B (B.3+B.4): admin-token gate for POST /admin/cleanup.
         # When both secretName + secretKey are set the env is rendered
