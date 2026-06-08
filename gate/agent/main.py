@@ -22,6 +22,7 @@ from claude_agent_sdk.types import (
     ToolUseBlock,
 )
 
+from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.lessons import render_for
 from gate.agent.system_prompt import REVIEW_SYSTEM_PROMPT
 from gate.mcp_servers import (
@@ -66,11 +67,19 @@ MCP_ALLOWED_TOOLS = [
 
 
 def _build_system_prompt() -> str:
-    """Prepend any encoded calibration lessons applicable to the review_agent."""
-    calibrations = render_for('review_agent')
-    if calibrations:
-        return f'{calibrations}\n\n---\n\n{REVIEW_SYSTEM_PROMPT}'
-    return REVIEW_SYSTEM_PROMPT
+    """Prepend the JX3 platform calibration + any encoded lessons for review_agent.
+
+    Composition order (top → bottom of rendered prompt):
+      1. JX3 full-flow calibration — static, shipped in the wheel.
+      2. Encoded calibration lessons from the catalog (filtered to review_agent).
+      3. The review system prompt itself.
+    """
+    blocks: list[str] = [load_jx3_calibration()]
+    lessons = render_for('review_agent')
+    if lessons:
+        blocks.append(lessons)
+    blocks.append(REVIEW_SYSTEM_PROMPT)
+    return '\n\n---\n\n'.join(blocks)
 
 
 def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
