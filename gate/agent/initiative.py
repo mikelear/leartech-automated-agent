@@ -31,6 +31,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
+from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative_prompt import INITIATIVE_SYSTEM_PROMPT
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
@@ -372,8 +373,16 @@ async def run_initiative(
         if clone_exit != 0:
             return RunSummary(exit_code=clone_exit)
 
-    calibrations = render_for('initiative_agent')
-    system_prompt = f'{calibrations}\n\n---\n\n{INITIATIVE_SYSTEM_PROMPT}' if calibrations else INITIATIVE_SYSTEM_PROMPT
+    # Compose: JX3 platform calibration (static, shipped in wheel) → encoded
+    # lesson calibrations (filtered by role) → initiative system prompt.
+    # Both calibration sources stack on top of the role prompt; either or
+    # both may be empty.
+    blocks: list[str] = [load_jx3_calibration()]
+    lessons = render_for('initiative_agent')
+    if lessons:
+        blocks.append(lessons)
+    blocks.append(INITIATIVE_SYSTEM_PROMPT)
+    system_prompt = '\n\n---\n\n'.join(blocks)
 
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
