@@ -25,7 +25,7 @@ from pathlib import Path
 
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import PlainTextResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.db import is_db_enabled
 from app.db import session as db_session
@@ -423,7 +423,33 @@ async def _available_names() -> list[str]:
 
 
 class StartInitiativeRequest(BaseModel):
-    initiative: str = Field(..., description='Initiative YAML name (without .yaml)')
+    """Request body for ``POST /initiatives``.
+
+    Either ``initiative`` (catalog name) OR ``initiative_body`` (raw YAML)
+    must be set — never both. Mirrors the orchestrator's ``StartPlanRequest``
+    either/or shape so the inline-body fire path doesn't require polluting
+    the catalog with throwaway entries.
+    """
+
+    initiative: str | None = Field(
+        default=None,
+        description='Catalog initiative name (without .yaml). Mutually exclusive with initiative_body.',
+    )
+    initiative_body: str | None = Field(
+        default=None,
+        description=(
+            'Raw initiative YAML body. Used directly without catalog lookup. Mutually exclusive with initiative.'
+        ),
+        max_length=200_000,
+    )
+
+    @model_validator(mode='after')
+    def _exactly_one(self) -> StartInitiativeRequest:
+        # XOR: exactly one of the two MUST be set. Both-None and both-set
+        # are rejected at validation time so handlers don't have to guard.
+        if (self.initiative is None) == (self.initiative_body is None):
+            raise ValueError('Specify exactly one of `initiative` or `initiative_body`.')
+        return self
 
 
 async def _run_self_retrospect(initiative_id: str) -> None:
@@ -496,19 +522,42 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
     Returns 202 with the initial record (status=running once the Job has
     been accepted by K8s). Poll ``GET /initiatives/{id}`` for terminal
     status.
-    """
-    yaml_path = await _resolve_yaml_path(request.initiative)
-    if yaml_path is None:
-        available = await _available_names()
-        raise HTTPException(
-            status_code=404,
-            detail={'message': f'Initiative {request.initiative!r} not found', 'available': available},
-        )
 
-    try:
-        loaded = load_initiative(yaml_path)
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
+    Two firing modes:
+
+    - ``initiative: <name>`` — catalog lookup (DB-first, FS-fallback).
+    - ``initiative_body: <raw YAML>`` — parsed verbatim, no catalog touch.
+      The parsed ``name:`` field is used for bookkeeping (labels, DB rows).
+    """
+    if request.initiative_body is not None:
+        # Inline-body path — no catalog lookup. The parsed `name:` field
+        # is what shows up on the K8s Job's `leartech.io/initiative` label
+        # and on the DB row's `initiative` column, so logs/queries can
+        # still group by a stable identifier.
+        yaml_body = request.initiative_body
+        try:
+            loaded = load_initiative_from_yaml(yaml_body)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
+        initiative_name = loaded.name
+    else:
+        # Catalog path — backwards-compatible with every existing caller.
+        # The XOR validator guarantees `request.initiative` is set when
+        # `initiative_body` is None.
+        assert request.initiative is not None  # noqa: S101 — guaranteed by validator
+        initiative_name = request.initiative
+        yaml_path = await _resolve_yaml_path(initiative_name)
+        if yaml_path is None:
+            available = await _available_names()
+            raise HTTPException(
+                status_code=404,
+                detail={'message': f'Initiative {initiative_name!r} not found', 'available': available},
+            )
+        try:
+            loaded = load_initiative(yaml_path)
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
+        yaml_body = yaml_path.read_text()
 
     initiative_id = new_id()
 
@@ -535,7 +584,7 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         # to resolve the initiative. yaml_path was just loaded above so
         # the read is essentially free (filesystem cache hot).
         job_name, _ns = await spawn_initiative_job(
-            initiative_name=request.initiative,
+            initiative_name=initiative_name,
             run_id=initiative_id,
             # Phase E.1/E.2/E.3 image routing:
             #   image: override (E.3) > language: hint (E.2) > repo
@@ -544,7 +593,7 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
             # sniff its root manifests when neither `image:` nor
             # `language:` is set.
             image=_pick_image_for_initiative(
-                request.initiative,
+                initiative_name,
                 language=loaded.language,
                 image_override=loaded.image,
                 qualified_repo=loaded.primary.qualified_repo,
@@ -552,7 +601,7 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
             namespace=namespace,
             env=_initiative_env(),
             secret_refs=_initiative_secret_refs(),
-            yaml_body=yaml_path.read_text(),
+            yaml_body=yaml_body,
             # D.7 — propagate qualified repo so the Job's preStop hook
             # can post a "cancelled" sticky to the PR when an operator
             # cancels mid-run. The agent itself writes /tmp/run_pr_number
@@ -564,7 +613,7 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         raise HTTPException(status_code=502, detail=f'Failed to spawn initiative Job: {exc}') from exc
     record = InitiativeRecord(
         id=initiative_id,
-        initiative=request.initiative,
+        initiative=initiative_name,
         status='queued',
         started_at=now(),
         pr_repo=loaded.primary.qualified_repo,
@@ -587,7 +636,7 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
     logger.info(
         'initiative %s running: %s — Job %s/%s',
         initiative_id,
-        request.initiative,
+        initiative_name,
         namespace,
         job_name,
     )
@@ -823,3 +872,17 @@ async def validate_initiative_body(body: str = Body(..., media_type='text/plain'
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=422, detail=f'Invalid initiative YAML: {exc}') from exc
     return _summary_of(loaded)
+
+
+@router.post('/_validate_body')
+async def validate_initiative_body_alias(
+    body: str = Body(..., media_type='text/plain'),
+) -> dict[str, object]:
+    """Alias of ``POST /_validate`` — same payload contract, same response.
+
+    Provided so callers can pre-flight a body destined for the new
+    ``initiative_body`` field on ``POST /initiatives`` against an
+    explicitly-named endpoint. Implementation delegates to
+    :func:`validate_initiative_body` so the two routes can never drift.
+    """
+    return await validate_initiative_body(body=body)
