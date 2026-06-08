@@ -16,6 +16,7 @@ from claude_agent_sdk.types import McpSdkServerConfig
 
 from gate.mcp_servers.artifacts_server import build_artifacts_server
 from gate.mcp_servers.criteria_server import build_criteria_server
+from gate.mcp_servers.initiatives_server import build_initiatives_server
 from gate.mcp_servers.pipeline_server import build_pipeline_server as _build_real_pipeline_server
 from gate.mcp_servers.pr_context_server import build_pr_context_server
 from gate.mcp_servers.tekton import build_tekton_server
@@ -41,5 +42,6 @@ __all__ = [
     'build_pr_context_server',
     'build_artifacts_server',
     'build_criteria_server',
+    'build_initiatives_server',
     'build_tekton_server',
 ]

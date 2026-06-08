@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
@@ -339,6 +339,114 @@ async def test_resolve_yaml_path_db_wins_over_filesystem(
     assert result.parent.name == 'agent-catalog', f'DB must win; expected /tmp/agent-catalog path, got {result}'
     # Content must be the DB version, not the filesystem version.
     assert 'DB copy of a filesystem initiative' in result.read_text()
+
+
+# ─── Inline-body firing (feat: inline-initiative-body) ──────────────────────
+# POST /initiatives now accepts `initiative_body: <raw YAML>` as an alternative
+# to `initiative: <name>`. Mirrors the orchestrator's StartPlanRequest either/or
+# shape so one-shot iterations don't need a catalog write first.
+
+_INLINE_YAML = """\
+name: inline-fired-initiative
+repo: leartech-test
+branch: agent/inline-fired
+base: main
+goal: A one-shot initiative fired via inline body — no catalog write required.
+"""
+
+
+def test_start_initiative_with_body_spawns_job(monkeypatch: pytest.MonkeyPatch) -> None:
+    """POST with `initiative_body` spawns a Job whose yaml_body is the supplied
+    body verbatim and whose `initiative_name` is the parsed `name:` field.
+
+    The body never touches the catalog — no DB write, no filesystem read.
+    """
+    monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
+    monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
+
+    captured: dict[str, Any] = {}
+
+    async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
+        captured.update(kwargs)
+        return kwargs['run_id'], kwargs['namespace']
+
+    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
+        response = client.post('/initiatives', json={'initiative_body': _INLINE_YAML})
+
+    assert response.status_code == 202, response.text
+    body = response.json()
+    # The parsed `name:` field is what shows up on the K8s label + DB row so
+    # logs/queries can still group by a stable identifier when fired inline.
+    assert body['initiative'] == 'inline-fired-initiative'
+    assert body['status'] == 'running'
+    assert body['runtime'] == 'job'
+
+    # The spawn call received the inline body verbatim.
+    assert captured['yaml_body'] == _INLINE_YAML
+    assert captured['initiative_name'] == 'inline-fired-initiative'
+
+
+def test_start_initiative_rejects_both_set() -> None:
+    """Specifying both `initiative` and `initiative_body` is a 422 — the
+    XOR validator on StartInitiativeRequest fires before the handler sees
+    the request."""
+    response = client.post(
+        '/initiatives',
+        json={'initiative': 'some-name', 'initiative_body': _INLINE_YAML},
+    )
+    assert response.status_code == 422
+
+
+def test_start_initiative_rejects_neither_set() -> None:
+    """Empty body is a 422 — the XOR validator catches this before any
+    catalog lookup happens."""
+    response = client.post('/initiatives', json={})
+    assert response.status_code == 422
+
+
+def test_start_initiative_with_body_validates_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Malformed YAML body returns 422 and never reaches the spawn call.
+
+    Validates the body BEFORE any Job is spawned, so a typo in a one-shot
+    inline goal doesn't leak K8s resources or DB rows.
+    """
+    monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
+    monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
+
+    bad_body = 'name: missing-goal\nrepo: leartech-test\nbranch: agent/bad\n'
+
+    fake_spawn = AsyncMock()
+    with patch('gate.agent.job_runner.spawn_initiative_job', new=fake_spawn):
+        response = client.post('/initiatives', json={'initiative_body': bad_body})
+
+    assert response.status_code == 422, response.text
+    assert 'Invalid initiative YAML' in response.json()['detail']
+    fake_spawn.assert_not_called()
+
+
+def test_validate_body_endpoint_returns_summary() -> None:
+    """POST /_validate_body parses a YAML body and returns the same summary
+    shape as GET /_validate/{name} — alias for callers pre-flighting the
+    body destined for the new `initiative_body` field."""
+    response = client.post(
+        '/initiatives/_validate_body',
+        content=_INLINE_YAML,
+        headers={'content-type': 'text/plain'},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body['name'] == 'inline-fired-initiative'
+    assert body['primary']['repo'] == 'leartech-test'
+
+
+def test_validate_body_endpoint_422_on_malformed() -> None:
+    """Empty / malformed YAML body returns 422 from /_validate_body."""
+    response = client.post(
+        '/initiatives/_validate_body',
+        content='',
+        headers={'content-type': 'text/plain'},
+    )
+    assert response.status_code == 422
 
 
 def test_404_lists_both_db_and_filesystem_names(client_with_db: TestClient) -> None:

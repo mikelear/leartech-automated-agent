@@ -51,6 +51,16 @@ mcp_servers:
       logs, and cancels superseded runs on force-push. Phase G.1 — initiative
       role only; consumer wiring lands in Phase G.2.
 
+  leartech-initiatives:
+    type: sdk
+    builder: gate.mcp_servers.initiatives_server:build_initiatives_server
+    description: |
+      Fire initiatives against the deployed agent service. Exposes
+      `fire_initiative(name)` for catalog-resolved firing and
+      `fire_initiative_inline(body)` for one-shot firing whose YAML body is
+      built at call time (e.g. orchestrator fix-up iterations whose goal
+      embeds a failing PR's verdict comment).
+
   # Stdio (subprocess) — for external tools and future cross-process agents.
   # Marked `status: not_built` until the wrapper repo exists.
   stitch:
