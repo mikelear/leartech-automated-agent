@@ -51,6 +51,17 @@ mcp_servers:
       logs, and cancels superseded runs on force-push. Phase G.1 — initiative
       role only; consumer wiring lands in Phase G.2.
 
+  leartech-jx3-flow:
+    type: sdk
+    builder: gate.mcp_servers.jx3_flow:build_jx3_flow_server
+    description: |
+      Live "where is this PR in JX3" state queries. Three tools:
+      get_pr_jx3_stage (current stage + blocking predicate),
+      list_required_actions (chatops commands to unblock), and
+      wait_for_merge (block until merged / failed / timeout). Backed by
+      `gate/agent/jx3/rules.py` — the same rules the calibration markdown
+      mirrors. Read-only; requires GH_TOKEN in the agent environment.
+
   # Stdio (subprocess) — for external tools and future cross-process agents.
   # Marked `status: not_built` until the wrapper repo exists.
   stitch:
@@ -105,6 +116,7 @@ roles:
       - leartech-pr-context
       - leartech-test-artifacts
       - leartech-tekton
+      - leartech-jx3-flow
     tools:
       - Read
       - Write
