@@ -70,13 +70,32 @@ spec:
               cp /workspace/docker-config.json /kaniko/.docker/config.json
             fi
 
+            # Build destination list.
+            # Per-cluster registries (GAR for GCP, ACR for AZ) always get
+            # the push. ghcr.io is the SHARED registry — only AZ pushes
+            # there. Per-cluster `jx-release-version` chains compute
+            # cluster-specific next-version numbers that inevitably
+            # collide on the shared registry when GCP retries (its tag
+            # chain stuck at v0.10.71-gcp after weeks of release failure
+            # means jx-release-version returns 0.10.72, but ghcr.io already
+            # has 0.10.72 from 2026-06-01 → DENIED).
+            # AZ owns the shared-registry publishing. GCP pushes only to
+            # GAR; cross-cluster pulls happen from ghcr.io (AZ-published).
+            DESTS=(
+              --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:${VERSION}
+              --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:latest
+            )
+            if [ "${PUSH_CONTAINER_REGISTRY}" = "modernburro.azurecr.io" ]; then
+              DESTS+=(
+                --destination=ghcr.io/mikelear/leartech-agent-runtime:${VERSION}
+                --destination=ghcr.io/mikelear/leartech-agent-runtime:latest
+              )
+            fi
+
             /kaniko/executor \
               --dockerfile=Dockerfile.runtime \
               --context=/workspace/source \
-              --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:${VERSION} \
-              --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:latest \
-              --destination=ghcr.io/mikelear/leartech-agent-runtime:${VERSION} \
-              --destination=ghcr.io/mikelear/leartech-agent-runtime:latest \
+              "${DESTS[@]}" \
               --build-arg=BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.30.1 \
               --cache=true
           workingDir: /workspace/source
