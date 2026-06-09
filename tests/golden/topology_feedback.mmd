@@ -1,0 +1,10 @@
+graph LR
+  PR[PR push] --> Ring1{Ring 1<br/>PR-gate}
+  Merge[merge to main] --> Stage[staging deploy]
+  Stage --> Ring2{Ring 2<br/>Staging}
+  Stage --> Ring3{Ring 3<br/>Forensic}
+  Ring1 -->|agent_run, ci_failure| Lessons[(lessons catalog)]
+  Ring2 -->|staging_test| Lessons
+  Ring3 -->|prod_incident| Lessons
+  Manual[manual /lesson comment] -->|manual_review| Lessons
+  Lessons -.->|calibration injected| Agent[Next agent session]

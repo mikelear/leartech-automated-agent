@@ -144,6 +144,48 @@ status=$(curl -s -o /dev/null -w '%{http_code}' \
   --data '{"initiative_body": "not: a\nvalid: initiative\n"}')
 assert_status 'POST /initiatives (malformed body)' 422 "${status}"
 
+# ── Introspection surface — feeds the leartech-agent CLI ────────────────
+status=$(curl -s -o /tmp/e2e-health-detail.json -w '%{http_code}' \
+  "${BASE_URL}/health/detail")
+assert_status 'GET /health/detail' 200 "${status}"
+grep -q '"service": "leartech-automated-agent"' /tmp/e2e-health-detail.json \
+  || { echo "✗ /health/detail: service field missing" >&2; failures=$((failures + 1)); }
+
+status=$(curl -s -o /tmp/e2e-mcps.json -w '%{http_code}' "${BASE_URL}/mcps")
+assert_status 'GET /mcps' 200 "${status}"
+grep -q '"leartech-pipeline"' /tmp/e2e-mcps.json \
+  || { echo "✗ /mcps: leartech-pipeline missing" >&2; failures=$((failures + 1)); }
+
+status=$(curl -s -o /tmp/e2e-roles.json -w '%{http_code}' "${BASE_URL}/roles")
+assert_status 'GET /roles' 200 "${status}"
+grep -q '"initiative_agent"' /tmp/e2e-roles.json \
+  || { echo "✗ /roles: initiative_agent missing" >&2; failures=$((failures + 1)); }
+
+status=$(curl -s -o /tmp/e2e-topo.json -w '%{http_code}' "${BASE_URL}/topology")
+assert_status 'GET /topology' 200 "${status}"
+grep -q 'Phase 1' /tmp/e2e-topo.json \
+  || { echo "✗ /topology: Phase 1 marker missing" >&2; failures=$((failures + 1)); }
+
+# Active probe on an sdk-type MCP — must report 'ready' + sdk_import probe kind.
+status=$(curl -s -o /tmp/e2e-mcp-health.json -w '%{http_code}' \
+  "${BASE_URL}/mcps/leartech-pipeline/health")
+assert_status 'GET /mcps/leartech-pipeline/health' 200 "${status}"
+grep -q '"status": *"ready"' /tmp/e2e-mcp-health.json \
+  || { echo "✗ /mcps/.../health: status!=ready" >&2; failures=$((failures + 1)); }
+
+# CLI smoke: invoke `leartech-agent health --url <local>` against the same
+# server and assert the rendered panel contains the platform identifier.
+# (uv run keeps the project deps available without a global install.)
+if uv run leartech-agent --url "${BASE_URL}" health > /tmp/e2e-cli-health.txt 2>&1; then
+  grep -q 'Platform health' /tmp/e2e-cli-health.txt \
+    && echo "✓ leartech-agent health (CLI smoke)" \
+    || { echo "✗ leartech-agent health: panel header missing" >&2; failures=$((failures + 1)); }
+else
+  echo "✗ leartech-agent health: CLI exited non-zero" >&2
+  cat /tmp/e2e-cli-health.txt >&2
+  failures=$((failures + 1))
+fi
+
 if [ "${failures}" -gt 0 ]; then
   echo
   echo "✗ ${failures} e2e check(s) failed" >&2
