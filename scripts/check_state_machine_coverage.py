@@ -70,6 +70,12 @@ STATE_MACHINE_MODULES: tuple[str, ...] = (
     'gate/agent/job_reconciler.py',
     'gate/agent/job_runner.py',
     'app/state.py',
+    # V5 D2.2 — set-once first-turn hook + staleness classifier. The
+    # whole point of this module is to encode the run-driver state
+    # machine (started_executing_at lifecycle, is_run_stale
+    # classification); coverage-gating it is the natural place to keep
+    # the invariants honest as the V3/V4 follow-ups land.
+    'gate/agent/run_driver.py',
 )
 
 STATEMENT_THRESHOLD: float = 0.85  # 85% statement coverage per file

@@ -1,0 +1,35 @@
+-- 0005_started_executing_at.sql — V5 D2.2 distinguishes
+-- "agent hasn't started executing yet" from "agent is in-flight".
+--
+-- The V4 stall (Job 8b837153bfda, 95-minute hang) was diagnosed
+-- by the reconciler reading `turns == 0` as "agent is dead", but
+-- `turns == 0` is AMBIGUOUS:
+--
+--   - turns == 0  AND  agent has not yet emitted its first turn
+--                       → could be image-pulling, scheduling,
+--                         genuinely stuck — STALE
+--   - turns == 0  AND  agent has emitted its first turn but the
+--                       turn hasn't completed yet
+--                       → in-flight, not stale
+--
+-- `started_executing_at` is set by the run-driver on the FIRST
+-- SDK turn fired and never overwritten thereafter. The reconciler
+-- then has an unambiguous "agent started executing at T" signal:
+-- NULL means "no first turn yet" and is the orphan-eligible shape
+-- alongside age > threshold.
+--
+-- Downstream consumers (V1 launch-readiness, V3 reconciler
+-- staleness, V4 image-pull watchdog) PREFER this column over
+-- `turns == 0`. Those changes live in sibling inits gated
+-- `depends_on: [D2.2]`.
+--
+-- ADD COLUMN IF NOT EXISTS makes this safely idempotent — the
+-- deployment's migrations initContainer runs on every pod start,
+-- re-applying this file each time.
+--
+-- See app/db/models.py::InitiativeRunRow for the SQLAlchemy
+-- companion and gate/agent/run_driver.py::mark_first_turn for
+-- the write path.
+
+ALTER TABLE initiative_runs
+    ADD COLUMN IF NOT EXISTS started_executing_at TIMESTAMPTZ;

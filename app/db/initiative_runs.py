@@ -48,6 +48,10 @@ class InitiativeRunRecord:
     # Phase D.5.1.2 — initiative YAML's declared `branch` field, used by
     # the job_reconciler's GH-side PR fallback. NULL on old rows.
     branch: str | None
+    # V5 D2.2 — wall-clock time of the agent's first SDK turn; NULL
+    # until the run-driver's first-turn hook fires. See
+    # ``InitiativeRunRow.started_executing_at`` for the full rationale.
+    started_executing_at: datetime | None
     updated_at: datetime
 
     @classmethod
@@ -68,6 +72,7 @@ class InitiativeRunRecord:
             runtime=row.runtime,
             job_name=row.job_name,
             branch=row.branch,
+            started_executing_at=row.started_executing_at,
             updated_at=row.updated_at,
         )
 
@@ -171,6 +176,11 @@ async def update_run(
             'cost_usd',
             'error',
             'cluster',
+            # V5 D2.2 — set by the run-driver's first-turn hook;
+            # idempotency is enforced at the SQL layer (WHERE
+            # started_executing_at IS NULL) rather than here, so
+            # the column is mutable from this allow-list's POV.
+            'started_executing_at',
         }
     )
     filtered = {k: v for k, v in fields.items() if k in _mutable}

@@ -94,6 +94,12 @@ def _build_job_manifest(
 
     # env entries: plain `value` form for env, `valueFrom.secretKeyRef` for secret_refs.
     env_list: list[dict[str, Any]] = [{'name': name, 'value': value} for name, value in env.items()]
+    # V5 D2.2 — the agent loop reads ``LEARTECH_RUN_ID`` to populate
+    # ``initiative_runs.started_executing_at`` on the first SDK turn. The
+    # Job's metadata.name equals run_id by the D.3 contract, but the pod
+    # itself can't trivially extract it from $HOSTNAME (pods are named
+    # ``<job-name>-<hash>``), so we forward it explicitly.
+    env_list.append({'name': 'LEARTECH_RUN_ID', 'value': run_id})
     # D.7 — propagate the qualified repo so the preStop hook can post a
     # "cancelled" sticky to the PR. PR number isn't known at spawn time
     # (resolved by run_initiative near end-of-run), so the agent writes it
