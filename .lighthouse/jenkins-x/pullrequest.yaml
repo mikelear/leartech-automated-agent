@@ -47,6 +47,34 @@ spec:
             echo "=== Running tests ==="
             uv run coverage run -m pytest -v
             uv run coverage report
+        # D3 — per-module state-machine coverage gate. Runs AFTER
+        # build-python-test (Tekton runs task steps sequentially; a
+        # failure above this step short-circuits the rest, so "runs
+        # only on success" is the default). The step re-runs pytest
+        # under --cov to produce coverage.xml, then invokes the
+        # per-file checker which asserts statement >= 85% and branch
+        # >= 70% on the V5-D1/D2 state-machine modules. Regressing
+        # those tests blocks the PR — see
+        # scripts/check_state_machine_coverage.py for the module list
+        # and rationale.
+        #
+        # Image: python:3.13-slim (matches build-python-test). The
+        # initiative spec'd ghcr.io/mikelear/leartech-agent-py:latest
+        # but the kaniko comment below documents that ghcr.io pulls
+        # are unauthenticated on PR runs — staying on the public
+        # python image is the safe choice. `set -e` is mandatory per
+        # the feedback_pr_pytest_step_must_set_e memory.
+        - image: python:3.13-slim
+          name: state-machine-coverage-gate
+          resources: {}
+          script: |
+            #!/usr/bin/env bash
+            set -e
+            pip install uv --quiet
+            uv sync --dev --frozen --no-cache 2>/dev/null || uv sync --dev --no-cache
+            echo "=== Running state-machine coverage gate ==="
+            uv run pytest --cov --cov-report=xml --cov-report=term tests/
+            uv run python scripts/check_state_machine_coverage.py
         - name: build-container-build
           resources: {}
         # Phase D.1: smoke-test Dockerfile.runtime on PR. We can't FROM
