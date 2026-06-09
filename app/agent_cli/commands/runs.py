@@ -11,6 +11,13 @@ from rich.table import Table
 
 from app.agent_cli.render import client_from_ctx, console, print_http_error
 
+# Polling cap for `runs follow` — at the default 5s interval this is 50 minutes,
+# which exceeds every initiative's K8s `activeDeadlineSeconds`. Operators can
+# tune the cap with --max-polls when watching multi-hour orchestrator runs.
+_DEFAULT_MAX_POLLS = 600
+_DEFAULT_FOLLOW_INTERVAL_SECONDS = 5.0
+_TERMINAL_RUN_STATES = frozenset({'complete', 'failed', 'cancelled', 'orphaned', 'timed_out'})
+
 
 @click.group()
 def runs() -> None:
@@ -127,8 +134,18 @@ def runs_why(ctx: click.Context, run_id: str) -> None:
 
 @runs.command('follow')
 @click.argument('run_id')
-@click.option('--interval', default=5.0, show_default=True, help='Seconds between status polls.')
-@click.option('--max-polls', default=600, show_default=True, help='Stop after this many polls.')
+@click.option(
+    '--interval',
+    default=_DEFAULT_FOLLOW_INTERVAL_SECONDS,
+    show_default=True,
+    help='Seconds between status polls.',
+)
+@click.option(
+    '--max-polls',
+    default=_DEFAULT_MAX_POLLS,
+    show_default=True,
+    help='Stop after this many polls.',
+)
 @click.pass_context
 def runs_follow(ctx: click.Context, run_id: str, interval: float, max_polls: int) -> None:
     """Poll a run's status until it reaches a terminal state.
@@ -137,7 +154,6 @@ def runs_follow(ctx: click.Context, run_id: str, interval: float, max_polls: int
     pattern in ``leartech-orchestrator/scripts/tail_plan_log.sh`` — short
     interval, print every status delta, stop on terminal.
     """
-    terminal = {'complete', 'failed', 'cancelled', 'orphaned', 'timed_out'}
     last_status: str | None = None
     client = client_from_ctx(ctx.obj)
     for _ in range(max_polls):
@@ -150,7 +166,7 @@ def runs_follow(ctx: click.Context, run_id: str, interval: float, max_polls: int
         if status != last_status:
             console.print(f'[bold]{body["initiative"]}[/bold] — status: [cyan]{status}[/cyan]')
             last_status = status
-        if status in terminal:
+        if status in _TERMINAL_RUN_STATES:
             return
         time.sleep(interval)
     console.print(f'[yellow]follow: reached max-polls ({max_polls}); run still in {last_status}[/yellow]')

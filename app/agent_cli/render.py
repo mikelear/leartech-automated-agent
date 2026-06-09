@@ -7,22 +7,30 @@ prints the same way.
 
 from __future__ import annotations
 
+import json
+
 import httpx
 from rich.console import Console
 
 console = Console()
+
+# Exceptions that JSON parsing of an HTTP response can plausibly raise.
+# Caught narrowly so SystemExit / KeyboardInterrupt are NOT swallowed
+# during a rich operator session.
+_JSON_PARSE_ERRORS = (json.JSONDecodeError, UnicodeDecodeError, ValueError, AttributeError)
 
 
 def print_http_error(response: httpx.Response) -> None:
     """Render an HTTP error response in the standard ``HTTP nnn: detail`` style.
 
     Tries JSON first (FastAPI's default), falls back to the raw response
-    body when that fails.
+    body when that fails. Narrow exception list so an interrupted CLI
+    invocation still propagates.
     """
     try:
         body = response.json()
         detail = body.get('detail', response.text)
-    except Exception:  # noqa: BLE001 — fall back to raw text on any parse error
+    except _JSON_PARSE_ERRORS:
         detail = response.text
     console.print(f'[red]HTTP {response.status_code}:[/red] {detail}')
 

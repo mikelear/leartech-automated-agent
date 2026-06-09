@@ -7,6 +7,14 @@ from rich.panel import Panel
 
 from app.agent_cli.render import client_from_ctx, console, print_http_error
 
+# HTTP status the FastAPI router emits when an initiative can't be resolved
+# (catalog miss + filesystem miss). Surfaced separately so the CLI can list
+# the available names from the 404 body instead of the generic error path.
+_HTTP_NOT_FOUND = 404
+# HTTP 202 Accepted — the dual-path POST /initiatives returns this once the
+# Job is queued (status='queued', K8s spawn happens asynchronously).
+_HTTP_ACCEPTED = 202
+
 
 @click.command()
 @click.argument('initiative_name')
@@ -19,8 +27,8 @@ def fire(ctx: click.Context, initiative_name: str) -> None:
     initiatives/ directory). Adding a new YAML requires a release + auto-promote.
     """
     response = client_from_ctx(ctx.obj).post('/initiatives', json={'initiative': initiative_name})
-    if response.status_code != 202:
-        if response.status_code == 404:
+    if response.status_code != _HTTP_ACCEPTED:
+        if response.status_code == _HTTP_NOT_FOUND:
             try:
                 detail = response.json()['detail']
                 console.print(f'[red]Unknown initiative {initiative_name!r}.[/red]')

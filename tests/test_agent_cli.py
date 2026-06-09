@@ -149,3 +149,49 @@ def test_url_flag_overrides_env_and_cluster(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv('LEARTECH_AGENT_URL', 'http://from-env:9999')
     resolved = resolve_base_url(url='http://from-flag:1', cluster='gcp')
     assert resolved == 'http://from-flag:1'
+
+
+def test_cluster_env_override_takes_effect(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fleet-wide rebind via LEARTECH_AGENT_URL_GCP overrides the baked-in default."""
+    from app.agent_cli.transport import resolve_base_url
+
+    monkeypatch.setenv('LEARTECH_AGENT_URL_GCP', 'https://moved-gcp.example.com')
+    resolved = resolve_base_url(url=None, cluster='gcp')
+    assert resolved == 'https://moved-gcp.example.com'
+
+
+def test_topology_copy_fallback_when_pbcopy_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On a Linux box pbcopy doesn't exist; we expect a friendly message, not a traceback."""
+    import subprocess as _subprocess
+
+    def fake_run(*_args: object, **_kwargs: object) -> _subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError('pbcopy not installed')
+
+    monkeypatch.setattr('app.agent_cli.commands.topology.subprocess.run', fake_run)
+    runner = CliRunner()
+    with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
+        result = runner.invoke(cli, ['topology', '--render', 'copy'])
+    assert result.exit_code == 0
+    assert 'pbcopy' in result.output
+
+
+def test_topology_png_fallback_when_mmdc_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No mmdc on the test image — the command must surface a friendly install hint."""
+    import subprocess as _subprocess
+
+    def fake_run(*_args: object, **_kwargs: object) -> _subprocess.CompletedProcess[bytes]:
+        raise FileNotFoundError('mmdc not installed')
+
+    monkeypatch.setattr('app.agent_cli.commands.topology.subprocess.run', fake_run)
+    runner = CliRunner()
+    with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
+        result = runner.invoke(cli, ['topology', '--render', 'png'])
+    assert result.exit_code == 0
+    assert 'mmdc' in result.output
+
+
+def test_runs_list_works_against_empty_state() -> None:
+    runner = CliRunner()
+    with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
+        result = runner.invoke(cli, ['runs', 'list'])
+    assert result.exit_code == 0

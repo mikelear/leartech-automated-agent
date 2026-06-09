@@ -31,8 +31,6 @@ creating a sibling module under ``commands/`` and wiring the click
 
 from __future__ import annotations
 
-import os
-
 import click
 import httpx
 
@@ -99,5 +97,4 @@ __all__ = ['DEFAULT_URL', 'cli']
 if __name__ == '__main__':
     # ``leartech-agent`` may be invoked from a pod with no env or flags;
     # the resolve_base_url() default keeps it pointing at localhost.
-    _ = os.environ.get('LEARTECH_AGENT_URL')
     cli()
