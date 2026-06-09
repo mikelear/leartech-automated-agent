@@ -172,19 +172,28 @@ spec:
           value: {{ .Values.secrets.ghToken.secretName | quote }}
         - name: LEARTECH_JOB_GH_TOKEN_SECRET_KEY
           value: {{ .Values.secrets.ghToken.secretKey | quote }}
-        {{- if and .Values.secrets.adminToken.secretName .Values.secrets.adminToken.secretKey }}
-        # Phase B (B.3+B.4): admin-token gate for POST /admin/cleanup.
-        # When both secretName + secretKey are set the env is rendered
-        # and the endpoint authenticates against it. Empty values (the
-        # safe default) skip the env entirely, so the endpoint's
-        # `_check_admin_token` falls into the "auth not configured" 401
-        # branch — closed by default until the materialising Secret
-        # exists on this cluster.
+        {{- if .Values.adminToken.enabled }}
+        # Phase B (B.3+B.4) V2: admin-token gate for POST /admin/cleanup.
+        # When `.Values.adminToken.enabled` (default: true) the env is
+        # rendered with `optional: true` — the Secret is materialised by
+        # templates/externalsecret-admin-token.yaml only on clusters whose
+        # ESO toggle is on. `optional: true` is MANDATORY: without it
+        # preview namespaces (jx-<repo>-pr-<N>) get stuck in
+        # CreateContainerConfigError because no ExternalSecret materialises
+        # the referenced Secret in their isolated namespace.
+        # Memory: feedback_chart_secretref_must_be_optional_for_previews.
+        #
+        # When the Secret is absent the env stays unset and
+        # `_check_admin_token` falls into the closed-by-default 401 branch
+        # — admin endpoints reject every request until a cluster actually
+        # has the secret materialised. Operator + GitOps PRs (out of band)
+        # flip on the per-cluster externalSecrets toggle to make it active.
         - name: LEARTECH_ADMIN_TOKEN
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.secrets.adminToken.secretName }}
-              key: {{ .Values.secrets.adminToken.secretKey }}
+              name: {{ .Values.adminToken.secretName }}
+              key: {{ .Values.adminToken.secretKey }}
+              optional: true
         {{- end }}
         - name: LEARTECH_REPO_ROOT
           value: {{ .Values.leartechRepoRoot | quote }}
