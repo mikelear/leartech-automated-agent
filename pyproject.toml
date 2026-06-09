@@ -95,18 +95,39 @@ markers = [
 ]
 
 [tool.coverage.run]
+# Branch coverage is enabled so the D3 state-machine gate (in
+# `scripts/check_state_machine_coverage.py`) can read per-file branch
+# rates from `coverage.xml`. Existing global gate (`fail_under` below)
+# is recalibrated to account for branch denominators.
+branch = true
 source = ["gate", "app"]
 omit = [
     "gate/criteria/*",
     "gate/cli.py",
     "gate/mcp_servers/*",
-    "gate/agent/*",
-    "gate/agent/lessons/cli.py",
+    # D3: keep `gate/agent/job_reconciler.py` and `gate/agent/job_runner.py`
+    # measured — these are the V5-D1/D2 state-machine modules gated by
+    # the per-file coverage check. Other `gate/agent/*` files are
+    # orchestration paths exercised via integration, not unit-tested,
+    # so they stay omitted.
+    "gate/agent/__init__.py",
+    "gate/agent/calibrations/*",
+    "gate/agent/crash_sticky.py",
+    "gate/agent/initiative.py",
+    "gate/agent/initiative_prompt.py",
+    "gate/agent/lessons/*",
+    "gate/agent/main.py",
+    "gate/agent/mcp_catalog.py",
+    "gate/agent/self_retrospect.py",
+    "gate/agent/step_failure_diagnosis.py",
+    "gate/agent/system_prompt.py",
     "gate/initiatives/loader.py",
     "tests/*",
 ]
 
 [tool.coverage.report]
+# Global floor — independent of the per-file state-machine gate
+# (85/70) enforced by `scripts/check_state_machine_coverage.py`.
 fail_under = 60
 show_missing = true
 
