@@ -420,6 +420,19 @@ async def reconcile_once(namespace: str) -> int:
                         )
                     except Exception as exc:  # noqa: BLE001 — best-effort
                         logger.warning('reconciler: crash sticky post failed for %s: %s', run_id, exc)
+    # V5 D2 — third pass: orphan `running` rows whose backing Job has
+    # vanished. The V4 stall (Job 8b837153bfda deleted externally, DB row
+    # stuck in `running` for 95 minutes) surfaced this gap: the Job-
+    # iteration loop above only walks Jobs that still exist in K8s. A row
+    # whose Job has been deleted (operator cleanup, TTL race, namespace
+    # eviction) is invisible to that loop and stays in `running` forever.
+    #
+    # The fix mirrors `_enrich_cancelled_rows_missing_pr` shape: a separate
+    # helper that walks the DB and detects orphans. Passes the live job-
+    # name set captured above so a single namespace LIST satisfies both
+    # passes — no extra K8s API calls.
+    updates += await _orphan_running_rows_with_missing_jobs(jobs)
+
     # D.5.1.5 — second pass: enrich `cancelled` rows that finalised with
     # `pr_number=null`. The cancel endpoint (POST /initiatives/{id}/cancel)
     # deletes the K8s Job via Background propagation (gone immediately from
@@ -442,6 +455,63 @@ async def reconcile_once(namespace: str) -> int:
     # covered by this fallback.
     updates += await _enrich_cancelled_rows_missing_pr()
     return updates
+
+
+async def _orphan_running_rows_with_missing_jobs(jobs: list[Any]) -> int:
+    """V5 D2 — flip `running` rows whose backing K8s Job has vanished.
+
+    Sweep companion to the main Job-iteration loop in `reconcile_once`. The
+    V4 stall (95-minute stuck row, Job ``8b837153bfda`` deleted externally)
+    demonstrated that walking K8s Jobs alone is insufficient: when a Job
+    disappears, the DB row is invisible to the loop and never reaches a
+    terminal state.
+
+    This helper takes the `jobs` list already retrieved by the loop (no
+    extra K8s API call), derives the live job-name set, and flips any
+    `running` row whose `job_name` is NOT in that set to `orphaned` with
+    ``error='job_deleted_externally'``.
+
+    Skip conditions:
+      - DB not configured (in-memory store has no parallel sweep need)
+      - row.runtime != 'job' (pre-Phase-F asyncio rows have no Job)
+      - row.job_name falsy (defensive; new rows always carry one)
+
+    Returns the count of rows orphaned. No-op (returns 0) when DB is
+    disabled, mirroring `_enrich_cancelled_rows_missing_pr`'s contract.
+    """
+    if not is_db_enabled():
+        return 0
+    live_job_names = {job.metadata.name for job in jobs}
+    async with db_session() as s:
+        running = await list_runs(s, status='running')
+    patched = 0
+    for record in running:
+        # Defensive attribute access — `InitiativeRunRecord` from the DB
+        # always carries `status`/`runtime`/`job_name`, but some test
+        # fixtures across this codebase mock `list_runs` with thinner
+        # SimpleNamespace rows. Skipping cleanly on missing attrs (and
+        # re-asserting `status == 'running'`) keeps this sweep safe to
+        # add without forcing every downstream mock to grow new fields.
+        if getattr(record, 'status', None) != 'running':
+            continue
+        if getattr(record, 'runtime', None) != 'job':
+            continue
+        job_name = getattr(record, 'job_name', None)
+        if not job_name or job_name in live_job_names:
+            continue
+        await update(
+            record.id,
+            status='orphaned',
+            finished_at=_now(),
+            error='job_deleted_externally',
+        )
+        patched += 1
+        logger.warning(
+            'reconciler: V5 D2 orphaned %s — Job %s deleted externally (DB row stuck in running)',
+            record.id,
+            job_name,
+        )
+    return patched
 
 
 async def _enrich_cancelled_rows_missing_pr() -> int:
