@@ -77,6 +77,15 @@ class InitiativeRecord(BaseModel):
     # POST/GET /initiatives so operators (and `scripts/list_runs.sh`) can
     # see which branch each run targets without a DB round-trip.
     branch: str | None = None
+    # V5 D2.2 — wall-clock time the agent's first SDK turn fired. NULL
+    # until the run-driver's `mark_first_turn` hook runs. See
+    # ``app.db.models.InitiativeRunRow.started_executing_at`` for the
+    # full rationale: this distinguishes "agent hasn't done anything
+    # yet" from "agent is slow" so the V3 reconciler staleness check
+    # and V4 image-pull watchdog don't false-orphan healthy in-flight
+    # runs (which would otherwise show turns=0 right up to the first
+    # ResultMessage even though they're actively executing).
+    started_executing_at: datetime | None = None
 
 
 _records: dict[str, InitiativeRecord] = {}
@@ -109,6 +118,7 @@ def _run_record_to_initiative_record(run: InitiativeRunRecord) -> InitiativeReco
         runtime=run.runtime,
         job_name=run.job_name,
         branch=run.branch,
+        started_executing_at=run.started_executing_at,
     )
 
 

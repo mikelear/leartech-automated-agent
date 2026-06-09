@@ -31,10 +31,14 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
+from app.db import dispose_engine as _dispose_engine
+from app.db import init_engine as _init_engine
+from app.db import is_db_enabled
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative_prompt import INITIATIVE_SYSTEM_PROMPT
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
+from gate.agent.run_driver import mark_first_turn
 from gate.initiatives import load_initiative
 from gate.mcp_servers import (
     build_artifacts_server,
@@ -413,6 +417,20 @@ async def run_initiative(
     click.echo(click.style(f'  cwd: {cwd}', fg='green'), err=True)
     click.echo('', err=True)
 
+    # V5 D2.2 — the spawning router writes the run_id into the Job's env
+    # so the agent loop can record the wall-clock moment its first SDK
+    # turn fires. Unset on laptop runs (no router involved) → the hook
+    # is a no-op. When set AND a DSN is configured we initialise the
+    # engine here so ``mark_first_turn`` has a session factory; the
+    # dispose call in ``finally`` is paired so we don't leak connections
+    # if the loop raises.
+    run_id_for_first_turn = os.environ.get('LEARTECH_RUN_ID') or None
+    db_engine_initialised = False
+    if run_id_for_first_turn and is_db_enabled():
+        _init_engine()
+        db_engine_initialised = True
+    first_turn_recorded = False
+
     exit_code = 0
     last_turn_count = 0
     last_cost: float | None = None
@@ -449,9 +467,39 @@ async def run_initiative(
         _write_pr_number_hint(pr_emitted)
         return pr_emitted
 
+    async def _record_first_turn_once() -> None:
+        """V5 D2.2 hook — record `started_executing_at` on the first SDK turn.
+
+        Fires from the same detection point used for turn counting: the
+        first ``AssistantMessage`` (the agent's first reply). Idempotency
+        is the contract — the in-process flag short-circuits repeat calls
+        and ``mark_first_turn``'s SQL guard (``WHERE started_executing_at
+        IS NULL``) makes the DB write idempotent even across racing
+        replicas.
+
+        Tolerates every failure mode: missing run_id, no DSN, DB
+        unreachable. The SDK loop is the primary mission and must not be
+        aborted by an observability column failing to populate.
+        """
+        nonlocal first_turn_recorded
+        if first_turn_recorded or not run_id_for_first_turn:
+            return
+        first_turn_recorded = True
+        try:
+            await mark_first_turn(run_id_for_first_turn)
+        except Exception as exc:  # noqa: BLE001 — observability hook must not block the loop
+            click.echo(
+                click.style(
+                    f'  (started_executing_at write failed for run {run_id_for_first_turn}: {exc})',
+                    fg='yellow',
+                ),
+                err=True,
+            )
+
     try:
         async for message in query(prompt=user_prompt, options=options):
             if isinstance(message, AssistantMessage):
+                await _record_first_turn_once()
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         click.echo(block.text)
@@ -534,6 +582,23 @@ async def run_initiative(
                     "Substantive work may already be pushed (this PR's commits). "
                     'Re-fire is idempotent — the agent detects the existing branch + PR.'
                 ),
+            )
+
+    # V5 D2.2 — release the engine that ``mark_first_turn`` was sharing.
+    # Paired with the eager init above so a long-running process doesn't
+    # keep a connection pool alive past the SDK loop's lifetime. Tolerate
+    # any disposal error — the agent is exiting anyway and the K8s Job
+    # tears down the pod regardless.
+    if db_engine_initialised:
+        try:
+            await _dispose_engine()
+        except Exception as exc:  # noqa: BLE001 — disposal failure is non-fatal at end-of-run
+            click.echo(
+                click.style(
+                    f'  (db engine dispose failed: {exc})',
+                    fg='yellow',
+                ),
+                err=True,
             )
 
     pr_number = _resolve_pr_number(primary.qualified_repo, primary.branch)

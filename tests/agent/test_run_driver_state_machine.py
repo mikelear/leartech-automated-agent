@@ -26,9 +26,9 @@ See the ``feedback_async_tests_need_event_not_sleep`` memory.
 |------------------------------------------------------------|----------|------------------------------------------------------------|
 | job_deleted_externally → orphaned                          | PASS     | V5 D2 (this PR — small fix landed in job_reconciler)       |
 | pod stuck ImagePullBackOff > threshold → failed            | XFAIL    | V5 D2.1 image-pull stuck-pod watchdog                      |
-| started_executing_at starts NULL                           | XFAIL    | V5 D2.2 add started_executing_at column + migration        |
-| started_executing_at set on first turn (immutable)         | XFAIL    | V5 D2.2 + first-turn hook in run-driver                    |
-| reconciler staleness uses started_executing_at not turns=0 | XFAIL    | V5 D2.2 reconciler staleness logic                         |
+| started_executing_at starts NULL                           | PASS     | V5 D2.2 landed — column + pydantic default                 |
+| started_executing_at set on first turn (immutable)         | PASS     | V5 D2.2 landed — mark_first_turn hook in run_driver        |
+| reconciler staleness uses started_executing_at not turns=0 | PASS     | V5 D2.2 landed — is_run_stale in run_driver                |
 | status transitions only legal (created → running → done)   | XFAIL    | V5 D2.3 transition validation in app.state.update          |
 
 XFAIL tests with ``strict=True`` flip to a hard FAIL the moment the
@@ -354,15 +354,9 @@ async def test_pod_stuck_image_pull_marks_failed() -> None:
 # orphan-eligible shape.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='V5 D2.2 — `started_executing_at` column not yet added to '
-    '`initiative_runs`. The follow-up init adds the column + migration; '
-    'this test pins the invariant that newly-created rows start with '
-    'started_executing_at IS NULL.',
-)
 def test_started_executing_at_starts_null() -> None:
-    """Newly-created `InitiativeRecord` must have `started_executing_at IS NULL`.
+    """V5 D2.2 (LANDED). Newly-created `InitiativeRecord` must have
+    `started_executing_at IS NULL`.
 
     The field's semantic: "wall-clock time of the first turn the agent
     actually executed". For a freshly-registered row (the row exists, the
@@ -379,56 +373,65 @@ def test_started_executing_at_starts_null() -> None:
         started_at=datetime.now(UTC),
     )
 
-    # Will AttributeError until V5 D2.2 adds the field.
-    assert record.started_executing_at is None  # type: ignore[attr-defined]
+    assert record.started_executing_at is None
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='V5 D2.2 — first-turn hook not yet implemented. The follow-up '
-    'init wires a hook into the run-driver that sets `started_executing_at` '
-    'on the first turn and never overwrites on subsequent turns. This test '
-    'pins both invariants (set-once + immutable).',
-)
 @pytest.mark.asyncio
-async def test_started_executing_at_set_on_first_turn() -> None:
-    """Calling the first-turn hook MUST set `started_executing_at` to a
-    non-null tz-aware datetime; subsequent calls MUST NOT overwrite it.
+async def test_started_executing_at_set_on_first_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """V5 D2.2 (LANDED). Calling the first-turn hook MUST set
+    ``started_executing_at`` to a non-null tz-aware datetime; subsequent
+    calls MUST NOT overwrite it.
 
     Idempotency is the contract: the hook may be called repeatedly (e.g.
     SDK turn callback fires every iteration) but only the first call
-    has effect. This prevents the V4-style bug where `started_at` got
+    has effect. This prevents the V4-style bug where ``started_at`` got
     bumped on every turn, defeating the staleness check entirely.
+
+    Run-state plumbing matches the deeper coverage in
+    ``tests/agent/test_run_driver_first_turn.py``: register the run
+    first (in-memory cache via the DB-less code path), then call the
+    hook against that real run_id.
     """
-    # The hook name is the contract under design; the import will fail
-    # until V5 D2.2 lands.
-    from gate.agent.run_driver import mark_first_turn  # type: ignore[import-not-found]
+    import app.state as state_module
+    from app import db as db_module
+    from app.state import InitiativeRecord, register
+    from app.state import get as get_record
+    from gate.agent.run_driver import mark_first_turn
+
+    monkeypatch.delenv(db_module.DSN_ENV, raising=False)
+    db_module._reset_for_tests()
+    state_module._records.clear()
 
     run_id = 'first-turn-run-1'
+    await register(
+        InitiativeRecord(
+            id=run_id,
+            initiative='first-turn-test',
+            status='running',
+            started_at=datetime.now(UTC),
+        )
+    )
 
     # First call: sets the field.
-    await mark_first_turn(run_id)
-    from app.state import get as get_record
+    wrote_first = await mark_first_turn(run_id)
+    assert wrote_first is True
 
     record_1 = await get_record(run_id)
     assert record_1 is not None
-    first_value = record_1.started_executing_at  # type: ignore[attr-defined]
+    first_value = record_1.started_executing_at
     assert first_value is not None
 
     # Second call: must NOT overwrite.
-    await mark_first_turn(run_id)
+    wrote_second = await mark_first_turn(run_id)
+    assert wrote_second is False
+
     record_2 = await get_record(run_id)
     assert record_2 is not None
-    assert record_2.started_executing_at == first_value  # type: ignore[attr-defined]
+    assert record_2.started_executing_at == first_value
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='V5 D2.2 — reconciler staleness logic not yet updated to read '
-    '`started_executing_at`. The current code uses `turns == 0` alone, '
-    'which false-positives on rows where the agent has begun a turn but '
-    'not yet completed one. This test pins the corrected logic.',
-)
 def test_reconciler_uses_started_executing_at_not_turns_zero() -> None:
     """Staleness classification:
 

@@ -117,6 +117,27 @@ class InitiativeRunRow(Base):
     # `gh pr list --head <branch>` without name-mangling. NULL on old rows
     # pre-migration; the reconciler treats NULL as "skip fallback".
     branch: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # V5 D2.2 — wall-clock time of the FIRST SDK turn the agent
+    # actually executed. NULL until that first turn fires; set
+    # exactly once thereafter (idempotent — concurrent retries
+    # guarded by `started_executing_at IS NULL` in the UPDATE
+    # WHERE clause; see gate/agent/run_driver.py::mark_first_turn).
+    #
+    # Distinct from `started_at` (row-creation time). The V4 stall
+    # demonstrated that `turns == 0` alone is ambiguous: a row with
+    # turns=0 could be in-flight (first turn fired but not yet
+    # complete) OR genuinely stuck (no first turn ever fired). Having
+    # `started_executing_at` lets the reconciler distinguish the
+    # two — NULL alongside age > threshold is the orphan-eligible
+    # shape; NOT NULL means the agent has begun executing.
+    #
+    # Downstream consumers (V1 launch-readiness, V3 reconciler
+    # staleness, V4 image-pull watchdog) PREFER this column over
+    # `turns == 0`.
+    started_executing_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

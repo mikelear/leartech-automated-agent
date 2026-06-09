@@ -447,7 +447,21 @@ async def test_spawn_submits_manifest_to_batch_v1() -> None:
     # LEARTECH_PR_REPO carries the qualified repo for the preStop hook
     # (D.7) — present even when the caller didn't supply a value (empty
     # string default).
-    assert env_names == {'FOO', 'CLAUDE_API_KEY', 'LEARTECH_INITIATIVE_YAML', 'LEARTECH_PR_REPO'}
+    # LEARTECH_RUN_ID (V5 D2.2) lets the agent loop write
+    # `initiative_runs.started_executing_at` on its first SDK turn —
+    # the run-driver's first-turn hook needs the row id, and the pod
+    # name (``<job-name>-<hash>``) can't be reliably derived from $HOSTNAME.
+    assert env_names == {
+        'FOO',
+        'CLAUDE_API_KEY',
+        'LEARTECH_INITIATIVE_YAML',
+        'LEARTECH_PR_REPO',
+        'LEARTECH_RUN_ID',
+    }
+    # Spot-check the run-id is carried verbatim, not hashed/transformed.
+    run_id_entries = [e for e in env if e['name'] == 'LEARTECH_RUN_ID']
+    assert len(run_id_entries) == 1
+    assert run_id_entries[0]['value'] == 'run-zz'
 
 
 @pytest.mark.asyncio
