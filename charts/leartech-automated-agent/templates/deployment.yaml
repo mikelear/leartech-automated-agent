@@ -197,6 +197,14 @@ spec:
         {{- end }}
         - name: LEARTECH_REPO_ROOT
           value: {{ .Values.leartechRepoRoot | quote }}
+        # V5 D2.1 — threshold for the stale-progress detector in
+        # gate/agent/run_driver.py::detect_pod_stuck_image_pull. See the
+        # values.yaml entry for the full rationale; default 600s, lowered
+        # to 60s in preview-deploy integration tests.
+        {{- if .Values.agent.staleProgressThresholdSeconds }}
+        - name: STALE_PROGRESS_THRESHOLD_S
+          value: {{ .Values.agent.staleProgressThresholdSeconds | quote }}
+        {{- end }}
         - name: VERSION
           value: {{ .Chart.Version | quote }}
         {{- if .Values.agent.model }}

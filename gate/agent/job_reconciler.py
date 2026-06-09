@@ -46,6 +46,7 @@ from app.routers.initiatives import _run_self_retrospect
 from app.state import get as get_record
 from app.state import update
 from gate.agent.initiative import _post_crash_sticky
+from gate.agent.run_driver import detect_pod_stuck_image_pull
 
 logger = logging.getLogger(__name__)
 
@@ -317,6 +318,77 @@ def _parse_summary(log_text: str) -> tuple[int | None, float | None, int | None]
     return turns, cost, pr_number
 
 
+async def _fetch_pod_for_run(core: client.CoreV1Api, namespace: str, run_id: str) -> Any | None:
+    """Best-effort pod lookup for the V5 D2.1 stale-progress detector.
+
+    Returns the first pod matching ``leartech.io/run-id=<run_id>`` in the
+    given namespace, or ``None`` on any failure (no pods yet, list call
+    raised, missing label). The detector treats ``None`` as "can't see
+    the pod — skip this pass" so a transient API blip never false-fails
+    a healthy run.
+
+    Distinct from ``_fetch_pod_log_tail`` (which fetches logs and returns
+    a string) and ``_fetch_pod_crash_info`` (which assembles the crash
+    sticky payload) so each helper has one job; the detector only needs
+    the raw pod object to extract its waiting-reason via
+    ``run_driver._extract_waiting_reason``.
+    """
+    try:
+        pods = await core.list_namespaced_pod(
+            namespace=namespace,
+            label_selector=f'leartech.io/run-id={run_id}',
+        )
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.debug('reconciler: pod lookup failed for %s: %s', run_id, exc)
+        return None
+    items = getattr(pods, 'items', None) or []
+    if not items:
+        return None
+    return items[0]
+
+
+async def _detect_and_patch_stuck_pod(
+    core: client.CoreV1Api,
+    namespace: str,
+    run_id: str,
+) -> bool:
+    """V5 D2.1 — short-circuit pods stuck in image-pull failure.
+
+    Looks up the DB row + the backing pod, calls the run_driver's
+    ``detect_pod_stuck_image_pull`` classifier, and flips the row to
+    ``failed`` with ``error=pod_stuck_<reason>`` if the classifier
+    fires. Returns True iff a row was actually patched.
+
+    Idempotency: the classifier itself returns None when the row is
+    already in a terminal state, so repeated reconcile passes over the
+    same stuck pod patch the row at most once. Subsequent passes also
+    no-op when the pod recovers (waiting.reason transitions out of the
+    failure set before the threshold elapses) — by design the watchdog
+    only fires when the pod has demonstrably failed to make progress.
+    """
+    record = await get_record(run_id)
+    if record is None:
+        return False
+    pod = await _fetch_pod_for_run(core, namespace, run_id)
+    reason = detect_pod_stuck_image_pull(record=record, pod=pod)
+    if reason is None:
+        return False
+    logger.warning(
+        'reconciler: V5 D2.1 short-circuit %s — %s (started_at=%s started_executing_at=%s)',
+        run_id,
+        reason,
+        getattr(record, 'started_at', None),
+        getattr(record, 'started_executing_at', None),
+    )
+    await update(
+        run_id,
+        status='failed',
+        finished_at=_now(),
+        error=reason,
+    )
+    return True
+
+
 async def reconcile_once(namespace: str) -> int:
     """One pass over runner Jobs. Returns the number of rows updated."""
     config.load_incluster_config()
@@ -327,9 +399,31 @@ async def reconcile_once(namespace: str) -> int:
         jobs = await _list_runner_jobs(batch, namespace)
         for job in jobs:
             terminal = _job_terminal_state(job)
-            if terminal is None:
-                continue
             run_id = job.metadata.name  # D.3 contract: job_name == run_id
+
+            # V5 D2.1 stale-progress detector — for Jobs without a terminal
+            # condition, check whether the backing pod is stuck on
+            # image-pull failure. A pod in ImagePullBackOff (or sibling
+            # waiting-reason in IMAGE_PULL_FAILURE_REASONS) never causes
+            # the Job itself to transition to Failed (with backoffLimit=0
+            # + restartPolicy=Never, the Job just sits there). Without
+            # this watchdog the V4 95-minute stall recurs — the row stays
+            # in `running` until an operator notices and force-orphans it.
+            #
+            # The detector uses `started_executing_at IS NULL` to
+            # disambiguate "agent hasn't started yet" from "agent is slow"
+            # (V5 D2.2 column) and the row's age > STALE_PROGRESS_THRESHOLD_S
+            # to avoid false-positives during the normal image-pull window.
+            #
+            # When the detector fires we flip the row to `failed` with
+            # error=`pod_stuck_<reason>` and continue — the rest of the
+            # loop body assumes a real terminal Job condition, which this
+            # path doesn't have.
+            if terminal is None:
+                stuck_patched = await _detect_and_patch_stuck_pod(core, namespace, run_id)
+                if stuck_patched:
+                    updates += 1
+                continue
             record = await get_record(run_id)
             if record is None:
                 logger.debug('reconciler: no DB row for terminal Job %s; skipping', run_id)
