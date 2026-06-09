@@ -81,21 +81,19 @@ spec:
             # has 0.10.72 from 2026-06-01 → DENIED).
             # AZ owns the shared-registry publishing. GCP pushes only to
             # GAR; cross-cluster pulls happen from ghcr.io (AZ-published).
-            DESTS=(
-              --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:${VERSION}
-              --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:latest
-            )
+            #
+            # NOTE: script runs in /busybox/sh — no bash arrays. Use plain
+            # string with intentional word-splitting at kaniko invocation.
+            DESTS="--destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:${VERSION} --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:latest"
             if [ "${PUSH_CONTAINER_REGISTRY}" = "modernburro.azurecr.io" ]; then
-              DESTS+=(
-                --destination=ghcr.io/mikelear/leartech-agent-runtime:${VERSION}
-                --destination=ghcr.io/mikelear/leartech-agent-runtime:latest
-              )
+              DESTS="$DESTS --destination=ghcr.io/mikelear/leartech-agent-runtime:${VERSION} --destination=ghcr.io/mikelear/leartech-agent-runtime:latest"
             fi
 
+            # shellcheck disable=SC2086 — deliberate word-split of $DESTS
             /kaniko/executor \
               --dockerfile=Dockerfile.runtime \
               --context=/workspace/source \
-              "${DESTS[@]}" \
+              $DESTS \
               --build-arg=BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.30.1 \
               --cache=true
           workingDir: /workspace/source
