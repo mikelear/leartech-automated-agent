@@ -82,3 +82,70 @@ def test_health_renders_panel() -> None:
     assert result.exit_code == 0
     assert 'Platform health' in result.output
     assert 'Lessons catalog' in result.output
+
+
+def test_mcps_list_shows_catalog() -> None:
+    runner = CliRunner()
+    with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
+        result = runner.invoke(cli, ['mcps', 'list'])
+    assert result.exit_code == 0
+    assert 'MCP catalog' in result.output
+    # CliRunner uses an 80-col terminal which truncates the per-row name;
+    # the summary footer is stable across widths.
+    assert 'catalogued' in result.output
+    assert 'ready' in result.output
+
+
+def test_roles_list_shows_personas() -> None:
+    runner = CliRunner()
+    with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
+        result = runner.invoke(cli, ['roles', 'list'])
+    assert result.exit_code == 0
+    assert 'initiative_agent' in result.output
+
+
+def test_topology_renders_mermaid_to_stdout() -> None:
+    runner = CliRunner()
+    with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
+        result = runner.invoke(cli, ['topology'])
+    assert result.exit_code == 0
+    assert 'Phase 1' in result.output
+
+
+def test_probe_returns_status_for_sdk_mcp() -> None:
+    runner = CliRunner()
+    with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
+        result = runner.invoke(cli, ['probe', 'leartech-pipeline'])
+    assert result.exit_code == 0
+    assert 'leartech-pipeline' in result.output
+    assert 'sdk_import' in result.output
+
+
+def test_cluster_flag_picks_known_ingress_url() -> None:
+    """The --cluster flag must resolve to a real URL without env vars set."""
+    from app.agent_cli.transport import resolve_base_url
+
+    gcp_url = resolve_base_url(url=None, cluster='gcp')
+    az_url = resolve_base_url(url=None, cluster='az')
+    assert 'product-first' in gcp_url
+    assert 'modern-burro' in az_url
+
+
+def test_cluster_flag_unknown_raises() -> None:
+    from app.agent_cli.transport import resolve_base_url
+
+    try:
+        resolve_base_url(url=None, cluster='moonbase')
+    except ValueError as exc:
+        assert 'moonbase' in str(exc)
+    else:
+        raise AssertionError('expected ValueError for unknown cluster')
+
+
+def test_url_flag_overrides_env_and_cluster(monkeypatch: pytest.MonkeyPatch) -> None:
+    """--url wins over both env and --cluster."""
+    from app.agent_cli.transport import resolve_base_url
+
+    monkeypatch.setenv('LEARTECH_AGENT_URL', 'http://from-env:9999')
+    resolved = resolve_base_url(url='http://from-flag:1', cluster='gcp')
+    assert resolved == 'http://from-flag:1'

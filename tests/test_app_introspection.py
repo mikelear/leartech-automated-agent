@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.state import InitiativeRecord, _records, new_id, register
 
 client = TestClient(app)
 
@@ -101,3 +105,83 @@ def test_health_detail_summarises_state() -> None:
     ring_statuses = {r['name']: r['status'] for r in body['feedback_rings']}
     assert ring_statuses['ring1_pr_gate'] == 'active'
     assert ring_statuses['ring2_staging'] == 'pending'
+
+
+def test_mcp_health_probe_for_sdk_returns_ready() -> None:
+    response = client.get('/mcps/leartech-pipeline/health')
+    assert response.status_code == 200
+    body = response.json()
+    assert body['name'] == 'leartech-pipeline'
+    assert body['status'] == 'ready'
+    assert body['probe'] == 'sdk_import'
+
+
+def test_mcp_health_probe_unknown_returns_404() -> None:
+    response = client.get('/mcps/never-was/health')
+    assert response.status_code == 404
+
+
+@pytest.fixture
+def _seeded_run() -> str:
+    """Register a fake run record so the timeline / why endpoints have something to render.
+
+    Uses the in-memory ``_records`` store (no DB configured in tests),
+    which the same ``app.state.get`` reads from.
+    """
+    run_id = new_id()
+    started = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
+    finished = datetime(2026, 1, 1, 12, 5, 0, tzinfo=UTC)
+    # Use register() to mirror prod path; falls back to _records when DB disabled.
+    import asyncio
+
+    asyncio.run(
+        register(
+            InitiativeRecord(
+                id=run_id,
+                initiative='test-init',
+                status='complete',
+                started_at=started,
+                started_executing_at=started,
+                finished_at=finished,
+                pr_number=42,
+                pr_repo='mikelear/test-repo',
+                turns=3,
+                cost_usd=0.0123,
+            )
+        )
+    )
+    yield run_id
+    _records.pop(run_id, None)
+
+
+def test_initiative_timeline_includes_lifecycle_events(_seeded_run: str) -> None:
+    response = client.get(f'/initiatives/{_seeded_run}/timeline')
+    assert response.status_code == 200
+    body = response.json()
+    assert body['run_id'] == _seeded_run
+    assert body['initiative'] == 'test-init'
+    kinds = [event['kind'] for event in body['events']]
+    assert 'registered' in kinds
+    assert 'first_turn' in kinds
+    assert 'pr_opened' in kinds
+    assert 'finished' in kinds
+
+
+def test_initiative_timeline_unknown_returns_404() -> None:
+    response = client.get('/initiatives/does-not-exist-xyz/timeline')
+    assert response.status_code == 404
+
+
+def test_initiative_why_returns_matched_lesson_ids(_seeded_run: str) -> None:
+    response = client.get(f'/initiatives/{_seeded_run}/why')
+    assert response.status_code == 200
+    body = response.json()
+    assert body['run_id'] == _seeded_run
+    # At least one calibration lesson applies to initiative_agent in the catalog.
+    assert body['matched_count'] > 0
+    assert len(body['matched_lessons']) == body['matched_count']
+
+
+def test_initiative_why_unknown_returns_404() -> None:
+    response = client.get('/initiatives/does-not-exist-xyz/why')
+    assert response.status_code == 404
