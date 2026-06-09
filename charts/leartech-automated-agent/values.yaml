@@ -81,17 +81,44 @@ secrets:
   ghToken:
     secretName: tekton-git
     secretKey: password
-  # Phase B (B.3+B.4): admin-token-gated POST /admin/cleanup endpoint.
-  # When set, deployment.yaml plumbs LEARTECH_ADMIN_TOKEN from this
-  # secretKeyRef. When empty (default), the env var isn't rendered and
-  # the endpoint returns 401 to every request — safe default until
-  # GitOps PRs populate the AKV/GSM source paths and the in-namespace
-  # Secret. Same convention as the other entries in this block: the
-  # chart references an existing Secret name; ExternalSecret (operator
-  # PRs out of band) materialises it per-cluster.
-  adminToken:
-    secretName: ""
-    secretKey: ""
+
+# Phase B (B.3+B.4) — V2 plumbing. Admin-token gate for POST /admin/cleanup.
+# Lifted out of `.Values.secrets` into a top-level block so it sits next to
+# its own per-cluster ESO source-path toggles (mirroring `.Values.postgresql`).
+#
+# `enabled: true` makes deployment.yaml render the LEARTECH_ADMIN_TOKEN
+# secretKeyRef on every cluster. The ref carries `optional: true`, so even
+# preview namespaces (jx-<repo>-pr-<N>) that don't have the materialising
+# ExternalSecret start cleanly — the env stays unset and the endpoint's
+# `_check_admin_token` falls into the closed-by-default 401 branch. The
+# `optional: true` flag is MANDATORY here — without it previews CrashLoop
+# on CreateContainerConfigError. Memory:
+# feedback_chart_secretref_must_be_optional_for_previews.
+#
+# Actual materialisation happens via templates/externalsecret-admin-token.yaml,
+# gated on `adminToken.enabled` AND the active per-cluster ESO backend
+# (`externalSecrets.gcp.enabled` or `externalSecrets.azure.enabled`).
+# Operator-side bootstrap (seeding the GSM / Vault entry) is documented in
+# the chart-plumb-admin-token-env initiative PR body; sibling per-cluster
+# GitOps PRs flip the cluster's externalSecrets toggle on. Memory:
+# feedback_secret_materialization_pattern.
+adminToken:
+  enabled: true
+  secretName: leartech-automated-agent-admin-token
+  secretKey: token
+  # Per-cluster source paths. Active path is selected by the
+  # `externalSecrets.{gcp,azure}.enabled` toggle (single backend per cluster).
+  gcp:
+    # GSM key in `.Values.externalSecrets.gcp.projectId`. Flat string value
+    # — operator bootstrap creates it with `gcloud secrets create
+    # automated-agent-admin-token --data-file=-` (see PR body).
+    key: automated-agent-admin-token
+  azure:
+    # Vault KV-v2 path. The `/data/` segment is required by ESO's vault
+    # driver. Operator bootstrap uses the cross-cluster sync pattern
+    # documented in memory `reference_cross_cluster_secret_sync`.
+    key: secret/data/leartech/automated-agent/admin-token
+    property: token
 
 # ExternalSecret rendering — both clusters' shape kept here so the chart is
 # multi-cluster-ready out of the box. Activate one via the cluster's
