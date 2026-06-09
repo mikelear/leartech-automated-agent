@@ -1,15 +1,12 @@
 replicaCount: 1
-
 image:
-  repository: ""
-  tag: ""
+  repository: "us-central1-docker.pkg.dev/product-first/oci/leartech-automated-agent"
+  tag: "0.10.72"
   pullPolicy: IfNotPresent
-
 service:
   type: ClusterIP
   port: 8080
   externalPort: 8080
-
 # Agent runtime config. Override `model` to switch Anthropic model
 # without a code change — `claude-opus-4-7` (default, balanced),
 # `claude-haiku-4-5` (cheap routine work), `claude-opus-4-7`
@@ -26,7 +23,6 @@ agent:
   # in the template) so a future runtime variant can be introduced
   # without re-plumbing.
   runtime: "job"
-
 # Anthropic SDK + agent loops are memory-heavy on substantial initiatives.
 # 2026-05-20: mortgages-gw-add-mcp-mock-sourcing run OOMKilled at the 1 GiB
 # limit during real code work (3 MCP tools + mock data + endpoint
@@ -41,27 +37,23 @@ resources:
   limits:
     cpu: 2000m
     memory: 4Gi
-
 livenessProbe:
   httpGet:
     path: /health
     port: 8080
   initialDelaySeconds: 10
   periodSeconds: 30
-
 readinessProbe:
   httpGet:
     path: /readyz
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 10
-
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
-
 ingress:
   enabled: false
   host: ""
@@ -69,7 +61,6 @@ ingress:
   annotations: {}
   labels: {}
   pathType: ImplementationSpecific
-
 # Secrets — deployment references existing K8s Secret names; ExternalSecrets
 # materialise them per-cluster using the auth-service pattern (same chart,
 # both backends represented, cluster's GitOps configs/<chart>.yaml flips
@@ -92,38 +83,35 @@ secrets:
   adminToken:
     secretName: ""
     secretKey: ""
-
 # ExternalSecret rendering — both clusters' shape kept here so the chart is
 # multi-cluster-ready out of the box. Activate one via the cluster's
 # configs/leartech-automated-agent.yaml override; never both at once.
 externalSecrets:
   gcp:
-    enabled: false  # set true on GCP via configs/leartech-automated-agent.yaml
+    enabled: false # set true on GCP via configs/leartech-automated-agent.yaml
     projectId: product-first
     secrets:
-      - name: ai-review-api-keys
-        data:
-          - name: CLAUDE_API_KEY
-            key: claude-api-key
-
+    - name: ai-review-api-keys
+      data:
+      - name: CLAUDE_API_KEY
+        key: claude-api-key
   azure:
-    enabled: false  # set true on AZ via configs/leartech-automated-agent.yaml
+    enabled: false # set true on AZ via configs/leartech-automated-agent.yaml
     vaultMountPoint: kubernetes
     vaultRole: jx-vault
     secrets:
-      - name: ai-review-api-keys
-        data:
-          - name: CLAUDE_API_KEY
-            key: secret/data/ai/claude
-            property: apiKey
-
+    - name: ai-review-api-keys
+      data:
+      - name: CLAUDE_API_KEY
+        key: secret/data/ai/claude
+        property: apiKey
 # tekton-git — materialises the basic-auth Secret used by `gh` / git inside
 # the agent pod. Toggle via configs/<chart>.yaml. See
 # templates/externalsecret-tekton-git.yaml for the convention discussion
 # (long-term cleanup is to refactor ai-classifier onto the same toggle).
 tektonGit:
   create: false
-  backend: ""  # "gsm" | "vault"
+  backend: "" # "gsm" | "vault"
   gsm:
     projectId: product-first
     key: tf-jx-usable-bird-jx-pipeline-user
@@ -131,11 +119,9 @@ tektonGit:
     mountPoint: kubernetes
     role: jx-vault
     key: secret/data/jx/pipelineUser
-
 # Where consumer-repo checkouts get mounted in cluster mode.
 # The Initiative agent resolves repo paths against this prefix.
 leartechRepoRoot: /workspace
-
 # Postgres-backed initiative catalog. Mirrors auth-service's pattern:
 # - CNPG Database CR provisions the per-service DB in the shared cluster
 #   (leartech-staging lives in cnpg-system; Database CR sits in this
@@ -164,7 +150,7 @@ leartechRepoRoot: /workspace
 # endpoints return 503 and the agent falls back to filesystem-only YAML.
 # Use that for previews or any cluster without CNPG.
 postgresql:
-  enabled: false  # flip via configs/leartech-automated-agent.yaml on clusters with CNPG
+  enabled: false # flip via configs/leartech-automated-agent.yaml on clusters with CNPG
   # DO NOT enable on preview deployments. Preview environments don't have the
   # leartech-staging CNPG cluster, the role won't exist, and the ExternalSecret
   # will 404 on the workload Vault/GSM path — pod CrashLoops on startup.
@@ -196,7 +182,6 @@ postgresql:
       # KV-v2 path. The `/data/` segment is required by ESO's vault driver.
       key: secret/data/automated-agent/automated-agent-db
       property: dsn
-
 # Phase D.2 — Job-per-run infrastructure. Enables the chart to render:
 #   - ServiceAccount `<fullname>-job-runner` (spawned Job pods)
 #   - ServiceAccount `<fullname>` (API pod — wired into deployment.yaml)
@@ -250,7 +235,6 @@ jobs:
   # reach a terminal state. 24 h gives humans a comfortable window to read
   # logs after a failed run before K8s cleans up.
   ttlSecondsAfterFinished: 86400
-
 jxRequirements:
   ingress:
     domain: ""
