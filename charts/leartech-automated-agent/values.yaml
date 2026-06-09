@@ -27,6 +27,18 @@ agent:
   # without re-plumbing.
   runtime: "job"
 
+  # V5 D2.1 — threshold (seconds) for the stale-progress detector in
+  # gate/agent/run_driver.py::detect_pod_stuck_image_pull. When a run's
+  # row is older than this AND the agent has not yet executed its first
+  # SDK turn (started_executing_at IS NULL) AND the backing pod is
+  # waiting in one of {ImagePullBackOff, ErrImagePull, InvalidImageName,
+  # CreateContainerConfigError}, the job_reconciler short-circuits the
+  # row to `failed` with `error=pod_stuck_<reason>`. 600s = 10min,
+  # which keeps the V4 95-minute stall worst-case down to ~10min.
+  # Lowered to 60s in preview-deploy integration tests so the broken-
+  # image-tag flow finishes within the test's wait budget.
+  staleProgressThresholdSeconds: 600
+
 # Anthropic SDK + agent loops are memory-heavy on substantial initiatives.
 # 2026-05-20: mortgages-gw-add-mcp-mock-sourcing run OOMKilled at the 1 GiB
 # limit during real code work (3 MCP tools + mock data + endpoint

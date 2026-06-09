@@ -25,7 +25,7 @@ See the ``feedback_async_tests_need_event_not_sleep`` memory.
 | Test                                                       | Status   | Follow-up                                                  |
 |------------------------------------------------------------|----------|------------------------------------------------------------|
 | job_deleted_externally → orphaned                          | PASS     | V5 D2 (this PR — small fix landed in job_reconciler)       |
-| pod stuck ImagePullBackOff > threshold → failed            | XFAIL    | V5 D2.1 image-pull stuck-pod watchdog                      |
+| pod stuck ImagePullBackOff > threshold → failed            | PASS     | V5 D2.1 landed — detect_pod_stuck_image_pull in run_driver |
 | started_executing_at starts NULL                           | PASS     | V5 D2.2 landed — column + pydantic default                 |
 | started_executing_at set on first turn (immutable)         | PASS     | V5 D2.2 landed — mark_first_turn hook in run_driver        |
 | reconciler staleness uses started_executing_at not turns=0 | PASS     | V5 D2.2 landed — is_run_stale in run_driver                |
@@ -264,25 +264,22 @@ async def test_running_row_with_live_job_is_not_orphaned() -> None:
 # Test 2 — Pod stuck in ImagePullBackOff > 600s must flip to 'failed'
 # ---------------------------------------------------------------------------
 #
-# XFAIL — V5 D2.1 follow-up will add the watchdog. Today, a pod stuck
-# in ImagePullBackOff sits forever because:
-#   - Job has no terminal condition (restartPolicy=Never + backoffLimit=0
-#     means the pod never enters CrashLoopBackOff to count failures)
-#   - The reconciler skips Jobs without a Complete/Failed condition
+# V5 D2.1 (LANDED). The watchdog lives in
+# ``gate.agent.run_driver.detect_pod_stuck_image_pull`` and is wired
+# into ``job_reconciler.reconcile_once`` via the new
+# ``_detect_and_patch_stuck_pod`` pass. The Job has NO terminal
+# condition (restartPolicy=Never + backoffLimit=0 doesn't progress
+# the Job to Failed on an image-pull error), so the watchdog looks at
+# the pod's waiting.reason + age independently of the Job's status.
 #
-# The fix: when a Job has been alive > threshold AND its pod's container
-# is waiting with one of {ImagePullBackOff, ErrImagePull, InvalidImageName,
-# CreateContainerConfigError}, flip the row to 'failed' with the K8s
-# waiting reason captured in `error`.
+# This was XFAIL until V5 D2.1 landed; now an integration assertion
+# that the wiring still routes through reconcile_once correctly. The
+# detector's per-case behaviour is covered exhaustively by
+# ``tests/agent/test_stale_progress_detector.py`` — this test pins the
+# end-to-end "reconcile_once must invoke the watchdog and patch the
+# row when fired" contract.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason='V5 D2.1 image-pull stuck-pod watchdog not yet implemented. '
-    'The reconciler currently skips Jobs with no terminal condition, so '
-    'ImagePullBackOff pods sit forever. This test pins the invariant for '
-    'the follow-up init.',
-)
 @pytest.mark.asyncio
 async def test_pod_stuck_image_pull_marks_failed() -> None:
     """Pod waiting in ImagePullBackOff for >600s → row flipped to failed
@@ -306,22 +303,27 @@ async def test_pod_stuck_image_pull_marks_failed() -> None:
     )
     core.list_namespaced_pod = AsyncMock(return_value=SimpleNamespace(items=[stuck_pod]))
 
+    # Record must carry started_at (over threshold) + started_executing_at=None.
+    # The detector reads BOTH — the V5 D2.2 column is the unambiguous "agent
+    # has not executed" signal; without it a future regression could re-fail
+    # in-flight runs whose first turn already fired.
+    record = SimpleNamespace(
+        id='image-pull-stuck-1',
+        status='running',
+        pr_number=None,
+        pr_repo='mikelear/example-svc',
+        initiative='img-pull',
+        branch='agent/img-pull',
+        started_at=datetime.now(UTC) - timedelta(seconds=1200),
+        started_executing_at=None,
+    )
+
     with (
         patch('gate.agent.job_reconciler.config') as mock_config,
         patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
         patch('gate.agent.job_reconciler.client') as mock_client_mod,
-        patch(
-            'gate.agent.job_reconciler.get_record',
-            new=AsyncMock(
-                return_value=SimpleNamespace(
-                    status='running',
-                    pr_number=None,
-                    pr_repo='mikelear/example-svc',
-                    initiative='img-pull',
-                    branch='agent/img-pull',
-                ),
-            ),
-        ),
+        patch('gate.agent.job_reconciler.get_record', new=AsyncMock(return_value=record)),
+        patch('gate.agent.job_reconciler.is_db_enabled', return_value=False),
         patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
     ):
         _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
@@ -330,7 +332,55 @@ async def test_pod_stuck_image_pull_marks_failed() -> None:
     failed_calls = [call for call in mock_update.await_args_list if call.kwargs.get('status') == 'failed']
     assert len(failed_calls) == 1, f'Expected one image-pull-watchdog flip; got {mock_update.await_args_list!r}'
     error_msg = failed_calls[0].kwargs.get('error') or ''
-    assert 'ImagePullBackOff' in error_msg
+    assert 'pod_stuck_ImagePullBackOff' in error_msg
+
+
+@pytest.mark.asyncio
+async def test_pod_stuck_image_pull_skipped_when_under_threshold() -> None:
+    """Negative case for the V5 D2.1 wiring. A young Job (started 30s
+    ago) with the SAME ImagePullBackOff pod must NOT be flipped — the
+    threshold protects against false-positives during the normal
+    image-pull window (image cache warm-up + initial container start
+    can legitimately take tens of seconds).
+
+    Pairs with ``test_pod_stuck_image_pull_marks_failed`` to prove the
+    age guard is wired through reconcile_once, not just available on
+    the detector in isolation.
+    """
+    batch = MagicMock()
+    core = MagicMock()
+
+    job = _make_job('image-pull-young-1', [])
+    batch.list_namespaced_job = AsyncMock(return_value=SimpleNamespace(items=[job]))
+
+    # Pod stuck in ImagePullBackOff, but only for 30s (well under threshold).
+    young_pod = _make_pod_in_image_pull_backoff('image-pull-young-1-pod', reason='ImagePullBackOff', waiting_seconds=30)
+    core.list_namespaced_pod = AsyncMock(return_value=SimpleNamespace(items=[young_pod]))
+
+    record = SimpleNamespace(
+        id='image-pull-young-1',
+        status='running',
+        pr_number=None,
+        pr_repo='mikelear/example-svc',
+        initiative='img-pull-young',
+        branch='agent/img-pull-young',
+        started_at=datetime.now(UTC) - timedelta(seconds=30),  # young
+        started_executing_at=None,
+    )
+
+    with (
+        patch('gate.agent.job_reconciler.config') as mock_config,
+        patch('gate.agent.job_reconciler.ApiClient') as mock_api_client_cls,
+        patch('gate.agent.job_reconciler.client') as mock_client_mod,
+        patch('gate.agent.job_reconciler.get_record', new=AsyncMock(return_value=record)),
+        patch('gate.agent.job_reconciler.is_db_enabled', return_value=False),
+        patch('gate.agent.job_reconciler.update', new=AsyncMock()) as mock_update,
+    ):
+        _patch_k8s_for_reconcile(batch, core, mock_config, mock_api_client_cls, mock_client_mod)
+        await reconcile_once('jx-staging')
+
+    failed_calls = [call for call in mock_update.await_args_list if call.kwargs.get('status') == 'failed']
+    assert failed_calls == [], f'Young Job was false-failed by the watchdog: {mock_update.await_args_list!r}'
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
-"""V5 D2.2 run-driver state-machine helpers.
+"""V5 D2.2 + V5 D2.1 run-driver state-machine helpers.
 
-This module exposes two surfaces:
+This module exposes three surfaces:
 
 - ``mark_first_turn(run_id)`` — async, set-once hook fired by the SDK
   loop in ``gate/agent/initiative.py`` the very first time the agent
@@ -29,6 +29,19 @@ This module exposes two surfaces:
   isolation and mis-classify in-flight runs as stuck. This helper
   replaces those checks at the consumer-init layer.
 
+- ``detect_pod_stuck_image_pull(record, pod, ...)`` — V5 D2.1
+  stale-progress detector. Returns a ``pod_stuck_<reason>`` string
+  when a run's pod is wedged on an image-pull failure (one of
+  ``ImagePullBackOff``, ``ErrImagePull``, ``InvalidImageName``,
+  ``CreateContainerConfigError``) AND the agent has not yet executed
+  its first turn (``started_executing_at IS NULL``) AND the row's
+  age exceeds the configured threshold. Used by the reconciler to
+  short-circuit the V4 95-minute stall: previously the K8s Job
+  carried no terminal condition for these states, so the reconciler
+  walked past it forever; now the detector flips the row to
+  ``failed`` within ``STALE_PROGRESS_THRESHOLD_S + 1 poll`` of the
+  pod entering the failure state.
+
 Memory: ``feedback_sdk_toolresult_in_usermessage`` — the first
 meaningful SDK message is a ``UserMessage`` carrying a
 ``ToolResultBlock``, NOT an ``AssistantMessage``. Callers in
@@ -39,6 +52,7 @@ detection point used for turn counting; no parallel scanner.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import UTC, datetime
 from typing import Any
 
@@ -50,6 +64,39 @@ from app.db.models import InitiativeRunRow
 from app.state import _records as _in_memory_records
 
 logger = logging.getLogger(__name__)
+
+# V5 D2.1 — finite, well-known set of K8s container-waiting reasons
+# that indicate the pod will never make progress without operator
+# action (registry auth, image tag fix, secret materialisation). These
+# are NOT in ``frozenset``-form a configurable knob — they're the
+# documented kubernetes pod-state values whose semantics are baked
+# into the cluster. Adding a new reason here is a code change, not
+# a values.yaml change.
+IMAGE_PULL_FAILURE_REASONS: frozenset[str] = frozenset(
+    {
+        'ImagePullBackOff',
+        'ErrImagePull',
+        'InvalidImageName',
+        'CreateContainerConfigError',
+    },
+)
+
+# Default threshold (seconds) for the V5 D2.1 stale-progress detector.
+# Overridable via ``STALE_PROGRESS_THRESHOLD_S`` env (chart values.yaml
+# plumbs it through deployment.yaml). 600s = 10min, picked so the V4
+# 95-minute stall takes ~10min worst-case to terminate; the reconciler
+# poll cadence (15s) is well under the threshold so a poll always
+# happens between "threshold crossed" and "detector should fire".
+DEFAULT_STALE_PROGRESS_THRESHOLD_S = 600
+
+# Statuses considered terminal for the detector's "skip already-failed"
+# guard. Duplicates the ``TERMINAL_STATUSES`` constant in
+# ``job_reconciler.py`` deliberately — this module is a pure classifier
+# and shouldn't import from the reconciler (the reconciler imports
+# from this module, not the other way round).
+_TERMINAL_STATUSES: frozenset[str] = frozenset(
+    {'complete', 'failed', 'cancelled', 'orphaned', 'timed_out'},
+)
 
 
 def _utcnow() -> datetime:
@@ -178,4 +225,169 @@ def is_run_stale(record: Any, *, threshold_seconds: int) -> bool:
     return is_stale
 
 
-__all__ = ['is_run_stale', 'mark_first_turn']
+def _get_stale_progress_threshold_s() -> int:
+    """Read ``STALE_PROGRESS_THRESHOLD_S`` env var, falling back to default.
+
+    A malformed env value (non-int) is logged + ignored — the default
+    is preserved so a typo in chart values doesn't disable the
+    watchdog altogether. The detector is the only consumer of this
+    knob; the chart's ``deployment.yaml`` plumbs the env from
+    ``values.yaml`` via ``.Values.staleProgressThresholdSeconds``.
+    """
+    raw = os.environ.get('STALE_PROGRESS_THRESHOLD_S')
+    if not raw:
+        return DEFAULT_STALE_PROGRESS_THRESHOLD_S
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            'STALE_PROGRESS_THRESHOLD_S=%r is not an int; using default %ds',
+            raw,
+            DEFAULT_STALE_PROGRESS_THRESHOLD_S,
+        )
+        return DEFAULT_STALE_PROGRESS_THRESHOLD_S
+
+
+def _extract_waiting_reason(pod: Any) -> str | None:
+    """Pull ``status.container_statuses[0].state.waiting.reason`` from a pod.
+
+    Accepts kubernetes_asyncio pod-shape objects (where each level is a
+    namespace attribute) and the equivalent ``SimpleNamespace`` test
+    fixtures interchangeably. Returns ``None`` for any missing-link
+    (pod has no status, no container_statuses, no waiting state, no
+    reason field) so the caller can treat it uniformly as "no reason
+    visible — not stuck on image pull".
+
+    Walks ALL container statuses, not just the first — multi-container
+    pods (e.g. the future migrations sidecar pattern) surface
+    image-pull failures on whichever container failed, not always
+    index 0. The first container with a populated waiting.reason wins.
+    """
+    if pod is None:
+        return None
+    status = getattr(pod, 'status', None)
+    if status is None:
+        return None
+    container_statuses = getattr(status, 'container_statuses', None) or []
+    for cs in container_statuses:
+        state = getattr(cs, 'state', None)
+        if state is None:
+            continue
+        waiting = getattr(state, 'waiting', None)
+        if waiting is None:
+            continue
+        reason = getattr(waiting, 'reason', None)
+        if reason:
+            return str(reason)
+    return None
+
+
+def detect_pod_stuck_image_pull(
+    *,
+    record: Any,
+    pod: Any | None,
+    threshold_seconds: int | None = None,
+    now: datetime | None = None,
+) -> str | None:
+    """V5 D2.1 — classify whether a run's pod is stuck on image-pull failure.
+
+    Returns ``'pod_stuck_<reason>'`` (e.g. ``'pod_stuck_ImagePullBackOff'``)
+    iff ALL of:
+
+    1. ``record.status`` is NOT already in a terminal state (skip the
+       double-fail case — see ``test_detector_does_not_double_fail``).
+    2. ``record.started_executing_at`` is None — the agent has not yet
+       reached its first SDK turn. This is the unambiguous "nothing
+       happened yet" signal (V5 D2.2). A run whose first turn fired
+       is by definition healthy regardless of pod state, so we leave
+       the reconciler's normal terminal-state detection to handle it.
+    3. ``(now - record.started_at) > threshold_seconds`` — protects
+       against false positives during the normal image-pull window
+       (a fresh pod can sit in ``ContainerCreating`` for ~30s before
+       the image cache hit; the threshold default of 600s gives that
+       a wide margin).
+    4. The pod's container ``waiting.reason`` is in
+       ``IMAGE_PULL_FAILURE_REASONS``. Benign reasons like
+       ``ContainerCreating`` (pre-image-pull) and ``PodInitializing``
+       (initContainers running) are deliberately NOT in the set —
+       those genuinely indicate "still working" rather than "stuck".
+
+    Returns ``None`` in every other case so the caller's loop body
+    is a simple ``if reason := detect_pod_stuck_image_pull(...): ...``.
+
+    Parameters
+    ----------
+    record : Any
+        Duck-typed run record exposing ``status``, ``started_at``, and
+        ``started_executing_at``. Accepts both the pydantic
+        ``InitiativeRecord`` and the SQLAlchemy ``InitiativeRunRow``
+        without coupling — the reconciler is the primary caller and
+        passes whichever it has on hand.
+    pod : Any | None
+        Either a kubernetes_asyncio pod object (status.container_statuses
+        nested namespaces) OR a dict matching the F5 ``k8s_mcp.get_pod_state``
+        shape with a top-level ``'waiting_reason'`` key. The dict path
+        lets future callers wire through the MCP layer without re-coding
+        the kubernetes_asyncio attribute walk.
+    threshold_seconds : int | None
+        Optional override. When None, reads from env (defaults to 600s).
+    now : datetime | None
+        Optional clock injection for deterministic tests. When None,
+        uses ``_utcnow()``.
+
+    Notes
+    -----
+    Memory: ``feedback_orch_cant_see_pod_problems`` — the V4 stall
+    happened because the orchestrator-equivalent loop had no signal
+    when a pod was in ImagePullBackOff. ``started_executing_at IS
+    NULL`` is the agreed-upon "agent hasn't run yet" signal that lets
+    this watchdog distinguish "slow first turn" from "stuck pre-turn"
+    without relying on the ambiguous ``turns == 0``.
+    """
+    if record is None:
+        return None
+    if getattr(record, 'status', None) in _TERMINAL_STATUSES:
+        # Already finalised by another path — do not re-fail.
+        return None
+    if getattr(record, 'started_executing_at', None) is not None:
+        # Agent has begun executing — pod's transient waiting reason
+        # is irrelevant by definition (the container is running).
+        return None
+
+    started_at = getattr(record, 'started_at', None)
+    if started_at is None:
+        # Defensive: row with no started_at can't be aged. Don't fail it.
+        return None
+    if started_at.tzinfo is None:
+        started_at = started_at.replace(tzinfo=UTC)
+
+    when = now if now is not None else _utcnow()
+    threshold = threshold_seconds if threshold_seconds is not None else _get_stale_progress_threshold_s()
+    age_seconds = (when - started_at).total_seconds()
+    if age_seconds <= threshold:
+        return None
+
+    # Accept the F5 dict-shape AND kubernetes_asyncio pod-object shape
+    # interchangeably. The dict shape is what `k8s_mcp.get_pod_state`
+    # is documented to return; the pod-object shape is what the
+    # reconciler already has from `core.list_namespaced_pod`. Same
+    # downstream classification in both cases.
+    reason: str | None
+    if isinstance(pod, dict):
+        raw = pod.get('waiting_reason')
+        reason = str(raw) if raw else None
+    else:
+        reason = _extract_waiting_reason(pod)
+
+    if reason and reason in IMAGE_PULL_FAILURE_REASONS:
+        return f'pod_stuck_{reason}'
+    return None
+
+
+__all__ = [
+    'DEFAULT_STALE_PROGRESS_THRESHOLD_S',
+    'IMAGE_PULL_FAILURE_REASONS',
+    'detect_pod_stuck_image_pull',
+    'is_run_stale',
+    'mark_first_turn',
+]
