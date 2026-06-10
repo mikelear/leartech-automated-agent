@@ -15,7 +15,7 @@ import os
 import re
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +35,13 @@ from app.db import dispose_engine as _dispose_engine
 from app.db import init_engine as _init_engine
 from app.db import is_db_enabled
 from gate.agent.calibrations import load_jx3_calibration
+from gate.agent.commands import (
+    CommandSink,
+    drain_commands,
+    wait_while_paused,
+)
 from gate.agent.diagnostics import (
+    ConversationBuffer,
     TerminateState,
     bump_turn_counter,
     classify_failure,
@@ -280,6 +286,87 @@ DEFAULT_INITIATIVE_MAX_TURNS = 200
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']
 
 
+@dataclass
+class LoopControlState:
+    """Loop-side state for the bidirectional command queue.
+
+    Owned by the run-driver; mutated by the :class:`LoopCommandSink`
+    when the operator queues a command. The SDK loop reads
+    ``cancel_requested`` at each turn boundary and ``paused`` whenever
+    it would otherwise advance to the next SDK message.
+
+    Why a mutable dataclass rather than passing flags through closures:
+
+      The SDK loop runs as an ``async for`` over ``query()`` — it
+      cannot be cleanly interrupted from outside. The natural
+      injection point is at every ResultMessage (end of a model turn),
+      where we drain the command queue and consult these flags. The
+      dataclass gives the sink + the loop a shared, mutable record
+      they can both observe.
+
+    ``injected_guidance`` records text the operator wanted the model
+    to see. In v1 we surface this via the conversation snapshot table
+    (Layer 3 diagnostics) + decision log — operators can inspect what
+    was injected post-run, and a v1.5 migration to
+    :class:`claude_agent_sdk.ClaudeSDKClient` will deliver these into
+    the model's input stream in real time. The CommandSink protocol
+    means no wiring changes downstream when that lands.
+    """
+
+    cancel_requested: bool = False
+    cancel_reason: str | None = None
+    paused: bool = False
+    injected_guidance: list[str] = field(default_factory=list)
+
+
+@dataclass
+class LoopCommandSink:
+    """Concrete :class:`CommandSink` wired to the run-driver loop state.
+
+    Holds references to the :class:`LoopControlState` and the
+    :class:`ConversationBuffer` so each command handler can mutate the
+    right surface. Construction is trivial — the loop builds one of
+    these per run and passes it to :func:`drain_commands`.
+    """
+
+    state: LoopControlState
+    buffer: ConversationBuffer
+
+    def request_cancel(self, reason: str) -> None:
+        # First cancel wins — operators may queue several
+        # back-to-back; we keep the first reason so the failure
+        # column attribution is stable.
+        if not self.state.cancel_requested:
+            self.state.cancel_requested = True
+            self.state.cancel_reason = reason
+
+    def set_pause(self, paused: bool) -> None:
+        self.state.paused = paused
+
+    def inject_user_message(self, text: str) -> None:
+        # Two side-effects in one helper:
+        #   1. Buffer the text for the loop to surface on the next
+        #      poll (v1.5 will pump these into ClaudeSDKClient.query).
+        #   2. Record the synthetic UserMessage in the conversation
+        #      buffer so the snapshot table preserves what the
+        #      operator said for post-run forensics.
+        self.state.injected_guidance.append(text)
+        self.buffer.append(
+            {
+                'role': 'user',
+                'class': 'OperatorInjectedMessage',
+                'content': text,
+                'extras': {'source': 'inject_guidance'},
+            }
+        )
+
+
+# Sanity check: ensure LoopCommandSink actually satisfies the Protocol
+# at type-check time. mypy will catch a missing method here before any
+# runtime invocation.
+_loop_sink_satisfies_protocol: type[CommandSink] = LoopCommandSink
+
+
 def _default_repo_root(repo_name: str) -> Path:
     """Resolve the consumer-repo checkout path. Honours these in order:
 
@@ -481,6 +568,40 @@ async def run_initiative(
     install_terminate_handler(terminate_state)
     conversation_buffer = terminate_state.buffer
 
+    # Bidirectional command queue (initiative
+    # agent-add-command-queue-with-injection). Operator-issued commands
+    # land in ``agent_run_commands`` rows; the SDK loop drains them at
+    # each turn boundary and applies the sink's primitives. DB-less
+    # mode no-ops the drain — laptop runs see zero command-queue
+    # overhead per turn.
+    loop_state = LoopControlState()
+    command_sink = LoopCommandSink(state=loop_state, buffer=conversation_buffer)
+
+    async def _drain_then_check_cancel() -> bool:
+        """Drain pending commands, returning True iff cancel was requested.
+
+        Wraps the common turn-boundary work into one helper so the
+        message-loop body stays readable. The cancel check happens
+        AFTER the drain so a cancel queued in the same batch as
+        other commands is observed in the same poll.
+        """
+        await drain_commands(run_id_for_first_turn, command_sink)
+        if loop_state.paused and not loop_state.cancel_requested:
+            click.echo(
+                click.style(
+                    '\n  ⏸ paused by operator command — waiting for resume',
+                    fg='yellow',
+                ),
+                err=True,
+            )
+            await wait_while_paused(
+                run_id_for_first_turn,
+                command_sink,
+                is_paused=lambda: loop_state.paused and not loop_state.cancel_requested,
+            )
+            click.echo(click.style('  ▶ resumed', fg='yellow'), err=True)
+        return loop_state.cancel_requested
+
     exit_code = 0
     last_turn_count = 0
     last_cost: float | None = None
@@ -614,6 +735,56 @@ async def run_initiative(
                     err=True,
                 )
                 exit_code = 1 if message.is_error else 0
+
+                # Bidirectional command queue — drain at the natural
+                # turn boundary. The drain itself is sub-millisecond
+                # when no commands are pending (partial index covers
+                # the SELECT). When a cancel arrives, we break out of
+                # the SDK iterator below so the agent shuts down
+                # gracefully — Layer 1 diagnostics + the failure
+                # column attribution flow through the existing
+                # cancellation path.
+                cancel_requested = await _drain_then_check_cancel()
+                if cancel_requested:
+                    reason = loop_state.cancel_reason or 'cancelled_by_operator: <no reason given>'
+                    click.echo(
+                        click.style(
+                            f'\n  ✋ cancel requested by operator — exiting gracefully ({reason})',
+                            fg='red',
+                            bold=True,
+                        ),
+                        err=True,
+                    )
+                    # Layer 1 — surface the cancel reason in the
+                    # error column. We use the well-known
+                    # ``silent_terminate:`` prefix so the existing
+                    # vocabulary catches it; the full reason text
+                    # (including the operator-provided context) goes
+                    # in the suffix per the
+                    # ``<reason>: <context>`` format used everywhere
+                    # else.
+                    await write_failure_reason(
+                        run_id_for_first_turn,
+                        f'silent_terminate: {reason}',
+                    )
+                    await record_decision(
+                        run_id_for_first_turn,
+                        'terminate',
+                        f'agent cancelled by operator command: {reason}',
+                        payload={'reason': reason, 'turn_count': last_turn_count},
+                    )
+                    # Persist a snapshot while the DB connection is
+                    # still hot — exit_code=2 below would otherwise
+                    # fall through to the success-path snapshot
+                    # writer, which is fine, but writing here gives
+                    # us the explicit ``cancelled`` terminal_reason.
+                    await persist_conversation_snapshot(
+                        run_id_for_first_turn,
+                        conversation_buffer,
+                        terminal_reason='cancelled',
+                    )
+                    exit_code = 2
+                    break
     except Exception as exc:  # noqa: BLE001 — SDK raises bare Exception; we narrow via turn-count heuristic
         # The SDK's `receive_messages()` raises a generic Exception when the consumer-set
         # `max_turns` is reached (see issue #913) AND for genuine transport errors. We use

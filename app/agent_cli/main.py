@@ -41,6 +41,7 @@ from app.agent_cli.commands.health import health as health_cmd
 from app.agent_cli.commands.health import health_mcp as health_mcp_cmd
 from app.agent_cli.commands.lessons import lessons as lessons_cmd
 from app.agent_cli.commands.mcps import mcps as mcps_cmd
+from app.agent_cli.commands.ops import ops as ops_cmd
 from app.agent_cli.commands.roles import roles as roles_cmd
 from app.agent_cli.commands.runs import runs as runs_cmd
 from app.agent_cli.commands.topology import topology as topology_cmd
@@ -82,6 +83,7 @@ cli.add_command(mcps_cmd)
 cli.add_command(roles_cmd)
 cli.add_command(lessons_cmd)
 cli.add_command(runs_cmd)
+cli.add_command(ops_cmd)
 cli.add_command(config_cmd)
 
 # Nested: `leartech-agent health mcp <name>` lives under the health group's

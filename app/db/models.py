@@ -21,6 +21,7 @@ from typing import Any
 
 from sqlalchemy import (
     BigInteger,
+    CheckConstraint,
     DateTime,
     ForeignKey,
     Index,
@@ -296,4 +297,93 @@ class AgentRunSnapshotRow(Base):
         return (
             f'AgentRunSnapshotRow(run_id={self.run_id!r}, '
             f'message_count={self.message_count}, reason={self.terminal_reason!r})'
+        )
+
+
+# Command-type vocabulary for the bidirectional command queue. Mirrored
+# at the DB level by the ``CheckConstraint`` below + the
+# ``CHECK (command_type IN (...))`` clause in migration 0007 — three
+# checks defend in depth so a typo from any of the three writer paths
+# (REST endpoint, CLI, raw SQL) is rejected.
+AGENT_RUN_COMMAND_TYPES: frozenset[str] = frozenset(
+    {'cancel', 'pause', 'resume', 'inject_guidance'},
+)
+
+
+class AgentRunCommandRow(Base):
+    """One row per operator-issued command targeting a running agent.
+
+    Implements the v1 bidirectional control surface from initiative
+    ``agent-add-command-queue-with-injection``. Today an initiative run
+    is fire-and-forget — once spawned the operator can only watch. This
+    table is the agent's inbox: between turns the SDK loop polls for
+    unacked rows whose ``run_id`` matches its own, processes them in
+    submission order, and writes ``acked_at`` + an ``ack_message`` back.
+
+    Command vocabulary (CHECK-enforced at the DB layer; see
+    :data:`AGENT_RUN_COMMAND_TYPES` for the in-process duplicate):
+
+      ``cancel``           graceful shutdown. ``payload.reason`` is
+                           surfaced as the failure reason in
+                           ``initiative_runs.error`` (per Layer 1 of
+                           comprehensive failure diagnostics) and a
+                           snapshot is persisted before exit.
+
+      ``pause``            agent waits at the next turn boundary for a
+                           matching ``resume`` row.
+
+      ``resume``           releases a paused agent.
+
+      ``inject_guidance``  ``payload.text`` is appended to the
+                           conversation as a UserMessage so the model
+                           sees it as if the operator had spoken.
+
+    The hot read path is ``SELECT * FROM agent_run_commands WHERE
+    run_id = ? AND acked_at IS NULL ORDER BY submitted_at`` — covered
+    by the partial index defined in migration 0007. SQLite (tests)
+    silently degrades the WHERE clause to a regular index; the query
+    plan is fine on either backend.
+    """
+
+    __tablename__ = 'agent_run_commands'
+
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, 'sqlite'),
+        primary_key=True,
+        autoincrement=True,
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey('initiative_runs.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    command_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    payload: Mapped[Any | None] = mapped_column(JSONBOrJSON, nullable=True)
+    submitted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    acked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ack_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "command_type IN ('cancel', 'pause', 'resume', 'inject_guidance')",
+            name='ck_agent_run_commands_command_type',
+        ),
+        # Non-partial fallback index — covers the same query shape but
+        # without the partial predicate (which SQLite's CREATE INDEX
+        # syntax does support, but the SQLAlchemy ORM-level Index
+        # surface keeps things portable across both engines). The
+        # Postgres migration (0007) provides the partial variant in
+        # production; here we declare the secondary form so SQLite
+        # tests still get an index for the same predicate.
+        Index('ix_agent_run_commands_run_id_submitted_at', 'run_id', 'submitted_at'),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f'AgentRunCommandRow(id={self.id!r}, run_id={self.run_id!r}, '
+            f'type={self.command_type!r}, acked={self.acked_at is not None})'
         )

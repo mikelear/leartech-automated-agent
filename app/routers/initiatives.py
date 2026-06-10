@@ -21,7 +21,9 @@ import json
 import logging
 import os
 import subprocess
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from fastapi import APIRouter, Body, HTTPException
 from fastapi.responses import PlainTextResponse
@@ -29,8 +31,15 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.db import is_db_enabled
 from app.db import session as db_session
+from app.db.agent_run_commands import (
+    AgentRunCommandRecord,
+    UnknownCommandTypeError,
+    insert_command,
+    list_commands,
+)
 from app.db.initiative_catalog import get_initiative
 from app.db.initiative_catalog import list_initiatives as list_db_initiatives
+from app.db.models import AGENT_RUN_COMMAND_TYPES
 from app.state import (
     InitiativeRecord,
     list_records,
@@ -886,3 +895,192 @@ async def validate_initiative_body_alias(
     :func:`validate_initiative_body` so the two routes can never drift.
     """
     return await validate_initiative_body(body=body)
+
+
+# ─── Bidirectional command queue ───────────────────────────────────────
+
+
+class SubmitCommandRequest(BaseModel):
+    """Request body for ``POST /initiatives/{run_id}/commands``.
+
+    ``payload`` is a free-form JSON object whose shape is per-command:
+
+      - ``cancel`` — ``{"reason": "<text>"}`` (optional)
+      - ``pause`` — ignored
+      - ``resume`` — ignored
+      - ``inject_guidance`` — ``{"text": "<text>"}`` (required)
+
+    The endpoint validates ``command_type`` against the catalog
+    vocabulary but leaves payload shape to the agent-side command
+    handler. The motivation: payload schemas evolve faster than the
+    REST contract — e.g. a future ``cancel`` payload may carry
+    ``{"reason": "...", "preserve_snapshot": true}`` and we don't want
+    every CLI / orchestrator update to require an endpoint version bump.
+    """
+
+    command_type: str = Field(
+        description='One of: cancel, pause, resume, inject_guidance.',
+        min_length=1,
+        max_length=32,
+    )
+    payload: dict[str, Any] | None = Field(
+        default=None,
+        description='Free-form per-command payload. See command_type docs.',
+    )
+
+
+class SubmitCommandResponse(BaseModel):
+    """Response from ``POST /initiatives/{run_id}/commands``.
+
+    Returns just the IDs the operator needs to confirm delivery — the
+    full record is available via the list endpoint. Keeping the
+    response thin lets the CLI's ack-print path stay one line.
+    """
+
+    command_id: int
+    submitted_at: datetime
+
+
+class CommandRecordResponse(BaseModel):
+    """Response shape for the list endpoint — mirrors
+    :class:`AgentRunCommandRecord` so FastAPI can serialise the
+    dataclass directly with no extra conversion."""
+
+    id: int
+    run_id: str
+    command_type: str
+    payload: Any | None = None
+    submitted_at: datetime
+    acked_at: datetime | None = None
+    ack_message: str | None = None
+
+    @classmethod
+    def from_record(cls, record: AgentRunCommandRecord) -> CommandRecordResponse:
+        return cls(
+            id=record.id,
+            run_id=record.run_id,
+            command_type=record.command_type,
+            payload=record.payload,
+            submitted_at=record.submitted_at,
+            acked_at=record.acked_at,
+            ack_message=record.ack_message,
+        )
+
+
+def _require_db_enabled_for_commands() -> None:
+    """Both command endpoints require the DB.
+
+    The agent loop polls the same table; if the DB is disabled the
+    operator's command would never reach the agent. Surface a 503 with
+    a clear message so the operator knows it isn't a generic outage.
+    """
+    if not is_db_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail='Command queue requires LEARTECH_INITIATIVE_DB_DSN. '
+            'This service instance is running in filesystem-only mode.',
+        )
+
+
+@router.post('/{run_id}/commands', response_model=SubmitCommandResponse, status_code=201)
+async def submit_command(run_id: str, request: SubmitCommandRequest) -> SubmitCommandResponse:
+    """Queue a command for the agent driving ``run_id`` to process.
+
+    Lookups happen in two stages:
+
+    1. The run is fetched from ``initiative_runs`` (404 if missing).
+    2. If the run is terminal, return 409 — commands against a
+       finished run are no-ops that would confuse operators.
+    3. The command is appended; the agent's next-turn poll picks it up
+       within one turn boundary (~5-15s typical).
+
+    Validation:
+
+      - Unknown ``command_type`` → 422.
+      - ``inject_guidance`` without payload.text → 422 (an empty
+        injection is almost always a CLI mistake; the user wanted to
+        say something).
+
+    Idempotency: NOT enforced. The operator can intentionally inject
+    the same guidance twice (e.g. emphasising it). If the client wants
+    idempotency it can carry an opaque ID in the payload and the agent
+    handler can dedupe — but the storage layer treats every POST as a
+    new row.
+    """
+    _require_db_enabled_for_commands()
+
+    if request.command_type not in AGENT_RUN_COMMAND_TYPES:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f'Unknown command_type {request.command_type!r}; expected one of {sorted(AGENT_RUN_COMMAND_TYPES)}'
+            ),
+        )
+    if request.command_type == 'inject_guidance':
+        text = (request.payload or {}).get('text')
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(
+                status_code=422,
+                detail='inject_guidance requires payload.text to be a non-empty string.',
+            )
+
+    record = await get_record(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f'No initiative with id {run_id!r}')
+    if record.status in {'complete', 'failed', 'cancelled', 'orphaned', 'timed_out'}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f'Run {run_id!r} is already terminal (status={record.status!r}); '
+                'commands cannot be queued against a finished run.'
+            ),
+        )
+
+    try:
+        async with db_session() as sess:
+            inserted = await insert_command(
+                sess,
+                run_id=run_id,
+                command_type=request.command_type,
+                payload=request.payload,
+            )
+    except UnknownCommandTypeError as exc:
+        # Defence in depth — the request-level validation above should
+        # have caught this; re-raising as 422 keeps the contract clean
+        # in case a future caller bypasses the model layer.
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    logger.info(
+        'command queued for run %s: type=%s id=%d',
+        run_id,
+        inserted.command_type,
+        inserted.id,
+    )
+    return SubmitCommandResponse(command_id=inserted.id, submitted_at=inserted.submitted_at)
+
+
+@router.get('/{run_id}/commands', response_model=list[CommandRecordResponse])
+async def list_run_commands(
+    run_id: str,
+    unacked_only: bool = False,
+) -> list[CommandRecordResponse]:
+    """Return queued commands for ``run_id`` (newest first per submission).
+
+    Operator surface for the bidirectional queue — pairs with the
+    POST endpoint so the CLI's ``leartech-agent ops`` group can list
+    pending commands as well as queue them. ``unacked_only=true``
+    matches the agent's poll query exactly and is useful for "is my
+    cancel still pending?" checks.
+
+    Returns an empty list (NOT 404) when the run has no commands —
+    the absence of any command is itself meaningful information and
+    deserves a 200 with ``[]`` rather than an error.
+    """
+    _require_db_enabled_for_commands()
+
+    record = await get_record(run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f'No initiative with id {run_id!r}')
+
+    async with db_session() as sess:
+        records = await list_commands(sess, run_id=run_id, unacked_only=unacked_only)
+    return [CommandRecordResponse.from_record(r) for r in records]
