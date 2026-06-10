@@ -79,6 +79,89 @@ leartech-claude-key() {
 }
 ```
 
+## Operator CLI — `leartech-agent`
+
+The `leartech-agent` console_script is the operator-facing surface for the deployed service. It can be installed once, globally, without cloning the repo and pointed at any cluster's orchestrator + agent ingress via flag, env, or per-user config.
+
+### Install (no repo clone)
+
+The fastest path is `pipx` against the GitHub HEAD:
+
+```sh
+pipx install git+https://github.com/mikelear/leartech-automated-agent.git@main
+leartech-agent --version
+leartech-agent health    # hits the default cluster (gcp-staging)
+```
+
+Upgrade later with `pipx upgrade leartech-automated-agent`.
+
+A PyPI/private-index release (`leartech-agent` package) is planned but not required for the current operator workflow — pipx + GitHub HEAD is the supported entry point today.
+
+### Point at a different cluster
+
+The CLI resolves URLs (orchestrator + agent) in this priority order:
+
+1. Explicit `--orch-url` / `--url` flag (highest)
+2. `LEARTECH_ORCH_URL` / `LEARTECH_AGENT_URL` env var
+3. `~/.config/leartech-agent/config.yaml` — per-cluster URL map (see below)
+4. Built-in staging defaults (`gcp-staging`, `az-staging`)
+
+Manage the on-disk config via subcommands:
+
+```sh
+leartech-agent config show
+leartech-agent config set-cluster gcp-prod \
+    --orch-url https://leartech-orchestrator.product-first.com \
+    --agent-url https://leartech-automated-agent.product-first.com
+leartech-agent config use-cluster gcp-prod   # flips default_cluster:
+```
+
+The config file uses the shape:
+
+```yaml
+default_cluster: gcp-staging
+clusters:
+  gcp-staging:
+    orch_url: https://leartech-orchestrator-jx-staging.jx.leartech.com
+    agent_url: https://leartech-automated-agent-jx-staging.jx.leartech.com
+  az-staging:
+    orch_url: https://leartech-orchestrator-jx-staging.az.leartech.com
+    agent_url: https://leartech-automated-agent-jx-staging.az.leartech.com
+```
+
+The same file is reusable by the future MCP-for-Claude wrapper — keep edits there, not in source.
+
+### Interactive chat (`leartech-agent chat`)
+
+`POST /chat` on the orchestrator preserves conversation state across turns via a `conversation_id`. The `chat` REPL threads that id through the session so successive messages share context:
+
+```sh
+leartech-agent chat                          # default cluster's orchestrator
+leartech-agent chat --cluster az-staging     # cross-cluster
+leartech-agent chat --continue conv-abc123   # resume a prior conversation
+```
+
+In-REPL slash commands:
+
+| Command | Effect |
+|---|---|
+| `:exit` / `:q` | Leave the REPL |
+| `:save [path]` | Write transcript to a markdown file |
+| `:new` | Drop the conversation id and start fresh |
+| `:cost` | Show the session's running cost |
+| `:help` | Print the command list |
+
+### Recent-by-default listings
+
+`leartech-agent runs list` defaults to the last 24h so morning triage doesn't page through last week's archive:
+
+```sh
+leartech-agent runs list                  # last 24h
+leartech-agent runs list --since 7d       # last 7 days
+leartech-agent runs list --since 2026-06-01
+leartech-agent runs list --all            # full history
+```
+
 ## Status
 
 **Phase B v1 — service scaffolding.** Repository structure mirrors leartech-ai-classifier; FastAPI scaffold + routers in place; substantive endpoint wiring (initiative runtime, lessons catalog) lands in v1.5. CLI commands work today via `make initiative` etc.
