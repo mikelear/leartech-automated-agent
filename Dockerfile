@@ -37,6 +37,17 @@ COPY --chown=agent:agent README.md ./
 ENV UV_FROZEN=true
 RUN uv sync --frozen --no-cache --no-dev 2>/dev/null || uv sync --no-cache --no-dev
 
+# `uv sync` installs the project itself into /app/.venv, which materialises
+# the `[project.scripts]` entries (notably `leartech-agent`) under
+# /app/.venv/bin/. The ENTRYPOINT below uses an absolute path so uvicorn
+# works regardless of PATH — but operators running `kubectl exec <pod> --
+# leartech-agent ...` get a default login PATH of /usr/local/sbin:...:/bin,
+# which does NOT include the venv. Without this PATH extension,
+# `which leartech-agent` returns 1 inside the pod and the operator CLI
+# (introduced in PR #95) is effectively unreachable. Putting the venv on
+# PATH makes every project-scripts console entry callable as a bare command.
+ENV PATH="/app/.venv/bin:${PATH}"
+
 ENV PORT=8080
 ENV UV_CACHE_DIR=/tmp/uv-cache
 ENV LEARTECH_REPO_ROOT=/workspace
