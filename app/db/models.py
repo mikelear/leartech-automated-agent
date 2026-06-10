@@ -17,13 +17,46 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 
-from sqlalchemy import DateTime, Integer, Numeric, String, Text, func
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    Numeric,
+    String,
+    Text,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+from sqlalchemy.types import JSON, TypeDecorator
 
 
 class Base(DeclarativeBase):
     pass
+
+
+class JSONBOrJSON(TypeDecorator[Any]):
+    """JSONB on Postgres, JSON elsewhere (SQLite tests).
+
+    Mirrors the leartech-auth-service pattern: production uses Postgres
+    JSONB (TOAST + GIN index support); tests use SQLite which has no
+    native JSONB but its JSON1 extension is fine for round-tripping
+    Python dicts. Keeping a single column type lets the ORM model
+    declaration match both backends without dialect-conditional logic
+    in every call site.
+    """
+
+    impl = JSON
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect: Any) -> Any:
+        if dialect.name == 'postgresql':
+            return dialect.type_descriptor(JSONB())
+        return dialect.type_descriptor(JSON())
 
 
 class InitiativeRow(Base):
@@ -147,3 +180,120 @@ class InitiativeRunRow(Base):
 
     def __repr__(self) -> str:
         return f'InitiativeRunRow(id={self.id!r}, status={self.status!r})'
+
+
+class AgentRunDecisionRow(Base):
+    """One row per notable agent-loop decision (Layer 2 — decision log).
+
+    Operators query this table to reconstruct WHAT the agent did
+    turn-by-turn after a failure, without pod-log archaeology. The
+    typical access pattern is
+
+        SELECT turn_index, kind, summary
+        FROM agent_run_decisions
+        WHERE run_id = 'X'
+        ORDER BY turn_index, id;
+
+    so ``run_id`` is indexed and rows are ordered by INSERT time within
+    a turn (the BIGSERIAL ``id`` provides that secondary ordering).
+
+    ``kind`` is a short discriminator (``tool_call`` / ``decision`` /
+    ``wait`` / ``gate`` / ``terminate`` / ``sigterm`` / etc.). Kept
+    free-form string rather than an Enum so adding a new kind doesn't
+    require a migration; the value set is documented in
+    ``gate.agent.diagnostics``.
+
+    ``payload`` is optional JSON — tool inputs/outputs, gate verdict
+    summary, etc. Kept opaque at this layer; consumers parse on read.
+    """
+
+    __tablename__ = 'agent_run_decisions'
+
+    # ``with_variant`` lets SQLAlchemy map this to BIGINT on Postgres (the
+    # production target for BIGSERIAL ids) and plain INTEGER on SQLite
+    # (where INTEGER PRIMARY KEY is the only column type that auto-bumps
+    # via rowid). Without this, the SQLite test bootstrap inserts NULL
+    # into a BIGINT PK and hits a NOT NULL constraint failure.
+    id: Mapped[int] = mapped_column(
+        BigInteger().with_variant(Integer, 'sqlite'),
+        primary_key=True,
+        autoincrement=True,
+    )
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey('initiative_runs.id', ondelete='CASCADE'),
+        nullable=False,
+    )
+    turn_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    summary: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[Any | None] = mapped_column(JSONBOrJSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index('ix_agent_run_decisions_run_id', 'run_id'),
+        Index('ix_agent_run_decisions_created_at', created_at.desc()),
+    )
+
+    def __repr__(self) -> str:
+        return f'AgentRunDecisionRow(run_id={self.run_id!r}, turn={self.turn_index}, kind={self.kind!r})'
+
+
+class AgentRunSnapshotRow(Base):
+    """Full SDK conversation history per terminal run (Layer 3 — snapshot).
+
+    One row per run (``run_id`` is the primary key). ``messages`` is
+    the verbatim list of SDK messages — each entry is a dict with at
+    minimum ``{role, content_summary, ...}``. The diagnostics module is
+    responsible for shape-normalising SDK message objects into JSON
+    before persisting; this column stays opaque to the schema.
+
+    ``message_count`` is denormalised so operators can run
+    ``SELECT run_id, message_count, terminal_reason FROM
+    agent_run_snapshots ORDER BY created_at DESC LIMIT 20`` without
+    parsing JSONB.
+
+    ``terminal_reason`` is the same vocabulary as
+    ``initiative_runs.error`` — kept here as well so operators can
+    pivot from the snapshot view to the run view without a join.
+
+    ``updated_at`` distinct from ``created_at`` accommodates the
+    SIGTERM+normal-terminal race: if the natural terminal write fired
+    first, the SIGTERM handler's UPSERT updates the same row in place
+    rather than failing on the PK conflict (handled at the CRUD layer
+    via ``ON CONFLICT DO UPDATE``).
+    """
+
+    __tablename__ = 'agent_run_snapshots'
+
+    run_id: Mapped[str] = mapped_column(
+        String(64),
+        ForeignKey('initiative_runs.id', ondelete='CASCADE'),
+        primary_key=True,
+    )
+    messages: Mapped[Any] = mapped_column(JSONBOrJSON, nullable=False)
+    message_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    terminal_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        nullable=False,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (Index('ix_agent_run_snapshots_created_at', created_at.desc()),)
+
+    def __repr__(self) -> str:
+        return (
+            f'AgentRunSnapshotRow(run_id={self.run_id!r}, '
+            f'message_count={self.message_count}, reason={self.terminal_reason!r})'
+        )

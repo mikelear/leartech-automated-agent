@@ -39,9 +39,10 @@ def test_clone_repo_uses_git_not_gh_with_token_in_url(tmp_path: Path) -> None:
         patch('gate.agent.initiative.subprocess.run') as mock_run,
     ):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
-        exit_code = _clone_repo(qualified_repo='mikelear/leartech-automated-agent', cwd=target)
+        exit_code, failure_reason = _clone_repo(qualified_repo='mikelear/leartech-automated-agent', cwd=target)
 
     assert exit_code == 0
+    assert failure_reason is None, 'success path must report no failure reason'
     mock_run.assert_called_once()
     args = mock_run.call_args[0][0]
     # First two args identify the command — must be `git clone`, not `gh repo clone`.
@@ -67,9 +68,15 @@ def test_clone_repo_returns_2_when_gh_token_missing(tmp_path: Path) -> None:
         patch.dict('os.environ', {}, clear=True),
         patch('gate.agent.initiative.subprocess.run') as mock_run,
     ):
-        exit_code = _clone_repo(qualified_repo='mikelear/leartech-automated-agent', cwd=target)
+        exit_code, failure_reason = _clone_repo(qualified_repo='mikelear/leartech-automated-agent', cwd=target)
 
     assert exit_code == 2
+    # Layer 1 — comprehensive-failure-diagnostics: the failure reason
+    # surfaces the GH_TOKEN gap so the run-driver can persist it to
+    # ``initiative_runs.error`` via ``write_failure_reason``.
+    assert failure_reason is not None
+    assert failure_reason.startswith('clone_failed:')
+    assert 'GH_TOKEN' in failure_reason
     mock_run.assert_not_called()
 
 
@@ -91,10 +98,15 @@ def test_clone_repo_returns_2_on_git_failure_and_redacts_token(tmp_path: Path, c
         patch('gate.agent.initiative.subprocess.run') as mock_run,
     ):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=128, stdout='', stderr=leaky_stderr)
-        exit_code = _clone_repo(qualified_repo='foo/bar', cwd=target)
+        exit_code, failure_reason = _clone_repo(qualified_repo='foo/bar', cwd=target)
 
     assert exit_code == 2
     captured = capsys.readouterr()  # type: ignore[attr-defined]
     # The token must NOT appear in any echoed output.
     assert fake_token not in captured.err
     assert '***REDACTED***' in captured.err
+    # Layer 1 — failure reason must also be token-free; same redaction
+    # path runs before constructing the reason string.
+    assert failure_reason is not None
+    assert failure_reason.startswith('clone_failed:')
+    assert fake_token not in failure_reason

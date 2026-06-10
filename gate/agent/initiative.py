@@ -35,6 +35,16 @@ from app.db import dispose_engine as _dispose_engine
 from app.db import init_engine as _init_engine
 from app.db import is_db_enabled
 from gate.agent.calibrations import load_jx3_calibration
+from gate.agent.diagnostics import (
+    TerminateState,
+    bump_turn_counter,
+    classify_failure,
+    install_terminate_handler,
+    persist_conversation_snapshot,
+    record_decision,
+    uninstall_terminate_handler,
+    write_failure_reason,
+)
 from gate.agent.initiative_prompt import INITIATIVE_SYSTEM_PROMPT
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
@@ -284,7 +294,7 @@ def _default_repo_root(repo_name: str) -> Path:
     return Path('~/leartech').expanduser() / repo_short
 
 
-def _clone_repo(*, qualified_repo: str, cwd: Path) -> int:
+def _clone_repo(*, qualified_repo: str, cwd: Path) -> tuple[int, str | None]:
     """Clone `qualified_repo` (e.g. `mikelear/leartech-automated-agent`) into `cwd`.
 
     Uses direct `git clone` over HTTPS with the GH_TOKEN as a basic-auth user
@@ -293,8 +303,13 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> int:
     git wire protocol. That makes the clone immune to the 5000pts/h GraphQL
     rate-limit bucket that `gh repo clone` consumed.
 
-    Returns 0 on success, non-zero on failure. The token is never logged: we
-    redact it from any echoed stderr before surfacing.
+    Returns ``(exit_code, failure_reason)``. The failure reason is the
+    Layer-1-classified one-liner (e.g. ``clone_failed: GH_TOKEN unset``)
+    when ``exit_code != 0``; None on success. The caller writes it to
+    ``initiative_runs.error`` via ``write_failure_reason``.
+
+    The token is never logged: we redact it from any echoed stderr
+    before surfacing AND before constructing the failure reason.
     """
     gh_token = os.environ.get('GH_TOKEN')
     if not gh_token:
@@ -304,7 +319,7 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> int:
             f'or set GH_TOKEN.',
             err=True,
         )
-        return 2
+        return 2, f'clone_failed: GH_TOKEN unset, cannot clone {qualified_repo}'
     click.echo(
         click.style(f'→ cloning {qualified_repo} → {cwd}', fg='cyan'),
         err=True,
@@ -325,8 +340,18 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> int:
             f'Clone failed (exit {result.returncode}):\n{redacted_stderr}',
             err=True,
         )
-        return 2
-    return 0
+        # Surface a concise reason for the Layer-1 error column. Pick the
+        # most informative line from stderr; default to the exit code
+        # otherwise. "Repository not found" is the canonical
+        # missing-collaborator shape called out in the initiative spec.
+        snippet_lines = [line for line in redacted_stderr.splitlines() if line.strip()]
+        snippet = snippet_lines[-1] if snippet_lines else f'git exit {result.returncode}'
+        if 'Repository not found' in redacted_stderr or 'not found' in redacted_stderr.lower():
+            reason = f'clone_failed: Repository not found (likely missing bot collaborator) for {qualified_repo}'
+        else:
+            reason = f'clone_failed: {snippet[:160]}'
+        return 2, reason
+    return 0, None
 
 
 async def run_initiative(
@@ -365,6 +390,18 @@ async def run_initiative(
 
     primary = initiative.primary
     cwd = repo_root or _default_repo_root(primary.qualified_repo)
+
+    # V5 D2.2 — the spawning router writes the run_id into the Job's env
+    # so the agent loop can record the wall-clock moment its first SDK
+    # turn fires. Unset on laptop runs (no router involved) → diagnostics
+    # writes become no-ops, by design. We resolve this BEFORE the clone
+    # so a clone failure can still attribute itself to the right run.
+    run_id_for_first_turn = os.environ.get('LEARTECH_RUN_ID') or None
+    db_engine_initialised = False
+    if run_id_for_first_turn and is_db_enabled():
+        _init_engine()
+        db_engine_initialised = True
+
     if not cwd.exists():
         # Cluster mode: the consumer repo isn't pre-mounted, so clone it from GitHub
         # on demand. We use direct `git clone` over HTTPS (with GH_TOKEN injected
@@ -373,8 +410,18 @@ async def run_initiative(
         # with operator-side `gh` usage. Direct git protocol hits no API.
         # Laptop mode normally has the repo at ~/leartech/<repo>/ already, so this
         # branch only fires on a fresh dev machine or the deployed pod.
-        clone_exit = _clone_repo(qualified_repo=primary.qualified_repo, cwd=cwd)
+        clone_exit, clone_reason = _clone_repo(qualified_repo=primary.qualified_repo, cwd=cwd)
         if clone_exit != 0:
+            # Layer 1 — Persist the classified clone failure to
+            # ``initiative_runs.error`` before exiting so the operator
+            # has the reason in the DB without pod-log archaeology.
+            if clone_reason is not None:
+                await write_failure_reason(run_id_for_first_turn, clone_reason)
+            if db_engine_initialised:
+                try:
+                    await _dispose_engine()
+                except Exception as exc:  # noqa: BLE001
+                    click.echo(f'  (db engine dispose failed: {exc})', err=True)
             return RunSummary(exit_code=clone_exit)
 
     # Compose: JX3 platform calibration (static, shipped in wheel) → encoded
@@ -417,19 +464,22 @@ async def run_initiative(
     click.echo(click.style(f'  cwd: {cwd}', fg='green'), err=True)
     click.echo('', err=True)
 
-    # V5 D2.2 — the spawning router writes the run_id into the Job's env
-    # so the agent loop can record the wall-clock moment its first SDK
-    # turn fires. Unset on laptop runs (no router involved) → the hook
-    # is a no-op. When set AND a DSN is configured we initialise the
-    # engine here so ``mark_first_turn`` has a session factory; the
-    # dispose call in ``finally`` is paired so we don't leak connections
-    # if the loop raises.
-    run_id_for_first_turn = os.environ.get('LEARTECH_RUN_ID') or None
-    db_engine_initialised = False
-    if run_id_for_first_turn and is_db_enabled():
-        _init_engine()
-        db_engine_initialised = True
+    # NOTE: ``run_id_for_first_turn`` + ``db_engine_initialised`` are
+    # already resolved above the clone block — they need to be available
+    # so a clone failure can attribute itself to the run via Layer 1.
     first_turn_recorded = False
+
+    # Layer 2/3/4 — install the SIGTERM/atexit handler with a fresh
+    # ``TerminateState`` keyed on this run. The handler reads from the
+    # state at fire time so we can mutate ``last_turn_count`` /
+    # ``buffer.messages`` throughout the loop and the snapshot is always
+    # current.
+    terminate_state = TerminateState(
+        run_id=run_id_for_first_turn,
+        max_turns=max_turns,
+    )
+    install_terminate_handler(terminate_state)
+    conversation_buffer = terminate_state.buffer
 
     exit_code = 0
     last_turn_count = 0
@@ -498,6 +548,11 @@ async def run_initiative(
 
     try:
         async for message in query(prompt=user_prompt, options=options):
+            # Layer 3 — buffer EVERY SDK message so the snapshot table can
+            # be reconstructed on terminal (success, failure, or SIGTERM).
+            # Normalisation happens inside ConversationBuffer.append.
+            conversation_buffer.append(message)
+
             if isinstance(message, AssistantMessage):
                 await _record_first_turn_once()
                 for block in message.content:
@@ -505,6 +560,16 @@ async def run_initiative(
                         click.echo(block.text)
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
+                        # Layer 2 — one decision row per tool invocation so
+                        # the operator can read the agent's turn-by-turn
+                        # trajectory from the DB. ``payload`` carries the
+                        # tool input so the row is self-contained.
+                        await record_decision(
+                            run_id_for_first_turn,
+                            'tool_call',
+                            f'{block.name}',
+                            payload={'tool': block.name, 'input': block.input},
+                        )
                     elif isinstance(block, ThinkingBlock):
                         pass
             elif isinstance(message, UserMessage):
@@ -517,9 +582,27 @@ async def run_initiative(
                         _maybe_emit_pr_open(block)
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
+                terminate_state.last_turn_count = last_turn_count
                 usage = message.usage or {}
                 cost = message.total_cost_usd if message.total_cost_usd is not None else 0.0
                 last_cost = cost
+                # Layer 2 — bump the running turn counter + record a
+                # 'turn_end' decision row so the operator's reconstruction
+                # has natural turn boundaries even when no tool was called
+                # in this turn.
+                turn_idx = bump_turn_counter(run_id_for_first_turn) if run_id_for_first_turn else 0
+                await record_decision(
+                    run_id_for_first_turn,
+                    'turn_end',
+                    f'turn {turn_idx} ended (sdk num_turns={message.num_turns}, cost=${cost:.4f})',
+                    payload={
+                        'num_turns': message.num_turns,
+                        'cost_usd': cost,
+                        'is_error': message.is_error,
+                        'usage': usage,
+                    },
+                    turn_index=turn_idx,
+                )
                 click.echo(
                     click.style(
                         f'\n--- turns={message.num_turns}  '
@@ -584,6 +667,65 @@ async def run_initiative(
                 ),
             )
 
+        # Layer 1 — Write the classified failure reason to
+        # initiative_runs.error before exiting the exception branch.
+        # ``classify_failure`` chooses the right vocabulary: cap-hit gets
+        # ``agent_sdk_max_turns_exceeded``; everything else gets
+        # ``agent_sdk_error: <ExcClass>: <message>``.
+        reason = classify_failure(
+            exc,
+            last_turn_count=last_turn_count,
+            max_turns=max_turns,
+        )
+        await write_failure_reason(run_id_for_first_turn, reason)
+        # Layer 3 — Persist whatever conversation history is in-flight
+        # at the moment of the crash. This is the only chance: the pod
+        # may not reach the natural-terminal snapshot writer below.
+        await persist_conversation_snapshot(
+            run_id_for_first_turn,
+            conversation_buffer,
+            terminal_reason='failed',
+        )
+        # Layer 2 — Record the terminal decision so the operator's
+        # ``SELECT ... FROM agent_run_decisions`` view captures the
+        # moment of failure (not just the leading tool calls).
+        await record_decision(
+            run_id_for_first_turn,
+            'terminate',
+            f'agent terminated with exception: {reason}',
+            payload={'reason': reason, 'turn_count': last_turn_count, 'max_turns': max_turns},
+        )
+
+    # Layer 3 — persist the full conversation snapshot on natural
+    # terminal (success path). The exception branch above already
+    # persisted on failure; this is the success-side companion. Doing it
+    # BEFORE engine dispose so we still have a live connection pool.
+    # The SIGTERM handler defers to this when we set
+    # ``natural_terminal_completed`` below.
+    if exit_code == 0:
+        terminal_reason_snapshot = 'complete'
+    else:
+        terminal_reason_snapshot = 'failed'
+    await persist_conversation_snapshot(
+        run_id_for_first_turn,
+        conversation_buffer,
+        terminal_reason=terminal_reason_snapshot,
+    )
+    await record_decision(
+        run_id_for_first_turn,
+        'terminate',
+        f'agent loop exited cleanly (exit_code={exit_code})',
+        payload={
+            'exit_code': exit_code,
+            'turn_count': last_turn_count,
+            'cost_usd': last_cost,
+        },
+    )
+    # Tell the SIGTERM/atexit handler to back off — the natural-terminal
+    # path has already written everything it would have flushed.
+    terminate_state.natural_terminal_completed = True
+    uninstall_terminate_handler()
+
     # V5 D2.2 — release the engine that ``mark_first_turn`` was sharing.
     # Paired with the eager init above so a long-running process doesn't
     # keep a connection pool alive past the SDK loop's lifetime. Tolerate
@@ -602,6 +744,28 @@ async def run_initiative(
             )
 
     pr_number = _resolve_pr_number(primary.qualified_repo, primary.branch)
+    # Layer 1 + 2 — classify the orphan-PR case. When the agent reports
+    # success but no PR exists on the branch, the operator needs to know.
+    # The decision log captures the classification; the error column
+    # carries the one-liner so a dashboard query surfaces it cheaply.
+    if pr_number is None and exit_code == 0:
+        orphan_reason = (
+            f'pr_link_missing: agent reported success but no open PR on {primary.qualified_repo}@{primary.branch}'
+        )
+        await write_failure_reason(run_id_for_first_turn, orphan_reason)
+        await record_decision(
+            run_id_for_first_turn,
+            'decision',
+            'classified as pr_link_missing — success without observable PR',
+            payload={'qualified_repo': primary.qualified_repo, 'branch': primary.branch},
+        )
+    elif pr_number is not None:
+        await record_decision(
+            run_id_for_first_turn,
+            'decision',
+            f'resolved PR #{pr_number} for {primary.qualified_repo}@{primary.branch}',
+            payload={'pr_number': pr_number},
+        )
     if crash_sticky_body is not None:
         _post_crash_sticky(
             qualified_repo=primary.qualified_repo,
