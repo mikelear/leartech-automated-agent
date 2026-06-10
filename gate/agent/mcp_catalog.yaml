@@ -33,9 +33,15 @@ mcp_servers:
     description: Discover and execute pytest gate criteria; returns structured pass/fail per criterion.
 
   leartech-pr-context:
-    type: sdk
-    builder: gate.mcp_servers.pr_context_server:build_pr_context_server
-    description: PR metadata + diff + changed files via gh CLI.
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/pr-context/sse
+    description: |
+      PR metadata + diff + changed files via platform-mcps. Migrated from the
+      in-process SDK builder (`gate.mcp_servers.pr_context_server`, now
+      deprecated) to a long-running HTTP/SSE server hosted in each cluster's
+      platform-mcps deployment. `LEARTECH_PLATFORM_MCPS_URL` env var lets the
+      chart point at the cluster-local URL; default is the staging URL which
+      both clusters reach via local DNS.
 
   leartech-test-artifacts:
     type: sdk
@@ -43,13 +49,17 @@ mcp_servers:
     description: Playwright videos, traces, screenshots from GCS test-artifacts bucket.
 
   leartech-tekton:
-    type: sdk
-    builder: gate.mcp_servers.tekton:build_tekton_server
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/tekton/sse
     description: |
-      Step-aware Tekton PipelineRun inspection via kubectl (no GitHub GraphQL).
-      Surfaces WHICH STEP failed (git-clone vs ruff vs pytest), tails per-step
-      logs, and cancels superseded runs on force-push. Phase G.1 — initiative
-      role only; consumer wiring lands in Phase G.2.
+      Step-aware Tekton PipelineRun inspection via platform-mcps. Surfaces
+      WHICH STEP failed (git-clone vs ruff vs pytest), tails per-step logs,
+      and cancels superseded runs on force-push. Migrated from the in-process
+      SDK builder (`gate.mcp_servers.tekton`, now deprecated) to a long-running
+      HTTP/SSE server hosted in each cluster's platform-mcps deployment.
+      `LEARTECH_PLATFORM_MCPS_URL` env var lets the chart point at the
+      cluster-local URL; default is the staging URL which both clusters reach
+      via local DNS.
 
   leartech-initiatives:
     type: sdk

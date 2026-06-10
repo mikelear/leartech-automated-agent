@@ -35,6 +35,42 @@ McpStatus = Literal['ready', 'not_built', 'down', 'missing_auth']
 # Match $ENV_VAR placeholders in catalog values.
 _ENV_REF_RE = re.compile(r'\$(\w+)')
 
+# Match ${VAR} and ${VAR:-default} placeholders in catalog string values.
+# Used for cluster-routable URLs (e.g. LEARTECH_PLATFORM_MCPS_URL override) so
+# the chart can rewrite the catalog default at deploy time without forking the
+# yaml. The :- form mirrors POSIX shell parameter expansion semantics: empty or
+# unset env var falls through to the literal default.
+_ENV_INTERP_RE = re.compile(r'\$\{(\w+)(?::-([^}]*))?\}')
+
+
+def _interp_env(value: str) -> str:
+    """Resolve POSIX-shell-style `${VAR}` / `${VAR:-default}` placeholders.
+
+    Used at catalog-load time for fields like `url:` so the chart can override
+    the default with a cluster-local routing target via env var. Unset OR empty
+    env vars trigger the `:-default` branch (matches `sh` semantics).
+    """
+
+    def replace(match: re.Match[str]) -> str:
+        var, default = match.group(1), match.group(2)
+        resolved = os.environ.get(var)
+        if resolved:
+            return resolved
+        return default if default is not None else ''
+
+    return _ENV_INTERP_RE.sub(replace, value)
+
+
+def _interp_env_recursive(node: object) -> object:
+    """Walk a YAML-loaded structure, applying _interp_env to every string leaf."""
+    if isinstance(node, str):
+        return _interp_env(node)
+    if isinstance(node, dict):
+        return {k: _interp_env_recursive(v) for k, v in node.items()}
+    if isinstance(node, list):
+        return [_interp_env_recursive(item) for item in node]
+    return node
+
 
 class McpAuth(BaseModel):
     """Auth config for http_sse / remote MCP servers."""
@@ -142,10 +178,17 @@ class Catalog(BaseModel):
 
 @lru_cache(maxsize=1)
 def load_catalog(path: Path | None = None) -> Catalog:
-    """Load and validate the catalog. Memoised; call `load_catalog.cache_clear()` to reload."""
+    """Load and validate the catalog. Memoised; call `load_catalog.cache_clear()` to reload.
+
+    Resolves POSIX-shell-style env interpolation (`${VAR}` / `${VAR:-default}`)
+    on every string leaf before Pydantic validation, so chart values can
+    override catalog defaults at deploy time (notably `LEARTECH_PLATFORM_MCPS_URL`
+    for the cluster-routable platform-mcps deployments).
+    """
     file_path = path or CATALOG_PATH
     raw = yaml.safe_load(file_path.read_text())
-    return Catalog.model_validate(raw)
+    interpolated = _interp_env_recursive(raw)
+    return Catalog.model_validate(interpolated)
 
 
 def get_role(name: str) -> Role:

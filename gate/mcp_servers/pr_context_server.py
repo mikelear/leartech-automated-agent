@@ -1,4 +1,17 @@
-"""leartech-pr-context-mcp — PR metadata + diff via gh CLI / REST API."""
+"""leartech-pr-context-mcp — PR metadata + diff via gh CLI / REST API.
+
+.. deprecated:: 0.2
+   The in-process SDK builder shipped in this module is superseded by the
+   hosted ``leartech-platform-mcps`` deployment, which exposes the same tool
+   surface over HTTP/SSE at
+   ``${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/pr-context/sse``.
+   The catalog (``gate/agent/mcp_catalog.yaml``) now points operators and
+   introspection (``/mcps``) at that URL. This module is retained as the
+   rollback path while the URL deployment beds in; it will be deleted in a
+   follow-up PR once the platform-mcps path is stable in production. New
+   features for the pr-context MCP should land in the platform-mcps repo,
+   not here.
+"""
 
 from __future__ import annotations
 
