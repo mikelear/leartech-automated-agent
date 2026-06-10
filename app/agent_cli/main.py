@@ -34,6 +34,8 @@ from __future__ import annotations
 import click
 import httpx
 
+from app.agent_cli.commands.chat import chat as chat_cmd
+from app.agent_cli.commands.config_cmd import config_group as config_cmd
 from app.agent_cli.commands.fire import fire as fire_cmd
 from app.agent_cli.commands.health import health as health_cmd
 from app.agent_cli.commands.health import health_mcp as health_mcp_cmd
@@ -73,12 +75,14 @@ def cli(ctx: click.Context, url: str | None, cluster: str | None) -> None:
 cli.add_command(health_cmd)
 cli.add_command(fire_cmd)
 cli.add_command(topology_cmd)
+cli.add_command(chat_cmd)
 
 # Sub-groups
 cli.add_command(mcps_cmd)
 cli.add_command(roles_cmd)
 cli.add_command(lessons_cmd)
 cli.add_command(runs_cmd)
+cli.add_command(config_cmd)
 
 # Nested: `leartech-agent health mcp <name>` lives under the health group's
 # command list when invoked as a chain, but Click only allows nesting via

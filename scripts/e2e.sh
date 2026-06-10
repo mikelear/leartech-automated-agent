@@ -214,6 +214,60 @@ else
   failures=$((failures + 1))
 fi
 
+# Chat REPL surface smoke — exercise `--help` rather than driving the REPL
+# (which needs a TTY) so this stays portable across CI shells. The flag
+# parser also picks up the cluster + orch-url options; if the new
+# subcommand ever drops out of the entry-point wiring, this catches it.
+if uv run leartech-agent chat --help > /tmp/e2e-chat-help.txt 2>&1; then
+  grep -q 'interactive chat REPL' /tmp/e2e-chat-help.txt \
+    && echo "✓ leartech-agent chat --help (REPL subcommand wired)" \
+    || { echo "✗ leartech-agent chat --help: subcommand description missing" >&2; failures=$((failures + 1)); }
+else
+  echo "✗ leartech-agent chat --help: CLI exited non-zero" >&2
+  cat /tmp/e2e-chat-help.txt >&2
+  failures=$((failures + 1))
+fi
+
+# Config CRUD subcommands — same `--help` exercise covers all three.
+if uv run leartech-agent config --help > /tmp/e2e-config-help.txt 2>&1; then
+  for sub in set-cluster use-cluster show; do
+    grep -q "${sub}" /tmp/e2e-config-help.txt \
+      || { echo "✗ leartech-agent config: ${sub} subcommand missing from --help" >&2; failures=$((failures + 1)); }
+  done
+  echo "✓ leartech-agent config --help (show/set-cluster/use-cluster wired)"
+else
+  echo "✗ leartech-agent config --help: CLI exited non-zero" >&2
+  cat /tmp/e2e-config-help.txt >&2
+  failures=$((failures + 1))
+fi
+
+# pipx-install smoke — the operator-facing "no clone needed" entry point.
+# We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
+# every invocation and add ~30s of dep-resolution); instead we verify
+# the `pipx install <wheel>` path can resolve the wheel build from
+# this source tree. ``hatchling`` is the declared build backend, so
+# `uv build` produces the same wheel pipx would install.
+if command -v uv >/dev/null 2>&1; then
+  build_dir="$(mktemp -d)"
+  if uv build --out-dir "${build_dir}" > /tmp/e2e-wheel-build.txt 2>&1; then
+    wheel_count=$(find "${build_dir}" -name 'leartech_automated_agent-*.whl' | wc -l | tr -d ' ')
+    if [ "${wheel_count}" = "1" ]; then
+      echo "✓ wheel build (pipx-installable artifact present in ${build_dir})"
+    else
+      echo "✗ wheel build: expected exactly 1 .whl, found ${wheel_count}" >&2
+      ls -la "${build_dir}" >&2 || true
+      failures=$((failures + 1))
+    fi
+  else
+    echo "✗ wheel build (uv build) exited non-zero" >&2
+    cat /tmp/e2e-wheel-build.txt >&2
+    failures=$((failures + 1))
+  fi
+  rm -rf "${build_dir}"
+else
+  echo "· uv not on PATH — skipping wheel-build smoke (CI image only)"
+fi
+
 if [ "${failures}" -gt 0 ]; then
   echo
   echo "✗ ${failures} e2e check(s) failed" >&2
