@@ -186,6 +186,34 @@ else
   failures=$((failures + 1))
 fi
 
+# CLI install-resolution smoke: the deployed pod must be able to invoke
+# `leartech-agent` as a bare command (no `uv run` prefix), because operators
+# reach the CLI via `kubectl exec <pod> -- leartech-agent ...`. We approximate
+# the pod's shell PATH by resolving the venv binary that `uv sync` produces
+# and asserting it is on disk + executable. This guards the Dockerfile
+# `ENV PATH=/app/.venv/bin:...` invariant introduced to fix the install gap.
+venv_bin="$(uv run --no-sync python -c 'import sysconfig; print(sysconfig.get_path("scripts"))')"
+if [ -x "${venv_bin}/leartech-agent" ]; then
+  echo "✓ leartech-agent console_script materialised at ${venv_bin}/leartech-agent"
+else
+  echo "✗ leartech-agent console_script NOT found at ${venv_bin}/leartech-agent — install path is broken" >&2
+  ls -la "${venv_bin}" >&2 || true
+  failures=$((failures + 1))
+fi
+
+# Bare-command invocation: PATH must already include the venv scripts dir
+# (the Dockerfile sets it; locally `uv run` does too). If this fails the
+# operator's `kubectl exec pod -- leartech-agent health` will also fail.
+if PATH="${venv_bin}:${PATH}" leartech-agent --url "${BASE_URL}" health > /tmp/e2e-cli-bare.txt 2>&1; then
+  grep -q 'Platform health' /tmp/e2e-cli-bare.txt \
+    && echo "✓ leartech-agent (bare command, no \`uv run\`) — pod-shape PATH check" \
+    || { echo "✗ leartech-agent (bare): panel header missing" >&2; failures=$((failures + 1)); }
+else
+  echo "✗ leartech-agent (bare): CLI exited non-zero — PATH or install is broken" >&2
+  cat /tmp/e2e-cli-bare.txt >&2
+  failures=$((failures + 1))
+fi
+
 if [ "${failures}" -gt 0 ]; then
   echo
   echo "✗ ${failures} e2e check(s) failed" >&2
