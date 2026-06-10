@@ -27,6 +27,7 @@ def runs() -> None:
 @runs.command('list')
 @click.pass_context
 def runs_list(ctx: click.Context) -> None:
+    """List initiative runs known to the deployed service."""
     response = client_from_ctx(ctx.obj).get('/initiatives')
     if response.status_code != 200:
         print_http_error(response)
@@ -56,6 +57,7 @@ def runs_list(ctx: click.Context) -> None:
 @click.argument('run_id')
 @click.pass_context
 def runs_status(ctx: click.Context, run_id: str) -> None:
+    """Show one run's current status, PR number, turns, and cost."""
     response = client_from_ctx(ctx.obj).get(f'/initiatives/{run_id}')
     if response.status_code != 200:
         print_http_error(response)
