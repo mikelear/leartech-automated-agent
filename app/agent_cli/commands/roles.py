@@ -18,6 +18,7 @@ def roles() -> None:
 @roles.command('list')
 @click.pass_context
 def roles_list(ctx: click.Context) -> None:
+    """List agent personas with MCP and tool counts."""
     response = client_from_ctx(ctx.obj).get('/roles')
     if response.status_code != 200:
         print_http_error(response)
@@ -36,6 +37,7 @@ def roles_list(ctx: click.Context) -> None:
 @click.argument('name')
 @click.pass_context
 def roles_describe(ctx: click.Context, name: str) -> None:
+    """Show full detail (MCPs, tools, applicable lessons) for one role."""
     response = client_from_ctx(ctx.obj).get(f'/roles/{name}')
     if response.status_code != 200:
         print_http_error(response)

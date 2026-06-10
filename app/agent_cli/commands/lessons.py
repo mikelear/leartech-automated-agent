@@ -21,6 +21,7 @@ def lessons() -> None:
 @click.option('--status', help='Filter to one status (open / encoded / rejected / superseded)')
 @click.pass_context
 def lessons_list(ctx: click.Context, category: str | None, status: str | None) -> None:
+    """List catalog lessons, optionally filtered by category and/or status."""
     response = client_from_ctx(ctx.obj).get('/lessons')
     if response.status_code != 200:
         print_http_error(response)
@@ -49,6 +50,7 @@ def lessons_list(ctx: click.Context, category: str | None, status: str | None) -
 @click.argument('lesson_id')
 @click.pass_context
 def lessons_describe(ctx: click.Context, lesson_id: str) -> None:
+    """Show full detail and rendered body for one lesson by ID."""
     response = client_from_ctx(ctx.obj).get(f'/lessons/{lesson_id}')
     if response.status_code != 200:
         print_http_error(response)
