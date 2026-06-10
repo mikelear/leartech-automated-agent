@@ -66,6 +66,95 @@ def test_get_mcp_returns_typed_config() -> None:
     assert mcp.builder == 'gate.mcp_servers.pipeline_server:build_pipeline_server'
 
 
+def test_platform_mcps_entries_load_as_http_sse() -> None:
+    """leartech-tekton + leartech-pr-context are http_sse-hosted via platform-mcps.
+
+    Catches a regression where the catalog reverts the entries to `type: sdk`
+    (e.g. an accidental git revert) — operators reading /mcps would see the
+    in-process builder rather than the URL deployment they expect to probe.
+    """
+    load_catalog.cache_clear()
+    catalog = load_catalog()
+
+    for name, sse_suffix in (
+        ('leartech-tekton', '/mcp/tekton/sse'),
+        ('leartech-pr-context', '/mcp/pr-context/sse'),
+    ):
+        assert name in catalog.mcp_servers, f'{name} missing from catalog'
+        mcp = catalog.mcp_servers[name]
+        assert mcp.type == 'http_sse', f'{name}: expected http_sse, got {mcp.type}'
+        assert mcp.url is not None, f'{name}: http_sse MCP must declare url'
+        assert mcp.url.endswith(sse_suffix), f'{name}: url {mcp.url!r} does not end with {sse_suffix!r}'
+        # platform-mcps default routes via the staging URL — both clusters
+        # resolve via local DNS to their cluster's deployment.
+        assert 'leartech-platform-mcps' in mcp.url, f'{name}: default URL should target leartech-platform-mcps'
+
+
+def test_platform_mcps_url_overridable_via_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`LEARTECH_PLATFORM_MCPS_URL` env var rewrites the catalog default URL.
+
+    The chart sets this per-cluster so the same catalog YAML routes to the
+    cluster-local platform-mcps deployment instead of going via the staging
+    URL. Verifies the `${VAR:-default}` POSIX-shell substitution actually
+    resolves at load time, not at lookup.
+    """
+    monkeypatch.setenv('LEARTECH_PLATFORM_MCPS_URL', 'https://platform-mcps.internal.test')
+
+    # Write a minimal catalog that uses the same env-var pattern as production.
+    catalog_yaml = """
+mcp_servers:
+  leartech-tekton:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://default.example.com}/mcp/tekton/sse
+    description: test
+roles:
+  initiative_agent:
+    description: test
+    mcps:
+      - leartech-tekton
+"""
+    path = tmp_path / 'cat.yaml'
+    path.write_text(catalog_yaml)
+    load_catalog.cache_clear()
+    try:
+        catalog = load_catalog(path)
+    finally:
+        load_catalog.cache_clear()
+    assert catalog.mcp_servers['leartech-tekton'].url == 'https://platform-mcps.internal.test/mcp/tekton/sse'
+
+
+def test_platform_mcps_url_falls_back_to_default_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """With env var unset, `${VAR:-default}` resolves to the literal default."""
+    monkeypatch.delenv('LEARTECH_PLATFORM_MCPS_URL', raising=False)
+
+    catalog_yaml = """
+mcp_servers:
+  leartech-tekton:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://fallback.example.com}/mcp/tekton/sse
+    description: test
+roles:
+  initiative_agent:
+    description: test
+    mcps:
+      - leartech-tekton
+"""
+    path = tmp_path / 'cat.yaml'
+    path.write_text(catalog_yaml)
+    load_catalog.cache_clear()
+    try:
+        catalog = load_catalog(path)
+    finally:
+        load_catalog.cache_clear()
+    assert catalog.mcp_servers['leartech-tekton'].url == 'https://fallback.example.com/mcp/tekton/sse'
+
+
 def test_invalid_role_referencing_unknown_mcp_fails_validation(tmp_path: Path) -> None:
     bad_catalog = {
         'mcp_servers': {

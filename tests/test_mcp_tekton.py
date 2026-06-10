@@ -516,15 +516,24 @@ def test_rebase_uses_custom_base(mock_git: list[dict[str, Any]], tmp_path: Path)
 
 
 def test_catalog_registers_leartech_tekton() -> None:
-    """The committed catalog YAML wires leartech-tekton into initiative_agent."""
+    """The committed catalog YAML wires leartech-tekton into initiative_agent.
+
+    Post-platform-mcps migration: the catalog declares the MCP as `http_sse`
+    pointing at the platform-mcps deployment (see
+    ``feat(catalog): point leartech-tekton + pr-context at platform-mcps URLs``).
+    The in-process SDK builder in ``gate.mcp_servers.tekton`` is retained as a
+    deprecated rollback path; coverage for the builder itself lives in the
+    other tests in this module.
+    """
     from gate.agent.mcp_catalog import get_role, load_catalog
 
     load_catalog.cache_clear()
     catalog = load_catalog()
     assert 'leartech-tekton' in catalog.mcp_servers
     mcp = catalog.mcp_servers['leartech-tekton']
-    assert mcp.type == 'sdk'
-    assert mcp.builder == 'gate.mcp_servers.tekton:build_tekton_server'
+    assert mcp.type == 'http_sse'
+    assert mcp.url is not None
+    assert mcp.url.endswith('/mcp/tekton/sse'), f'unexpected path on tekton MCP URL: {mcp.url!r}'
     role = get_role('initiative_agent')
     assert 'leartech-tekton' in role.mcps
     # Other roles must NOT get it — initiative-runner-only per the goal spec.

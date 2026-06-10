@@ -1,5 +1,17 @@
 """leartech-tekton-mcp — step-aware Tekton PipelineRun inspection via kubectl.
 
+.. deprecated:: 0.2
+   The in-process SDK builder shipped in this module is superseded by the
+   hosted ``leartech-platform-mcps`` deployment, which exposes the same tool
+   surface over HTTP/SSE at
+   ``${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/tekton/sse``.
+   The catalog (``gate/agent/mcp_catalog.yaml``) now points operators and
+   introspection (``/mcps``) at that URL. This module is retained as the
+   rollback path while the URL deployment beds in; it will be deleted in a
+   follow-up PR once the platform-mcps path is stable in production. New
+   features for the tekton MCP should land in the platform-mcps repo, not here.
+
+
 The pre-existing `leartech-pipeline` MCP exposes only the *aggregate* GitHub-side
 status (e.g. ``lint: failure``). That's enough to know *something* went wrong but
 not WHAT — was it git-clone, ruff, mypy, pytest, kaniko? Today the agent has to
