@@ -91,19 +91,37 @@ class CliConfig:
     def resolve_cluster(self, name: str | None) -> ClusterConfig:
         """Resolve a cluster reference, falling back to default.
 
-        Raises ``ValueError`` when an explicit ``name`` is supplied but
-        unknown — never silently fall back, since that would mask typos
-        like ``--cluster gcp-prood``.
+        Resolution order for an explicit ``name``:
+
+        1. **Exact match** against a configured cluster name.
+        2. **Prefix match** when exactly one configured name starts with
+           ``name`` (e.g. ``'gcp'`` → ``'gcp-staging'``). This is the
+           operator-friendly short form documented in the CLI help.
+        3. Otherwise raise ``ValueError`` listing what's available, or —
+           when the prefix matches more than one cluster — listing the
+           ambiguous candidates so the operator can disambiguate.
+
+        Never silently falls back to default on an unknown name — that
+        would mask typos like ``--cluster gcp-prood``.
         """
         if name is None:
             name = self.default_cluster
-        if name not in self.clusters:
-            available = sorted(self.clusters)
+        if name in self.clusters:
+            return self.clusters[name]
+        # Prefix match: gcp → gcp-staging when there's a single candidate.
+        prefix_matches = sorted(n for n in self.clusters if n.startswith(name))
+        if len(prefix_matches) == 1:
+            return self.clusters[prefix_matches[0]]
+        available = sorted(self.clusters)
+        if len(prefix_matches) > 1:
             raise ValueError(
-                f'Unknown cluster {name!r}; available clusters: {available}. '
-                f'Edit ~/.config/{APP_NAME}/{CONFIG_FILENAME} to add it.'
+                f'Ambiguous cluster prefix {name!r}; matches {prefix_matches}. '
+                f'Use the full name (one of: {prefix_matches}).'
             )
-        return self.clusters[name]
+        raise ValueError(
+            f'Unknown cluster {name!r}; available clusters: {available}. '
+            f'Edit ~/.config/{APP_NAME}/{CONFIG_FILENAME} to add it.'
+        )
 
 
 def config_path() -> Path:

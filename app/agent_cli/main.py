@@ -57,9 +57,13 @@ from app.agent_cli.transport import DEFAULT_URL, resolve_base_url
 )
 @click.option(
     '--cluster',
-    type=click.Choice(['gcp', 'az']),
+    type=str,
     default=None,
-    help='Pick a known cluster ingress (overrides env LEARTECH_AGENT_URL, lower priority than --url).',
+    help=(
+        'Pick a configured cluster (canonical name or unambiguous prefix, '
+        "e.g. 'gcp-staging' or 'gcp'). Resolved against ~/.config/leartech-agent/"
+        'config.yaml — overrides env LEARTECH_AGENT_URL, lower priority than --url.'
+    ),
 )
 @click.pass_context
 def cli(ctx: click.Context, url: str | None, cluster: str | None) -> None:

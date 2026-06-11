@@ -121,19 +121,29 @@ def test_probe_returns_status_for_sdk_mcp() -> None:
     assert 'sdk_import' in result.output
 
 
-def test_cluster_flag_picks_known_ingress_url() -> None:
-    """The --cluster flag must resolve to a real URL without env vars set."""
+def test_cluster_flag_picks_known_ingress_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """The --cluster flag must resolve to a real URL via the config map.
+
+    Resolution now goes through ``app.agent_cli.config`` (the same map
+    ``config show`` renders); the legacy ``product-first.com`` /
+    ``modern-burro.com`` URLs in transport.py were stale and produced
+    DNS-resolution errors. Both short (``gcp``) and full
+    (``gcp-staging``) forms must work.
+    """
     from app.agent_cli.transport import resolve_base_url
 
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+    monkeypatch.delenv('LEARTECH_AGENT_URL', raising=False)
     gcp_url = resolve_base_url(url=None, cluster='gcp')
     az_url = resolve_base_url(url=None, cluster='az')
-    assert 'product-first' in gcp_url
-    assert 'modern-burro' in az_url
+    assert 'jx-staging.jx.leartech.com' in gcp_url
+    assert 'jx-staging.az.leartech.com' in az_url
 
 
-def test_cluster_flag_unknown_raises() -> None:
+def test_cluster_flag_unknown_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     from app.agent_cli.transport import resolve_base_url
 
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
     try:
         resolve_base_url(url=None, cluster='moonbase')
     except ValueError as exc:
@@ -151,13 +161,18 @@ def test_url_flag_overrides_env_and_cluster(monkeypatch: pytest.MonkeyPatch) -> 
     assert resolved == 'http://from-flag:1'
 
 
-def test_cluster_env_override_takes_effect(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A fleet-wide rebind via LEARTECH_AGENT_URL_GCP overrides the baked-in default."""
+def test_cluster_flag_beats_leartech_agent_url_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """When ``--cluster`` is supplied, the un-suffixed ``LEARTECH_AGENT_URL`` env
+    is ignored — operators reach for ``--cluster`` precisely to override the
+    ambient env on a one-off invocation.
+    """
     from app.agent_cli.transport import resolve_base_url
 
-    monkeypatch.setenv('LEARTECH_AGENT_URL_GCP', 'https://moved-gcp.example.com')
-    resolved = resolve_base_url(url=None, cluster='gcp')
-    assert resolved == 'https://moved-gcp.example.com'
+    monkeypatch.setenv('XDG_CONFIG_HOME', str(tmp_path))
+    monkeypatch.setenv('LEARTECH_AGENT_URL', 'http://ambient:9999')
+    resolved = resolve_base_url(url=None, cluster='gcp-staging')
+    assert 'ambient' not in resolved
+    assert 'jx-staging.jx.leartech.com' in resolved
 
 
 def test_topology_copy_fallback_when_pbcopy_missing(monkeypatch: pytest.MonkeyPatch) -> None:

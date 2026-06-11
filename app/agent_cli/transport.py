@@ -3,7 +3,11 @@
 Picks a base URL by precedence:
 
 1. Explicit ``--url`` flag (highest).
-2. ``--cluster gcp|az`` flag → known ingress URLs.
+2. ``--cluster <name>`` flag → looked up in the user's
+   ``~/.config/leartech-agent/config.yaml`` (merged over built-in
+   staging defaults). Short forms (e.g. ``gcp``) prefix-match the
+   canonical name (e.g. ``gcp-staging``); see
+   :meth:`app.agent_cli.config.CliConfig.resolve_cluster`.
 3. ``LEARTECH_AGENT_URL`` env var.
 4. ``http://localhost:8080`` (laptop fallback).
 
@@ -12,12 +16,15 @@ the command modules use. Keeping it isolated here lets the CliRunner
 tests monkey-patch one symbol instead of every command's own client
 construction.
 
-In-cluster fallback (``kubectl exec``-style port-forward) is on the
-roadmap but not wired today — see the design memo
-``project_operator_cli_design.md``. For MVP, operators on a workstation
-hit the ingress URL directly; in-cluster invocations set
-``LEARTECH_AGENT_URL=http://leartech-automated-agent`` against the
-ClusterIP service.
+History: this module previously hard-coded a separate ``gcp``/``az``
+cluster map pointing at ``*.product-first.com`` / ``*.modern-burro.com``
+URLs, which diverged from the authoritative ``config show`` output
+(``gcp-staging`` / ``az-staging`` pointing at the ``jx-staging``
+ingresses). That contract mismatch produced the
+``Invalid value for '--cluster'`` / DNS-resolution-error pair fixed in
+PR ``cli-fix-cluster-flag-name-mismatch``. The cluster map now lives in
+exactly one place — :mod:`app.agent_cli.config` — and is keyed by the
+canonical ``<cloud>-<env>`` names.
 """
 
 from __future__ import annotations
@@ -26,41 +33,29 @@ import os
 
 import httpx
 
+from app.agent_cli.config import load_config
+
 DEFAULT_URL = 'http://localhost:8080'
-
-# Public ingress URLs per cluster. Kept here (not in mcp_catalog.yaml)
-# because they're discovery-only — no secrets, no per-environment auth.
-# Operators using a different ingress override via --url or
-# LEARTECH_AGENT_URL; the per-cluster env vars below are for fleet-wide
-# rebinding (e.g. when an ingress hostname changes during a domain
-# migration) without having to ship a CLI release.
-_CLUSTER_URL_ENV_OVERRIDES: dict[str, str] = {
-    'gcp': 'LEARTECH_AGENT_URL_GCP',
-    'az': 'LEARTECH_AGENT_URL_AZ',
-}
-
-# Defaults baked into the CLI. Updated when the cluster ingresses move.
-_DEFAULT_CLUSTER_URLS: dict[str, str] = {
-    'gcp': 'https://leartech-automated-agent.product-first.com',
-    'az': 'https://leartech-automated-agent.modern-burro.com',
-}
 
 
 def resolve_base_url(url: str | None, cluster: str | None) -> str:
     """Resolve the base URL the CLI should target this invocation.
 
-    Per-cluster env overrides (``LEARTECH_AGENT_URL_GCP`` / ``..._AZ``)
-    take effect only when ``--cluster`` is set, so an operator setting
-    a fleet-wide ``LEARTECH_AGENT_URL`` doesn't accidentally shadow the
-    cluster-pinned form.
+    ``cluster`` may be the canonical name (``gcp-staging``) or any
+    unambiguous prefix (``gcp``); resolution goes through the merged
+    config map so the same name that ``config show`` reports is the one
+    accepted on the flag.
+
+    When ``--cluster`` is supplied, it wins over the un-suffixed
+    ``LEARTECH_AGENT_URL`` env var — operators reach for ``--cluster``
+    precisely to override the ambient env on a one-off invocation. When
+    no cluster is named, env wins over the localhost fallback.
     """
     if url:
         return url
     if cluster:
-        if cluster not in _DEFAULT_CLUSTER_URLS:
-            raise ValueError(f'Unknown cluster {cluster!r}; expected one of {sorted(_DEFAULT_CLUSTER_URLS)}.')
-        env_name = _CLUSTER_URL_ENV_OVERRIDES[cluster]
-        return os.environ.get(env_name, _DEFAULT_CLUSTER_URLS[cluster])
+        cfg = load_config()
+        return cfg.resolve_cluster(cluster).agent_url
     return os.environ.get('LEARTECH_AGENT_URL', DEFAULT_URL)
 
 
