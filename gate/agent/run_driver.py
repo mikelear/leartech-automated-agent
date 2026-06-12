@@ -1,6 +1,6 @@
 """V5 D2.2 + V5 D2.1 run-driver state-machine helpers.
 
-This module exposes three surfaces:
+This module exposes four surfaces:
 
 - ``mark_first_turn(run_id)`` — async, set-once hook fired by the SDK
   loop in ``gate/agent/initiative.py`` the very first time the agent
@@ -11,6 +11,17 @@ This module exposes three surfaces:
   ``started_executing_at IS NULL``. This makes the hook safe to call
   repeatedly without coordination — the database is the source of
   truth, not the in-process flag.
+
+- ``update_run_progress(run_id, turns, cost_usd, last_tool_call)`` —
+  per-turn writeback (initiative ``agent-add-per-turn-writeback``).
+  Fired after every SDK ``ResultMessage`` to keep
+  ``initiative_runs.turns``, ``cost_usd``, and ``last_tool_call``
+  current in real time so anyone watching a long-running run sees
+  progress instead of NULL for the entire 30–90-minute window. Best
+  effort: a DB hiccup is logged at WARN and swallowed so the writeback
+  never blocks or crashes the SDK loop. The caller wraps the
+  invocation in ``asyncio.create_task`` so even a slow round-trip can
+  overlap with the next SDK turn.
 
 - ``is_run_stale(record, threshold_seconds)`` — sync classifier used
   by the reconciler. The corrected staleness rule:
@@ -60,6 +71,7 @@ from sqlalchemy import update as sa_update
 
 from app.db import is_db_enabled
 from app.db import session as db_session
+from app.db.initiative_runs import update_run_progress as _db_update_run_progress
 from app.db.models import InitiativeRunRow
 from app.state import _records as _in_memory_records
 
@@ -171,6 +183,94 @@ async def mark_first_turn(run_id: str) -> bool:
         _in_memory_records[run_id] = in_mem.model_copy(
             update={'started_executing_at': now},
         )
+
+    return wrote_db or wrote_in_memory
+
+
+async def update_run_progress(
+    run_id: str | None,
+    *,
+    turns: int,
+    cost_usd: float | None,
+    last_tool_call: str | None,
+) -> bool:
+    """Per-turn writeback hook — fired after every SDK ``ResultMessage``.
+
+    Contract (matches the initiative spec):
+
+    - When fired: ONCE PER TURN, immediately after the SDK yields a
+      ``ResultMessage`` (the natural end-of-turn boundary).
+    - What it writes: ``turns`` (running int), ``cost_usd``
+      (cumulative — the SDK's ``ResultMessage.total_cost_usd``, NOT
+      the per-turn delta), and ``last_tool_call`` (NAME of the LAST
+      tool the agent invoked during this turn, or ``None`` for a
+      plain text turn).
+    - Failure mode: best effort. A DB hiccup is logged at WARN and
+      swallowed; the function never raises. The caller wraps the call
+      in ``asyncio.create_task`` so even slow round-trips don't block
+      the SDK loop.
+
+    Returns ``True`` iff the writeback actually committed (DB row
+    updated OR in-memory record patched). Returns ``False`` on every
+    failure path — operators rely on the warning log line, not the
+    return value, to diagnose persistent failures.
+
+    DB-disabled mode: if ``LEARTECH_INITIATIVE_DB_DSN`` is unset (the
+    laptop CLI path), the hook still patches the in-memory record (if
+    present in ``app.state._records``) so DB-less runs observe
+    progress through the same surface.
+
+    A ``run_id`` of ``None`` is the explicit "no run row attached"
+    signal — laptop runs without ``LEARTECH_RUN_ID`` env. The function
+    returns ``False`` immediately in that case (nothing to write).
+    """
+    if not run_id:
+        return False
+
+    # In-memory fast-path — mirrors ``mark_first_turn``. Patching the
+    # cache first means ``app.state.get(run_id)`` reads the new values
+    # without a DB round-trip even before the SQL commit lands. We
+    # patch all three fields atomically (one ``model_copy``).
+    wrote_in_memory = False
+    in_mem = _in_memory_records.get(run_id)
+    if in_mem is not None:
+        _in_memory_records[run_id] = in_mem.model_copy(
+            update={
+                'turns': turns,
+                'cost_usd': cost_usd,
+                'last_tool_call': last_tool_call,
+            },
+        )
+        wrote_in_memory = True
+
+    if not is_db_enabled():
+        return wrote_in_memory
+
+    # DB write — wrapped in a broad try/except per the initiative's
+    # "DB errors MUST NOT crash the run" constraint. We log at WARN
+    # (not ERROR) because a single failed writeback is recoverable —
+    # the next turn will re-write the running totals. Persistent
+    # failures show up as a sustained stream of WARNs, which the
+    # operator can pick up via log aggregation.
+    try:
+        async with db_session() as sess:
+            wrote_db: bool = await _db_update_run_progress(
+                sess,
+                id=run_id,
+                turns=turns,
+                cost_usd=cost_usd,
+                last_tool_call=last_tool_call,
+            )
+    except Exception as exc:  # noqa: BLE001 — observability hook must not block the SDK loop
+        logger.warning(
+            'per-turn writeback failed for run_id=%s (turns=%s, cost_usd=%s, last_tool_call=%s): %s',
+            run_id,
+            turns,
+            cost_usd,
+            last_tool_call,
+            exc,
+        )
+        return wrote_in_memory
 
     return wrote_db or wrote_in_memory
 
@@ -390,4 +490,5 @@ __all__ = [
     'detect_pod_stuck_image_pull',
     'is_run_stale',
     'mark_first_turn',
+    'update_run_progress',
 ]

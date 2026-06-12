@@ -52,6 +52,12 @@ class InitiativeRunRecord:
     # until the run-driver's first-turn hook fires. See
     # ``InitiativeRunRow.started_executing_at`` for the full rationale.
     started_executing_at: datetime | None
+    # Per-turn writeback surface (initiative
+    # agent-add-per-turn-writeback). Name of the LAST tool the agent
+    # invoked during the most recent SDK turn, or NULL for a plain
+    # text turn. See ``InitiativeRunRow.last_tool_call`` for the
+    # full rationale.
+    last_tool_call: str | None
     updated_at: datetime
 
     @classmethod
@@ -73,6 +79,7 @@ class InitiativeRunRecord:
             job_name=row.job_name,
             branch=row.branch,
             started_executing_at=row.started_executing_at,
+            last_tool_call=row.last_tool_call,
             updated_at=row.updated_at,
         )
 
@@ -181,6 +188,12 @@ async def update_run(
             # started_executing_at IS NULL) rather than here, so
             # the column is mutable from this allow-list's POV.
             'started_executing_at',
+            # Per-turn writeback (initiative
+            # agent-add-per-turn-writeback) — written each SDK turn
+            # by ``update_run_progress``. Listed here so the
+            # general ``update_run`` path can also touch it (tests,
+            # ad-hoc operator corrections).
+            'last_tool_call',
         }
     )
     filtered = {k: v for k, v in fields.items() if k in _mutable}
@@ -195,6 +208,52 @@ async def update_run(
     await session.flush()
     await session.refresh(row)
     return InitiativeRunRecord.from_row(row)
+
+
+async def update_run_progress(
+    session: AsyncSession,
+    *,
+    id: str,
+    turns: int,
+    cost_usd: Decimal | float | int | None,
+    last_tool_call: str | None,
+) -> bool:
+    """Per-turn writeback of running totals (initiative
+    ``agent-add-per-turn-writeback``).
+
+    Single UPDATE — no INSERT semantics. Returns ``True`` iff one row
+    was updated (i.e. the run exists). Idempotent: repeating the same
+    values is a no-op at the application layer (the UPDATE still
+    executes, but writes the same bytes).
+
+    Distinct from :func:`update_run`:
+
+    - ``update_run`` is a generic kwarg-filtered partial update used by
+      the catalog/router flow; goes through ORM ``session.get`` + a
+      per-field ``setattr`` loop + ``flush`` + ``refresh``. That's
+      heavier than needed for the per-turn hot path which only ever
+      writes the same three columns and never refetches.
+    - This function is a single ``sa_update(...)`` Core statement —
+      ~1 ms in the SQLAlchemy + asyncpg pipeline. The agent's SDK
+      loop calls this once per turn (every 5–30 s typically), so the
+      hot-path matters.
+
+    ``cost_usd`` accepts any numeric type — the SDK's
+    ``ResultMessage.total_cost_usd`` is ``float``, but the column type
+    is ``Numeric(10, 4)``. SQLAlchemy converts on bind; we just keep
+    the public signature liberal so callers don't need to wrap.
+    """
+    result = await session.execute(
+        sa_update(InitiativeRunRow)
+        .where(InitiativeRunRow.id == id)
+        .values(
+            turns=turns,
+            cost_usd=cost_usd,
+            last_tool_call=last_tool_call,
+        ),
+    )
+    rowcount = getattr(result, 'rowcount', 0) or 0
+    return bool(rowcount > 0)
 
 
 async def list_in_flight_runs(session: AsyncSession) -> list[InitiativeRunRecord]:

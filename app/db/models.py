@@ -172,6 +172,16 @@ class InitiativeRunRow(Base):
         DateTime(timezone=True),
         nullable=True,
     )
+    # Per-turn writeback surface (initiative
+    # agent-add-per-turn-writeback). NAME of the LAST tool the agent
+    # invoked during the just-completed turn — operators reading the
+    # row see "what is the agent doing right now?" without parsing the
+    # decision-log table. NULL means the turn was a plain text
+    # response (no tool invocations); the per-turn hook treats NULL
+    # as the explicit "no tool this turn" signal. 128 chars is well
+    # above the longest observed tool name (MCP-prefixed identifiers
+    # like ``mcp__leartech-criteria__run_criteria_set``).
+    last_tool_call: Mapped[str | None] = mapped_column(String(128), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),

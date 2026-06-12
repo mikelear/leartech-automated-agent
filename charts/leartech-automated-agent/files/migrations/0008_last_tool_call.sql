@@ -1,0 +1,35 @@
+-- 0008_last_tool_call.sql — per-turn writeback surface (initiative
+-- agent-add-per-turn-writeback).
+--
+-- Before this migration, ``initiative_runs.turns`` and ``cost_usd``
+-- were written once at terminal state by the job_reconciler's
+-- log-parse path. Anyone watching a long-running initiative saw both
+-- columns NULL for the entire run, then a single bulk update on
+-- completion. That's the "in-flight dead zone": 30–90 minutes of
+-- silence followed by (often buggy) terminal totals.
+--
+-- The per-turn hook lifts ``turns`` + ``cost_usd`` at every SDK
+-- ResultMessage so operators see real-time progress. ``last_tool_call``
+-- is the additional surface this migration introduces — the NAME of
+-- the most recent tool the agent invoked during the just-completed
+-- turn (or NULL for a plain text turn). Reading it answers "what is
+-- the agent doing right now?" without parsing the decision-log table.
+--
+-- Column shape:
+--   - VARCHAR(128): tool names are short MCP-style identifiers
+--     (e.g. ``Bash``, ``mcp__leartech-criteria__run_criteria_set``).
+--     128 chars is comfortably above the longest observed name.
+--   - Nullable: a turn with no tool invocations (plain text response)
+--     reads NULL. The per-turn hook treats NULL as the explicit
+--     "no tool this turn" signal, not as "unknown".
+--
+-- ADD COLUMN IF NOT EXISTS makes this safely idempotent — the
+-- deployment's migrations initContainer runs on every pod start,
+-- re-applying this file each time.
+--
+-- See app/db/models.py::InitiativeRunRow for the SQLAlchemy
+-- companion and gate/agent/run_driver.py::update_run_progress for
+-- the write path.
+
+ALTER TABLE initiative_runs
+    ADD COLUMN IF NOT EXISTS last_tool_call VARCHAR(128);
