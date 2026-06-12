@@ -35,10 +35,16 @@ from gate.agent.job_reconciler import (
 # ---------------------------------------------------------------------------
 
 
-def test_parse_summary_extracts_last_summary_line() -> None:
-    """Agent emits one summary per iteration AND a final post-PR-resolution
-    summary. We always use the final one — that's the authoritative entry
-    that includes pr=N when a PR was opened."""
+def test_parse_summary_sums_turns_keeps_last_cost_and_pr() -> None:
+    """Multi-summary aggregation contract (post run a9699b453342 fix):
+
+    * ``turns`` is the SUM of every ``--- turns=`` line (each SDK invocation's
+      counter starts from zero, so the last line only reflects its segment).
+    * ``cost_usd`` is the LAST value — Claude SDK ``total_cost_usd`` is
+      process-cumulative, so the most recent summary carries the total.
+    * ``pr_number`` is the LAST ``pr=N`` — the post-PR-resolution summary
+      is canonical.
+    """
     log = (
         '→ Bash\n'
         '--- turns=2  in=15  out=10  cost=$0.001\n'
@@ -47,9 +53,66 @@ def test_parse_summary_extracts_last_summary_line() -> None:
         '--- turns=10  in=0  out=0  cost=$0.5230  pr=237\n'
     )
     turns, cost, pr_number = _parse_summary(log)
-    assert turns == 10
+    assert turns == 22  # 2 + 10 + 10
     assert cost == 0.5230
     assert pr_number == 237
+
+
+def test_parse_summary_regression_a9699b453342_pattern() -> None:
+    """Regression fixture for run a9699b453342 (2026-06-12) — the bug that
+    motivated the sum-semantics fix. The agent emitted a 91-turn main run
+    summary followed by a 1-turn post-PR side-channel watcher summary. The
+    pre-fix reconciler picked the LAST and persisted ``turns=1``, masking
+    the real work as a near-zero run. Under sum semantics the value is 92
+    (>= 90, the spec acceptance criterion) and the cost stays at the last
+    process-cumulative value."""
+    log = (
+        'agent main loop output...\n'
+        'lots of intermediate work elided by --tail=200\n'
+        '--- turns=91  in=2500  out=15000  cost=$13.6456  pr=88\n'
+        'post-PR side-channel watcher fires\n'
+        '--- turns=1  in=200  out=300  cost=$13.7872  pr=88\n'
+    )
+    turns, cost, pr_number = _parse_summary(log)
+    assert turns == 92
+    assert turns >= 90  # spec acceptance: turns should match the main work
+    assert cost == 13.7872  # last process-cumulative cost
+    assert pr_number == 88
+
+
+def test_parse_summary_cost_is_last_not_summed() -> None:
+    """Multi-summary log with monotonically-increasing cost values: cost is
+    cumulative across the whole process (the SDK reports ``total_cost_usd``
+    as a process-level running total), so the LAST value IS the total. We
+    must NOT sum cost — that would double-count the running total."""
+    log = (
+        '--- turns=3  in=0  out=0  cost=$1.00\n'
+        '--- turns=2  in=0  out=0  cost=$1.50\n'
+        '--- turns=1  in=0  out=0  cost=$2.00  pr=42\n'
+    )
+    turns, cost, _ = _parse_summary(log)
+    assert turns == 6  # summed: 3 + 2 + 1
+    assert cost == 2.00  # last, not 4.50 (would be the buggy sum)
+
+
+def test_parse_summary_pr_with_only_one_summary_carrying_pr() -> None:
+    """Multi-summary log where only ONE line carries ``pr=N``: that line's
+    ``pr`` is the answer regardless of position. Common case for the
+    a9699b453342 pattern — the side-channel watcher's summary may carry the
+    same ``pr=`` the main run already resolved."""
+    log = '--- turns=5  in=0  out=0  cost=$0.20  pr=99\n--- turns=1  in=0  out=0  cost=$0.25\n'
+    _, _, pr_number = _parse_summary(log)
+    assert pr_number == 99
+
+
+def test_parse_summary_pr_last_wins_when_multiple_summaries_have_pr() -> None:
+    """Multi-summary log where multiple lines carry ``pr=N`` (rare but
+    possible — e.g. a follow-up segment re-resolves the same PR): the LAST
+    one wins. The post-PR-resolution summary is canonical even when an
+    earlier segment also published a ``pr=N``."""
+    log = '--- turns=5  in=0  out=0  cost=$0.20  pr=99\n--- turns=1  in=0  out=0  cost=$0.25  pr=100\n'
+    _, _, pr_number = _parse_summary(log)
+    assert pr_number == 100
 
 
 def test_parse_summary_handles_missing_summary() -> None:
@@ -239,11 +302,15 @@ async def test_reconcile_once_patches_non_terminal_row_with_parsed_fields(
             items=[SimpleNamespace(metadata=SimpleNamespace(name='run-needs-update-x9k2'))],
         ),
     )
+    # Single final-summary line is sufficient to exercise the reconciler's
+    # wiring (the multi-summary aggregation semantics are covered by
+    # dedicated ``_parse_summary`` tests above). Under sum semantics the
+    # single-summary case is unchanged from the pre-fix behaviour — that's
+    # the backwards-compat guarantee in the parser docstring.
     core.read_namespaced_pod_log = AsyncMock(
         return_value=(
             'agent prose\n'
             'PR opened: https://github.com/mikelear/leartech-mortgages-gw/pull/513\n'
-            '--- turns=12  in=20  out=3500  cost=$0.78\n'
             '--- turns=12  in=0  out=0  cost=$0.78  pr=513\n'
         ),
     )

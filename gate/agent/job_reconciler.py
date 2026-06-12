@@ -285,32 +285,51 @@ def _lookup_pr_by_branch(qualified_repo: str, branch: str, run_id: str) -> int |
 
 
 def _parse_summary(log_text: str) -> tuple[int | None, float | None, int | None]:
-    """Extract (turns, cost_usd, pr_number) from the trailing agent summary.
+    """Extract (turns, cost_usd, pr_number) from the agent's summary lines.
 
-    The agent's `gate.agent.initiative` CLI emits a final summary line after
-    PR resolution: `--- turns=X  in=...  out=...  cost=$W  pr=N` (pr=N is
-    present only when a PR was opened). We pick the LAST `--- turns=` line
-    so per-turn summaries don't overshadow the final authoritative one.
+    The agent's ``gate.agent.initiative`` CLI emits one
+    ``--- turns=X  in=...  out=...  cost=$W`` line per SDK invocation, and a
+    single run may drive multiple SDK invocations (main loop + post-PR
+    side-channel watcher). The aggregation rule reflects what each field
+    actually means across the full process:
 
-    D.5.1.4 — when the final summary is missing or lacks ``pr=N`` (e.g. the
-    agent exited via SDK exception, or ``wait_for_terminal`` blocked past pod
-    SIGTERM), we additionally consult the early-emit ``--- pr_open pr=N``
-    marker. The summary's pr wins when both are present (same value in
-    practice; precedence keeps the summary as the canonical contract); the
-    marker is the fallback that turns the GH-side ``_lookup_pr_by_branch``
-    subprocess call into a rare last resort instead of the steady-state path.
+    * ``turns`` — **SUMMED** across every matched ``--- turns=`` line. Each
+      SDK invocation's turn counter starts from zero, so the LAST line only
+      carries the last segment's turn count. Run a9699b453342 (2026-06-12)
+      surfaced the bug: a 91-turn main loop followed by a 1-turn post-PR
+      watcher was reconciled as ``turns=1`` because the previous "pick the
+      LAST line" rule dropped the main work on the floor.
+    * ``cost_usd`` — **LAST** line wins. The Claude SDK reports
+      ``total_cost_usd`` as a process-cumulative value, so the most recent
+      summary already carries the total spend across every segment. Summing
+      would double-count.
+    * ``pr_number`` — **LAST** line carrying ``pr=N`` wins. The
+      post-PR-resolution summary is the authoritative source; if multiple
+      segments carry ``pr=N`` (rare but possible — e.g. a follow-up segment
+      re-resolves the same PR) the last one is canonical.
+
+    D.5.1.4 fallback: when no summary line carries ``pr=N`` we additionally
+    consult the early-emit ``--- pr_open pr=N`` marker (emitted as soon as a
+    PR URL appears in any tool result, BEFORE blocking waits). The summary's
+    ``pr=`` wins when both are present; the marker only fills the gap left
+    by abnormal-exit paths that never emit a final summary with ``pr=N``.
+
+    Backwards-compatible with the single-summary case: ``sum`` of one element
+    equals that element, so single-segment runs reconcile identically to the
+    pre-sum behaviour.
     """
     matches = list(_SUMMARY_RE.finditer(log_text))
     turns: int | None = None
     cost: float | None = None
     pr_number: int | None = None
     if matches:
-        last = matches[-1]
-        turns = int(last.group('turns'))
-        cost = float(last.group('cost'))
-        pr_raw = last.group('pr')
-        if pr_raw:
-            pr_number = int(pr_raw)
+        turns = sum(int(m.group('turns')) for m in matches)
+        cost = float(matches[-1].group('cost'))
+        # LAST match carrying ``pr=N`` wins — iterate in order and overwrite.
+        for m in matches:
+            pr_raw = m.group('pr')
+            if pr_raw:
+                pr_number = int(pr_raw)
     if pr_number is None:
         marker = _PR_OPEN_RE.search(log_text)
         if marker:
