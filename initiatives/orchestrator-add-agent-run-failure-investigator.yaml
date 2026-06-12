@@ -1,0 +1,183 @@
+# Drafted by Orch chat 2026-06-12 (conversation_id b4b84591c589, draft cost $0.0587)
+# V1 spec basis: walkthrough in today's session — A/B/C/F auto-recover,
+# D/E alert, ChromaDB-ready lessons, ~1-2 day estimate.
+#
+# V2 (this file): incorporates the 4 gaps + 2 risk mitigations Orch's
+# own verify pass surfaced ($1.91 verify, ingress 504'd on the v2 repost
+# at $5.87 conversation-cap so v2 was applied locally):
+#   1. failure_fingerprint hash formula defined explicitly
+#   2. Class D reuses existing view_live_pr_state / tekton_diagnose_pr
+#      (pr_check_poll.py folded into failure_investigator.py)
+#   3. `optional: true` constraint for any new chart secretKeyRef
+#   4. "Plan tracking issue" alert mechanism clarified (tracking_issue_
+#      number presence is the branch condition)
+#   5. k8s_mcp registration check at startup — WARN + degrade, not crash
+#   6. Class D 2-poll settling window before alerting (anti-flap)
+# Deliverables collapsed 7 → 5 by folding pr_check_poll + db_reconcile
+# into failure_investigator.py.
+
+name: orchestrator-add-agent-run-failure-investigator
+description: >
+  Add a watcher loop inside the orchestrator process that detects failed
+  agent runs (classes A–F), classifies each failure, auto-recovers what is
+  safe to recover, writes a ChromaDB-ready lesson per event, and posts a
+  sticky alert comment on the plan tracking issue for anything that needs
+  human judgement.  Detection uses platform-mcps k8s_job / k8s MCP polling
+  for pod/job signals, GH PR check polling for gate-rejection (class D), and
+  a DB reconcile sweep for stale-row drift (class F).  All recovery actions
+  are idempotent; the same failure detected twice produces exactly one
+  recovery attempt.  Retry cap is 3 per plan_step_id before escalating to
+  manual_review.  V1 reuses plan_decisions / lessons / agent_run tables —
+  no schema additions.
+
+owner: platform
+project: orchestrator
+language: python
+estimate: 1–2 days
+
+scope:
+  in:
+    - New orchestrator module `watcher/failure_investigator.py` containing
+      the async watcher loop and all classification logic
+    - Class A handler — BackoffLimitExceeded + evicted pod → auto re-fire
+      same plan_step at same budget
+    - Class B handler — claude-agent-sdk timeout / activeDeadlineSeconds hit
+      → auto re-fire with 2x turn budget
+    - Class C handler — OOMKilled pod → auto re-fire with 2x memory limit +
+      alert comment (pattern matters)
+    - Class D handler — PR gates rejected after agent completed → alert only
+      (human judgement required)
+    - Class E handler — ImagePullBackOff / CreateContainerConfigError / pod
+      never reaches Running → alert only (operator fixes infra)
+    - Class F handler — pod-side complete but agent_run row or plan_step
+      never updated → auto reconcile DB + alert
+    - Retry cap — 3 auto-recovery attempts per plan_step_id; 4th detection
+      escalates to manual_review in plan_decisions
+    - Lesson writer — one ChromaDB-ready row in lessons per event with
+      schema topic / category / body / metadata as specified
+    - Sticky alert mechanism — upsert a comment on the plan tracking issue
+      + write a plan_decisions row; no external channels in V1
+    - Pytest suite covering all 6 failure classes (happy-path + idempotency
+      + retry-cap exhaustion)
+    - Watcher task wired into orchestrator startup (registered alongside
+      existing background tasks)
+  out:
+    - Resume from partial step completion
+    - Policy-based memory tuning / dynamic resource scaling
+    - External notification channels (PagerDuty, Slack, email)
+    - New DB tables or schema migrations
+    - Cross-step retry coordination / cascading dependency cancellation
+
+deliverables:
+  - "orchestrator/watcher/failure_investigator.py — async watcher loop
+    with classify_failure(), handle_class_a/b/c/d/e/f(), the inlined
+    GH-PR-check polling (Class D), the inlined DB-reconcile sweep
+    (Class F), write_lesson(), post_alert(), and the startup-time
+    k8s_mcp registration check"
+  - "orchestrator/watcher/k8s_poll.py — thin async wrapper around
+    platform-mcps k8s_job + k8s MCP tools (polling interval configurable
+    via FAILURE_WATCHER_POLL_SECONDS, default 30)"
+  - "orchestrator/watcher/__init__.py + startup hook — registers watcher
+    task in the orchestrator asyncio event loop alongside existing
+    background tasks"
+  - "tests/watcher/test_failure_investigator.py — pytest suite: one
+    test class per failure class (A–F), idempotency assertion,
+    retry-cap exhaustion assertion, Class D settling-window assertion,
+    k8s_mcp-missing-degrade assertion, lesson-shape assertion"
+  - "docs/failure-investigator.md — runbook: failure class taxonomy,
+    recovery actions, alert format, retry-cap behaviour, failure_
+    fingerprint definition, how to add a new class"
+
+constraints:
+  - No new DB tables or Alembic migrations; reuse plan_decisions, lessons,
+    agent_run, plan_step tables exclusively
+  - Reuse platform-mcps k8s_job + k8s MCP tools for all pod/job signal
+    collection — do not shell out to kubectl directly
+  - Class D MUST reuse existing chat-catalog tools (`view_live_pr_state`
+    + `tekton_diagnose_pr`) for PR-check state — do not re-implement
+    GH-check polling from scratch
+  - failure_fingerprint is defined as
+    `sha256(class + ":" + agent_run_id + ":" + primary_signal_reason)`
+    where primary_signal_reason is the dominant cause string
+    (e.g. "BackoffLimitExceeded", "OOMKilled",
+    "pr_check_failed:gcp/ai-review", "ImagePullBackOff"). The hex
+    digest goes into plan_decisions.failure_fingerprint.
+  - Idempotent — detecting the same failure twice (same agent_run_id +
+    failure_fingerprint) MUST produce exactly one recovery row and one
+    lesson row; deduplication key is (plan_step_id, failure_fingerprint)
+    in plan_decisions
+  - Class D MUST require TWO consecutive 30-second polls both observing
+    a terminal `failure` state before posting an alert — the second
+    poll confirms it is not a transient pending→failure→pending flap
+  - Retry cap hard-coded at 3; 4th attempt writes manual_review to
+    plan_decisions and posts an alert — no silent infinite loops
+  - Lesson metadata MUST include all fields — class, agent_run_id,
+    plan_step_id, pr_number, cluster, recovery_action, recovery_success,
+    signals (dict), target_agent
+  - Alert mechanism — IF the plan has a tracking_issue_number, upsert
+    a sticky comment on that issue (find-or-create by marker
+    `<!-- failure-investigator-alert -->`); ELSE write a plan_decisions
+    row only. No external channels (Slack / email / PagerDuty) in V1.
+  - "Any chart secretKeyRef the watcher introduces (GH_TOKEN,
+    LEARTECH_ORCH_GH_TOKEN, etc.) MUST be marked optional=true so
+    preview pods don't enter CreateContainerConfigError when ESO has
+    not yet populated the secret"
+  - "At watcher startup, check that k8s_mcp is registered in the
+    chat-tool catalog. If MISSING, log a WARN message saying
+    'failure_investigator — k8s_mcp not registered — A/B/C/E classes
+    will not fire' and skip those four classes for this process
+    lifetime — never crash; D/F still operate"
+  - Watcher loop MUST be resilient — an unhandled exception in one
+    iteration MUST log + continue, never crash the orchestrator process
+  - All new async code must pass existing mypy + ruff lint gates
+
+success_criteria:
+  - Watcher loop starts cleanly with the orchestrator process and appears in
+    startup logs with poll interval confirmation
+  - All 6 failure classes are exercised by the pytest suite; suite passes in
+    CI with no flakes
+  - failure_fingerprint test — same (class, agent_run_id,
+    primary_signal_reason) tuple hashes to the same digest across
+    process restarts (asserted via sha256 hex match)
+  - Idempotency test — injecting the same failure signal twice produces
+    exactly one plan_decisions row and one lessons row
+  - Class D settling-window test — a flap that resolves on the second
+    poll MUST NOT produce an alert; only two consecutive failure
+    observations escalate
+  - k8s_mcp-missing-degrade test — booting the watcher without
+    `k8s_mcp` in the chat-tool catalog produces a startup WARN and
+    skips classes A/B/C/E without crashing; classes D/F still operate
+  - Retry-cap test — injecting four consecutive failures for the same
+    plan_step_id produces three auto-recovery attempts and one
+    manual_review escalation
+  - Lesson rows produced in tests match the required ChromaDB-ready schema
+    (topic, category, body, metadata keys validated)
+  - Alert comment upsert test — two detections on the same plan with a
+    tracking_issue_number produce one comment (updated in place);
+    plans without a tracking_issue_number get a plan_decisions row
+    only, no GH call attempted
+  - Runbook doc present and references each failure class with a
+    concrete example signal + expected recovery action +
+    failure_fingerprint formula
+
+retrospect:
+  enabled: true
+  questions:
+    - Did all 6 failure classes fire correctly in the first real watcher
+      cycle, or were any signals missing / misclassified?
+    - Was the 30-second polling interval appropriate, or did we generate
+      noisy duplicate detections that stressed the idempotency path?
+    - Did the lesson schema land in ChromaDB queries as expected, or do
+      metadata fields need reshaping?
+    - Any failure modes discovered during implementation that belong in V2
+      scope (e.g. partial-completion resume, cascading dependency
+      cancellation)?
+    - Were there gaps between the platform-mcps k8s_job tool surface and
+      the signals we actually needed (e.g. missing fields, rate limits)?
+
+gate_marks:
+  - preflight_passed
+  - tests_green
+  - lint_passed
+  - runbook_present
+  - retrospect_filed
