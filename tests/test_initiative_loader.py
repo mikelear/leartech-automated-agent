@@ -219,13 +219,18 @@ def test_max_iterations_clamped(tmp_path: Path) -> None:
 
 
 def test_real_worked_example_loads() -> None:
-    """Pin the shape of the worked example so accidental edits to it surface here first."""
-    init = load_initiative(Path(__file__).parent.parent / 'initiatives' / 'auth-ui-home-component-spec.yaml')
-    assert init.name == 'auth-ui-home-component-spec'
-    assert init.qualified_repo == 'mikelear/leartech-auth-ui'
+    """Pin the shape of the worked example so accidental edits to it surface here first.
+
+    `auth-ui-home-component-spec.yaml` (the prior pin) was deleted in PR
+    #103; switch to `automated-agent-add-changelog-stub.yaml` which is
+    still in the catalog and uses the same legacy single-repo shape.
+    """
+    init = load_initiative(Path(__file__).parent.parent / 'initiatives' / 'automated-agent-add-changelog-stub.yaml')
+    assert init.name == 'automated-agent-add-changelog-stub'
+    assert init.qualified_repo == 'mikelear/leartech-automated-agent'
     # Worked example uses legacy shape, so `init.branch` (legacy field) holds the branch name
-    assert init.branch == 'agent/home-component-spec'
-    assert init.primary.branch == 'agent/home-component-spec'
+    assert init.branch == 'agent/add-changelog-stub'
+    assert init.primary.branch == 'agent/add-changelog-stub'
     assert init.gate_marks == ['unit']
 
 
