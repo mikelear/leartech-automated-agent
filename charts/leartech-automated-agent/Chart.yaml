@@ -2,8 +2,8 @@ apiVersion: v2
 name: leartech-automated-agent
 description: Criteria-driven agent runtime exposed as a long-running FastAPI service.
 type: application
-version: 0.1.1
-appVersion: "0.1.0"
+version: 0.10.92
+appVersion: "0.10.92"
 
 # leartech-helm-library helpers (_ingress.tpl) are inlined in templates/ rather
 # than consumed as a chart dependency. Chart.yaml doesn't support env-var
