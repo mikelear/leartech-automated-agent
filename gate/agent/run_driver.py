@@ -3,14 +3,21 @@
 This module exposes four surfaces:
 
 - ``mark_first_turn(run_id)`` — async, set-once hook fired by the SDK
-  loop in ``gate/agent/initiative.py`` the very first time the agent
-  emits a turn (the first ``UserMessage``-with-``ToolResultBlock``).
-  Sets ``initiative_runs.started_executing_at`` to ``now()`` if the
-  column is still NULL; subsequent calls are no-ops at the SQL level
-  because the WHERE clause is gated on
-  ``started_executing_at IS NULL``. This makes the hook safe to call
-  repeatedly without coordination — the database is the source of
-  truth, not the in-process flag.
+  loop in ``gate/agent/initiative.py`` on the **first iteration of the
+  SDK message loop**, regardless of the iteration's message type. The
+  earlier wire-up gated this on the first ``AssistantMessage`` only,
+  which works for the common path (agent reply arrives before the turn
+  closes) but lets the per-turn ``update_run_progress`` writeback race
+  ahead in edge cases where the SDK happens to yield a different
+  message type first — leaving ``started_executing_at`` NULL while
+  ``turns`` / ``cost_usd`` advance. Hoisting the call above the
+  message-type branching guarantees the timestamp lands before any
+  per-turn snapshot can. Sets
+  ``initiative_runs.started_executing_at`` to ``now()`` if the column
+  is still NULL; subsequent calls are no-ops at the SQL level because
+  the WHERE clause is gated on ``started_executing_at IS NULL``. This
+  makes the hook safe to call repeatedly without coordination — the
+  database is the source of truth, not the in-process flag.
 
 - ``update_run_progress(run_id, turns, cost_usd, last_tool_call)`` —
   per-turn writeback (initiative ``agent-add-per-turn-writeback``).
@@ -53,11 +60,14 @@ This module exposes four surfaces:
   ``failed`` within ``STALE_PROGRESS_THRESHOLD_S + 1 poll`` of the
   pod entering the failure state.
 
-Memory: ``feedback_sdk_toolresult_in_usermessage`` — the first
-meaningful SDK message is a ``UserMessage`` carrying a
-``ToolResultBlock``, NOT an ``AssistantMessage``. Callers in
-``gate/agent/initiative.py`` invoke this hook from the same
-detection point used for turn counting; no parallel scanner.
+Memory: ``feedback_sdk_toolresult_in_usermessage`` — within a turn the
+agent's reply is an ``AssistantMessage`` and the tool's response is a
+``UserMessage`` carrying a ``ToolResultBlock``. Per-turn detection is
+done in ``gate/agent/initiative.py`` using the correct types for each
+side. The first-turn hook intentionally avoids picking a single
+message type as its detection signal — it fires on the very first
+iteration of the SDK loop so a future SDK version that changes message
+ordering doesn't silently regress ``started_executing_at``.
 """
 
 from __future__ import annotations

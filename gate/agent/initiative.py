@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import subprocess
@@ -63,6 +64,8 @@ from gate.mcp_servers import (
     build_pr_context_server,
     build_tekton_server,
 )
+
+logger = logging.getLogger(__name__)
 
 # Phase G.2 — step-aware failure diagnosis tools wired ONLY into the
 # initiative role (the read-only review_agent in `gate/agent/main.py` keeps
@@ -648,32 +651,83 @@ async def run_initiative(
         return pr_emitted
 
     async def _record_first_turn_once() -> None:
-        """V5 D2.2 hook — record `started_executing_at` on the first SDK turn.
+        """V5 D2.2 hook — record `started_executing_at` on the first SDK message.
 
-        Fires from the same detection point used for turn counting: the
-        first ``AssistantMessage`` (the agent's first reply). Idempotency
-        is the contract — the in-process flag short-circuits repeat calls
-        and ``mark_first_turn``'s SQL guard (``WHERE started_executing_at
-        IS NULL``) makes the DB write idempotent even across racing
-        replicas.
+        Fires on the **first iteration of the SDK message loop**, before any
+        message-type branching. The earlier wire-up gated this on the first
+        ``AssistantMessage``; that's the agent's first *reply* but it isn't
+        the only path through the loop's first iteration. A run that
+        receives ``ResultMessage`` or ``SystemMessage`` first — even
+        transiently — would fire the per-turn ``update_run_progress`` hook
+        WITHOUT this writer having run first, leaving ``started_executing_at``
+        NULL while ``turns`` / ``cost_usd`` advance. That's the production
+        regression observed in run a9699b453342 (2026-06-12). Moving the
+        call out of the AssistantMessage branch guarantees the writer fires
+        before ANY per-turn writeback can.
+
+        Idempotency is the contract — the in-process ``first_turn_recorded``
+        flag short-circuits repeat calls and ``mark_first_turn``'s SQL guard
+        (``WHERE started_executing_at IS NULL``) makes the DB write
+        idempotent even across racing replicas.
 
         Tolerates every failure mode: missing run_id, no DSN, DB
         unreachable. The SDK loop is the primary mission and must not be
         aborted by an observability column failing to populate.
+
+        Observability: logs at WARN with the run_id when the writer raises.
+        Without this, a silently-failing writer (the original symptom of
+        the bug above) leaves operators with no signal beyond the eventual
+        NULL column — which is exactly how the regression went unnoticed
+        for so long. Logging at WARN so a log-aggregation query
+        (``level:WARN message:"started_executing_at"``) surfaces the next
+        regression within seconds of it landing.
         """
         nonlocal first_turn_recorded
         if first_turn_recorded or not run_id_for_first_turn:
             return
         first_turn_recorded = True
         try:
-            await mark_first_turn(run_id_for_first_turn)
+            wrote = await mark_first_turn(run_id_for_first_turn)
         except Exception as exc:  # noqa: BLE001 — observability hook must not block the loop
+            # WARN-level logger record so log-aggregation pipelines surface
+            # the failure. The historical ``click.echo`` path went to stderr
+            # but not through the logging level system, so structured queries
+            # like ``level:WARN`` missed it. Keep an echo to stderr too —
+            # it's the laptop-CLI human-readable signal — but ensure the
+            # WARN record exists as the durable observability surface.
+            logger.warning(
+                'started_executing_at write failed for run %s: %s',
+                run_id_for_first_turn,
+                exc,
+            )
             click.echo(
                 click.style(
                     f'  (started_executing_at write failed for run {run_id_for_first_turn}: {exc})',
                     fg='yellow',
                 ),
                 err=True,
+            )
+            return
+        if not wrote:
+            # mark_first_turn returns False without raising when:
+            #   - the in-memory record is absent AND the DB UPDATE matched
+            #     0 rows (row missing, or column already non-NULL)
+            #   - DB is disabled AND there's no in-memory record
+            # On a real cluster run the row exists and the column is NULL,
+            # so a False return here signals something is amiss
+            # (e.g. wrong run_id env, schema drift, transient DB read of an
+            # uncommitted row). Surface at WARN so the next regression
+            # shows up in logs — historically this path was completely
+            # silent.
+            logger.warning(
+                'started_executing_at first_turn write returned False for run %s '
+                '(row missing, column already set, or DB disabled with no in-memory record)',
+                run_id_for_first_turn,
+            )
+        else:
+            logger.info(
+                'started_executing_at first_turn write succeeded for run %s',
+                run_id_for_first_turn,
             )
 
     try:
@@ -683,8 +737,22 @@ async def run_initiative(
             # Normalisation happens inside ConversationBuffer.append.
             conversation_buffer.append(message)
 
+            # V5 D2.2 — record ``started_executing_at`` BEFORE any
+            # message-type branching. The earlier wire-up nested this
+            # inside ``if isinstance(message, AssistantMessage):`` which
+            # works for the common path (agent emits AssistantMessage
+            # before ResultMessage) but leaves a regression hole if any
+            # other message type arrives first. The per-turn
+            # ``update_run_progress`` writeback fires on
+            # ``ResultMessage`` — by hoisting this call above the
+            # message-type checks we guarantee the first-turn timestamp
+            # lands BEFORE any per-turn snapshot can write.
+            # Idempotency is enforced by the ``first_turn_recorded`` flag
+            # inside the helper, so calling it on every iteration is
+            # effectively free after the first one.
+            await _record_first_turn_once()
+
             if isinstance(message, AssistantMessage):
-                await _record_first_turn_once()
                 for block in message.content:
                     if isinstance(block, TextBlock):
                         click.echo(block.text)
