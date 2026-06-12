@@ -61,7 +61,10 @@ def test_fire_valid_initiative_returns_run_id(monkeypatch: pytest.MonkeyPatch) -
         patch('app.agent_cli.main.httpx.Client', _MockHttpxClient),
         patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn),
     ):
-        result = runner.invoke(cli, ['fire', 'webcoder-ui-add-about-page'])
+        # `webcoder-ui-add-about-page` was retired in PR #103; switch to a
+        # still-shipped catalog entry so the assert pins the success path
+        # rather than the unknown-initiative branch.
+        result = runner.invoke(cli, ['fire', 'automated-agent-add-changelog-stub'])
     assert result.exit_code == 0
     assert 'Fired' in result.output
     assert 'Run ID' in result.output

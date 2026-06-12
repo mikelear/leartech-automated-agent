@@ -54,7 +54,7 @@ from gate.agent.diagnostics import (
 from gate.agent.initiative_prompt import INITIATIVE_SYSTEM_PROMPT
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
-from gate.agent.run_driver import mark_first_turn
+from gate.agent.run_driver import mark_first_turn, update_run_progress
 from gate.initiatives import load_initiative
 from gate.mcp_servers import (
     build_artifacts_server,
@@ -606,6 +606,15 @@ async def run_initiative(
     last_turn_count = 0
     last_cost: float | None = None
     crash_sticky_body: str | None = None
+    # Per-turn writeback (initiative agent-add-per-turn-writeback).
+    # We track the NAME of the last tool the agent invoked during the
+    # in-flight turn so we can include it in the per-turn writeback
+    # when the ResultMessage arrives. Reset to None at each
+    # ResultMessage so a plain-text turn after a tool-using turn writes
+    # NULL (the explicit "no tool this turn" signal). The "LAST tool
+    # wins" rule means later ToolUseBlocks in a single AssistantMessage
+    # overwrite earlier ones — operators see the most recent action.
+    current_turn_last_tool: str | None = None
     # D.5.1.4 — emit `--- pr_open pr=N` as soon as we see the PR URL in a tool
     # result, in addition to the final post-loop summary. Two emit points keeps
     # the reconciler's log-parse path informed even when the run exits before
@@ -681,6 +690,15 @@ async def run_initiative(
                         click.echo(block.text)
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
+                        # Per-turn writeback (initiative
+                        # agent-add-per-turn-writeback). Track the
+                        # LATEST tool the agent invoked this turn so the
+                        # ResultMessage handler can flush it to
+                        # ``initiative_runs.last_tool_call``. Last-wins
+                        # by design — operators see the most recent
+                        # action even when an AssistantMessage carries
+                        # several ToolUseBlocks.
+                        current_turn_last_tool = block.name
                         # Layer 2 — one decision row per tool invocation so
                         # the operator can read the agent's turn-by-turn
                         # trajectory from the DB. ``payload`` carries the
@@ -707,6 +725,26 @@ async def run_initiative(
                 usage = message.usage or {}
                 cost = message.total_cost_usd if message.total_cost_usd is not None else 0.0
                 last_cost = cost
+                # Per-turn writeback (initiative
+                # agent-add-per-turn-writeback). Fire-and-forget via
+                # ``asyncio.create_task`` so a slow DB round-trip never
+                # stalls the next turn — the writeback is best-effort
+                # observability, the SDK loop is the primary mission.
+                # We pass the SDK's running ``num_turns`` + cumulative
+                # ``total_cost_usd`` (NOT a delta) so the row always
+                # reflects the latest snapshot. ``current_turn_last_tool``
+                # is whatever the AssistantMessage handler last saw; we
+                # reset it AFTER scheduling the task so the next turn
+                # starts clean.
+                asyncio.create_task(
+                    update_run_progress(
+                        run_id_for_first_turn,
+                        turns=last_turn_count,
+                        cost_usd=cost,
+                        last_tool_call=current_turn_last_tool,
+                    )
+                )
+                current_turn_last_tool = None
                 # Layer 2 — bump the running turn counter + record a
                 # 'turn_end' decision row so the operator's reconstruction
                 # has natural turn boundaries even when no tool was called

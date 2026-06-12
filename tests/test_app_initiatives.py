@@ -190,9 +190,11 @@ def test_post_job_mode_response_includes_branch(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
 
     # Use a known-on-disk initiative so we can pin the expected branch value.
-    # auth-ui-add-about-page declares `branch: agent/add-about-page`.
-    target = 'auth-ui-add-about-page'
-    expected_branch = 'agent/add-about-page'
+    # `auth-ui-add-about-page` (the prior pin) was retired in PR #103;
+    # `automated-agent-add-changelog-stub` is still in the catalog and
+    # declares `branch: agent/add-changelog-stub`.
+    target = 'automated-agent-add-changelog-stub'
+    expected_branch = 'agent/add-changelog-stub'
 
     async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
         return kwargs['run_id'], kwargs['namespace']
@@ -215,8 +217,9 @@ def test_get_initiative_returns_branch_after_post(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
     monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
 
-    target = 'auth-ui-add-about-page'
-    expected_branch = 'agent/add-about-page'
+    # Same retired-initiative migration as test_post_job_mode_response_includes_branch.
+    target = 'automated-agent-add-changelog-stub'
+    expected_branch = 'agent/add-changelog-stub'
 
     async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
         return kwargs['run_id'], kwargs['namespace']

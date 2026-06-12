@@ -86,6 +86,13 @@ class InitiativeRecord(BaseModel):
     # runs (which would otherwise show turns=0 right up to the first
     # ResultMessage even though they're actively executing).
     started_executing_at: datetime | None = None
+    # Per-turn writeback surface (initiative
+    # agent-add-per-turn-writeback). Name of the LAST tool the agent
+    # invoked during the most recent SDK turn. NULL until the first
+    # turn fires (and on plain-text turns thereafter). Surfaced through
+    # GET /initiatives so operators see live "what is the agent doing
+    # right now?" without polling the decision-log table.
+    last_tool_call: str | None = None
 
 
 _records: dict[str, InitiativeRecord] = {}
@@ -119,6 +126,7 @@ def _run_record_to_initiative_record(run: InitiativeRunRecord) -> InitiativeReco
         job_name=run.job_name,
         branch=run.branch,
         started_executing_at=run.started_executing_at,
+        last_tool_call=run.last_tool_call,
     )
 
 
