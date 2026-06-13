@@ -25,6 +25,38 @@ to an action verb the agent can dispatch on:
 - ``retry``     — ``/test <check>`` chatops; the failure is transient
 - ``escalate``  — human needed; post sticky and stop
 
+## v6p0.6 step 2 extensions
+
+The original matrix routed govulncheck advisories, dynamic-scan SARIF
+findings, and Helm preview-deploy errors all into the same two generic
+buckets (``security_scan_finding`` → escalate, ``preview_deploy_failure``
+→ escalate). In practice each of those gates has subclasses the agent
+CAN action:
+
+- ``govulncheck_vulnerability`` → fix_code (module bump / pinned upgrade)
+- ``dynamic_scan_high_finding`` → fix_code (HIGH/CRITICAL SARIF findings
+  are usually code-level — input validation, auth headers)
+- ``dynamic_scan_low_finding``  → escalate (LOW/INFO are noise — classify
+  and hand off rather than churn)
+- ``helm_missing_value``        → fix_code (mistyped key / unset value in
+  the chart values.yaml — the agent can patch)
+- ``helm_missing_secret``       → escalate (operator must seed the
+  Secret; outside the agent's reach)
+- ``helm_timeout``              → retry (transient rollout race; ``/test``
+  the preview check)
+
+The new shapes are inserted BEFORE the existing generic catch-alls so the
+first-match-wins ordering dispatches to the more-actionable bucket. The
+generic shapes remain as fallbacks when none of the subclasses fire.
+
+The "text-pattern path" implemented here covers the case where the
+artefact is rendered inline in the Tekton step log (govulncheck's default
+text mode; ZAP's textual summary; Helm's `INSTALLATION FAILED` stderr).
+Structured artefact ingestion (SARIF JSON, govulncheck `-json`) is the
+companion mechanism in v6p0.6 step 1 (`gate/tools/artefact_parsers.py`);
+both feeds end up in the same dispatcher. Either signal is sufficient on
+its own — patterns are over-cautious by design.
+
 ## Design choices
 
 1. **Pure heuristics over LLM classification.** Each canonical pattern
@@ -86,6 +118,14 @@ CLASSIFICATIONS: Final[dict[str, str]] = {
     'tekton_step_timeout': ACTION_RETRY,
     'preview_deploy_failure': ACTION_ESCALATE,
     'security_scan_finding': ACTION_ESCALATE,
+    # ─ v6p0.6 step 2 additions — more specific shapes than the generic
+    # ``security_scan_finding`` / ``preview_deploy_failure`` catch-alls. ─
+    'govulncheck_vulnerability': ACTION_FIX_CODE,
+    'dynamic_scan_high_finding': ACTION_FIX_CODE,
+    'dynamic_scan_low_finding': ACTION_ESCALATE,
+    'helm_missing_value': ACTION_FIX_CODE,
+    'helm_missing_secret': ACTION_ESCALATE,
+    'helm_timeout': ACTION_RETRY,
     'unknown': ACTION_ESCALATE,
 }
 
@@ -219,6 +259,66 @@ _HEURISTICS: tuple[_Heuristic, ...] = (
             'red finding',
         ),
     ),
+    # ─ v6p0.6 step 2: specific govulncheck shape — must come BEFORE the
+    # generic ``security_scan_finding`` so Go vulnerability advisories route
+    # to ``fix_code`` (bump module) rather than ``escalate``. The agent can
+    # actually fix these (renovate-style bump, pinned upgrade), whereas an
+    # unknown CVE in a base image generally needs human attention. ─
+    _Heuristic(
+        classification='govulncheck_vulnerability',
+        step_name_substrings=(
+            'govulncheck',
+            'vulncheck',
+            'go-vuln',
+            'go-vulncheck',
+        ),
+        log_substrings=(
+            'Vulnerability #',
+            'Your code is affected by',
+            'More info: https://pkg.go.dev/vuln/',
+        ),
+        log_regexes=(
+            # govulncheck advisory IDs are stable: GO-YYYY-NNNN.
+            re.compile(r'\bGO-\d{4}-\d{3,6}\b'),
+        ),
+    ),
+    # ─ v6p0.6 step 2: dynamic-scan severity split. HIGH/CRITICAL findings
+    # are typically code-level fixes (input validation, auth header
+    # tightening) the agent CAN attempt; LOW/INFORMATIONAL findings are
+    # noise the agent should classify and hand off rather than churn on. ─
+    _Heuristic(
+        classification='dynamic_scan_high_finding',
+        step_name_substrings=('dynamic-scan', 'dast', 'zap', 'nuclei'),
+        log_substrings=(
+            # SARIF severity tokens (the structured shape step 1 reads;
+            # the text form is what falls into the step log).
+            '"level": "error"',
+            '"level":"error"',
+            'severity: high',
+            'severity: critical',
+            'Risk: High',
+            'Risk: Critical',
+            # ZAP textual summary lines.
+            'High (Medium):',
+            'Critical (',
+        ),
+    ),
+    _Heuristic(
+        classification='dynamic_scan_low_finding',
+        step_name_substrings=('dynamic-scan', 'dast', 'zap', 'nuclei'),
+        log_substrings=(
+            '"level": "note"',
+            '"level":"note"',
+            '"level": "warning"',
+            '"level":"warning"',
+            'severity: low',
+            'severity: informational',
+            'Risk: Low',
+            'Risk: Informational',
+            'Low (Medium):',
+            'Informational (',
+        ),
+    ),
     _Heuristic(
         classification='security_scan_finding',
         step_name_substrings=('security-scan', 'image-scan', 'trivy', 'grype', 'dynamic-scan'),
@@ -240,6 +340,51 @@ _HEURISTICS: tuple[_Heuristic, ...] = (
             'failed to build:',
             'COPY failed',
             'RUN failed',
+        ),
+    ),
+    # ─ v6p0.6 step 2: Helm-specific subclasses of preview_deploy_failure.
+    # Order matters: the missing-secret pattern checks for "Secret"
+    # explicitly so it routes to escalate (operator must seed), while the
+    # missing-value pattern catches mistyped keys / unset values the agent
+    # can fix in the chart, and the timeout pattern catches transient
+    # rollout races worth retesting. Generic preview_deploy_failure stays
+    # as the catch-all below. ─
+    _Heuristic(
+        classification='helm_missing_secret',
+        step_name_substrings=('preview', 'helm', 'promote', 'deploy'),
+        log_substrings=(
+            'secrets "',  # e.g. `secrets "foo-creds" not found`
+            'Secret "',
+            'secret not found',
+            'could not find secret',
+            'MountVolume.SetUp failed for volume',
+            'secret reference',
+        ),
+    ),
+    _Heuristic(
+        classification='helm_timeout',
+        step_name_substrings=('preview', 'helm', 'promote', 'deploy'),
+        log_substrings=(
+            'timed out waiting for the condition',
+            'Error: timed out waiting',
+            'context deadline exceeded',  # Helm flavoured
+            'release ready timeout',
+            'rollout status timed out',
+        ),
+    ),
+    _Heuristic(
+        classification='helm_missing_value',
+        step_name_substrings=('preview', 'helm', 'promote', 'deploy'),
+        log_substrings=(
+            'execution error at',  # Helm template error preamble
+            'nil pointer evaluating',
+            'map has no entry for key',
+            'at <.Values.',
+            'required value',
+            'missing required key',
+            'coalesce.go',
+            'no template',
+            'YAML parse error',
         ),
     ),
     _Heuristic(
