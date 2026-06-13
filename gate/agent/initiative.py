@@ -609,6 +609,13 @@ async def run_initiative(
     last_turn_count = 0
     last_cost: float | None = None
     crash_sticky_body: str | None = None
+    # Initiative agent-fix-exit-code-after-pr-opened — distinguish the
+    # operator-cancel path from the SDK-crash/max-turns path. The post-loop
+    # normaliser preserves exit_code=2 when ``exit_via_cancel`` is set
+    # (operator intent to terminate) but downgrades 1/2 → 0 when a PR was
+    # opened before an SDK crash or max_turns hit (substantive work shipped;
+    # re-firing is wasteful and triggers K8s BackoffLimitExceeded).
+    exit_via_cancel = False
     # Per-turn writeback (initiative agent-add-per-turn-writeback).
     # We track the NAME of the last tool the agent invoked during the
     # in-flight turn so we can include it in the per-turn writeback
@@ -890,6 +897,12 @@ async def run_initiative(
                         terminal_reason='cancelled',
                     )
                     exit_code = 2
+                    # Initiative agent-fix-exit-code-after-pr-opened — flag
+                    # the cancel path so the post-loop normaliser does NOT
+                    # downgrade this 2 → 0. Operator-intent-to-terminate
+                    # must surface to the Job condition layer even if a PR
+                    # was opened earlier in the run.
+                    exit_via_cancel = True
                     break
     except Exception as exc:  # noqa: BLE001 — SDK raises bare Exception; we narrow via turn-count heuristic
         # The SDK's `receive_messages()` raises a generic Exception when the consumer-set
@@ -972,6 +985,59 @@ async def run_initiative(
             f'agent terminated with exception: {reason}',
             payload={'reason': reason, 'turn_count': last_turn_count, 'max_turns': max_turns},
         )
+
+    # Initiative agent-fix-exit-code-after-pr-opened — normalise the exit
+    # code AFTER the SDK loop has settled but BEFORE the snapshot writer
+    # picks ``terminal_reason``. When the substantive work (opening a PR)
+    # completed before an SDK crash, max_turns hit, or is_error=True
+    # ResultMessage, the process should exit 0 so K8s doesn't retry the
+    # Job. Each retry hits the same SDK regression, runs to the same exit
+    # point, costs another full agent cycle, and eventually trips
+    # BackoffLimitExceeded — bogus failure marker for substantive work
+    # that already shipped (canonical case: run 59aefbd8f2d8, PR #111
+    # merged cleanly while agent_run.status=failed).
+    #
+    # The downgrade is gated on three conditions, in order:
+    #   1. ``exit_code in (1, 2)`` — only failure exits get touched.
+    #   2. ``not exit_via_cancel`` — operator-cancel intent is preserved
+    #      (the operator deliberately triggered shutdown; surfacing that
+    #      to the Job condition layer is correct).
+    #   3. ``pr_emitted is not None`` — a PR URL for THIS repo surfaced
+    #      via a ToolResultBlock during the run. That's the in-process
+    #      signal that substantive PR-opening work landed. Using the
+    #      mid-run ``pr_emitted`` flag (rather than a post-loop
+    #      ``_resolve_pr_number`` lookup) avoids a race where the agent
+    #      could open a PR mid-loop, close it before crashing, and still
+    #      get a downgrade — the GitHub query would return None even
+    #      though the substantive work happened.
+    #
+    # The crash sticky still fires (set by the exception handler above,
+    # posted by ``_post_crash_sticky`` further down) and the warn-level
+    # logs still emit. Operators retain full visibility into the crash
+    # path; only the process exit code changes.
+    if exit_code in (1, 2) and not exit_via_cancel and pr_emitted is not None:
+        click.echo(
+            click.style(
+                f'\n  ✓ exit_code normalisation: PR #{pr_emitted} was opened during this run; '
+                f'downgrading exit_code {exit_code} → 0 so K8s does not retry on a path that '
+                'already shipped substantive work. The crash sticky + warn logs above remain '
+                'as the operator-visible signal.',
+                fg='cyan',
+            ),
+            err=True,
+        )
+        await record_decision(
+            run_id_for_first_turn,
+            'decision',
+            f'exit_code normalisation: pr_opened pr_number={pr_emitted}, downgrading exit_code {exit_code} → 0',
+            payload={
+                'pre_normalisation_exit_code': exit_code,
+                'normalised_exit_code': 0,
+                'pr_number': pr_emitted,
+                'reason': 'pr_opened_before_failure',
+            },
+        )
+        exit_code = 0
 
     # Layer 3 — persist the full conversation snapshot on natural
     # terminal (success path). The exception branch above already
