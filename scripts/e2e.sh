@@ -293,6 +293,118 @@ else
   failures=$((failures + 1))
 fi
 
+# v6p0.5 step 2 — iteration-loop watcher. Verifies the decision module
+# imports cleanly, dispatches the canonical decisions (real_failure →
+# RESPAWN, preview_infra → SKIP_INFRA, max_iterations → ESCALATE),
+# rebuilds feedback_payloads in the v6p0.5 contract shape, and renders
+# the prompt block with screenshot fetch guidance. We exercise it via
+# a small in-process Python invocation; HTTP wiring for re-spawn lives
+# in step 3 of the v6p0.5 plan and will get its own e2e exercise then.
+if uv run python -c "
+from gate.tools.end2end_gate import End2EndFailure, End2EndTest
+from gate.tools.playwright_artifacts import Artifact
+from gate.watcher.iteration_loop import (
+    DEFAULT_MAX_ITERATIONS,
+    IterationContext,
+    IterationDecision,
+    build_feedback_payloads,
+    decide_action,
+    failure_idempotency_key,
+    format_feedback_payloads_for_prompt,
+    manual_fix_label,
+)
+
+# Canonical PR #58 shape: all-infra → SKIP_INFRA on first occurrence.
+infra = End2EndFailure(
+    gate='az/end2end',
+    classification='preview_infra',
+    summary='1/4 checks passed',
+    failed_tests=(
+        End2EndTest(name='01-smoke', status='fail', message='HTTP 000 FAIL'),
+    ),
+    actionable=False,
+)
+ctx_infra = IterationContext(
+    repo='mikelear/leartech-auth-service',
+    pr_number=58,
+    failures=(infra,),
+    iteration_count=0,
+)
+assert decide_action(ctx_infra) == IterationDecision.SKIP_INFRA
+
+# Real failure → RESPAWN; iteration count past ceiling → ESCALATE.
+real = End2EndFailure(
+    gate='az/end2end',
+    classification='real_failure',
+    summary='2/3 checks passed',
+    failed_tests=(
+        End2EndTest(name='03-list', status='fail', message='expected 200 got 500'),
+    ),
+    actionable=True,
+)
+ctx_real = IterationContext(
+    repo='mikelear/leartech-auth-service',
+    pr_number=58,
+    failures=(real,),
+    iteration_count=0,
+)
+assert decide_action(ctx_real) == IterationDecision.RESPAWN
+
+ctx_max = IterationContext(
+    repo='mikelear/leartech-auth-service',
+    pr_number=58,
+    failures=(real,),
+    iteration_count=DEFAULT_MAX_ITERATIONS,
+    max_iterations=DEFAULT_MAX_ITERATIONS,
+)
+assert decide_action(ctx_max) == IterationDecision.ESCALATE_MAX_ITERATIONS
+
+# Idempotency: a key in already_handled_keys filters that failure out.
+already = frozenset({failure_idempotency_key(real)})
+ctx_handled = IterationContext(
+    repo='mikelear/leartech-auth-service',
+    pr_number=58,
+    failures=(real,),
+    iteration_count=0,
+    already_handled_keys=already,
+)
+assert decide_action(ctx_handled) == IterationDecision.NOOP
+
+# Feedback payloads + prompt block: screenshot URLs surface with fetch
+# guidance, ai-review findings merge into the same list.
+ui_failure = End2EndFailure(
+    gate='gcp/end2end-ui',
+    classification='real_failure',
+    summary='2/3 browser tests passed',
+    failed_tests=(End2EndTest(name='01-login', status='fail', message='locator not visible',
+                              screenshot_url='https://artifacts.example/login.png'),),
+    actionable=True,
+    artifact_urls=(Artifact(spec_name='01-login', kind='screenshot',
+                            url='https://artifacts.example/login.png', cluster='gcp'),),
+)
+payloads = build_feedback_payloads(
+    [ui_failure],
+    ai_review_findings=[{'cluster': 'gcp', 'verdict': 'Needs Work', 'score': 65}],
+)
+assert payloads[0]['kind'] == 'end2end_failure'
+assert payloads[1]['kind'] == 'ai_review_finding'
+block = format_feedback_payloads_for_prompt(payloads)
+assert 'Previous-attempt failure context' in block
+assert 'https://artifacts.example/login.png' in block
+assert 'curl' in block.lower()
+assert 'AI code review' in block
+
+# Label name is part of the merge-contract; surfacing here so a typo
+# elsewhere can't silently break Lighthouse Keeper's hold semantics.
+assert manual_fix_label() == 'do-not-merge/manual-fix'
+" > /tmp/e2e-iteration-loop.txt 2>&1; then
+  echo "✓ iteration_loop watcher (decisions, payloads, prompt block, idempotency)"
+else
+  echo "✗ iteration_loop watcher smoke failed" >&2
+  cat /tmp/e2e-iteration-loop.txt >&2
+  failures=$((failures + 1))
+fi
+
 # pipx-install smoke — the operator-facing "no clone needed" entry point.
 # We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
 # every invocation and add ~30s of dep-resolution); instead we verify

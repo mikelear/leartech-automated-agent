@@ -61,6 +61,11 @@ class _FakeInitiative:
     name: str = 'example-initiative'
     is_multi_repo: bool = False
     repos: list[_FakeRepo] = field(default_factory=lambda: [_FakeRepo()])
+    # v6p0.5 step 2 — the loader's Initiative carries this field; the agent's
+    # prompt-construction path reads it to render the previous-attempt
+    # feedback block. The fakes default to an empty list (fresh run, no
+    # respawn) so the prompt code path takes its no-op branch.
+    feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def primary(self) -> _FakeRepo:

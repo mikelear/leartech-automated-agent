@@ -75,13 +75,16 @@ class _FakeRepo:
 class _FakeInitiative:
     """Minimal stand-in for the loader's Initiative dataclass.
 
-    ``run_initiative`` consults ``.name``, ``.is_multi_repo``, and
-    ``.primary`` (which must expose ``.qualified_repo`` + ``.branch``).
+    ``run_initiative`` consults ``.name``, ``.is_multi_repo``, ``.primary``
+    (which must expose ``.qualified_repo`` + ``.branch``), and (v6p0.5
+    step 2) ``.feedback_payloads`` for previous-attempt feedback injection.
     """
 
     name: str = 'example-initiative'
     is_multi_repo: bool = False
     repos: list[_FakeRepo] = field(default_factory=lambda: [_FakeRepo()])
+    # v6p0.5 step 2 — fresh-run default (no respawn feedback).
+    feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def primary(self) -> _FakeRepo:

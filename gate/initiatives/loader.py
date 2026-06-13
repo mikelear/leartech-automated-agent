@@ -131,6 +131,32 @@ class Initiative(BaseModel):
     )
     max_iterations: int = Field(default=5, ge=1, le=20, description='Hard ceiling on agent loop iterations.')
 
+    # v6p0.5 step 2 — feedback context from a prior failed attempt.
+    #
+    # The PR watcher (see ``gate/watcher/iteration_loop.py``) re-spawns
+    # the agent with this field populated when it detects an actionable
+    # end2end / end2end-ui or ai-review failure. The agent's startup
+    # prompt construction (``gate/agent/initiative.py``) reads it and
+    # surfaces each payload as a "previous attempt failed these checks —
+    # read details and fix" block before the standard initiative loop
+    # runs.
+    #
+    # Each entry is a plain dict carrying at least ``kind:`` (the
+    # discriminator — ``'end2end_failure'`` / ``'ai_review_finding'``)
+    # plus the kind-specific fields documented in
+    # :func:`gate.watcher.iteration_loop.format_feedback_payloads_for_prompt`.
+    # Defaults to an empty list — the field is invisible on first-attempt
+    # runs and only ever populated by the watcher's re-spawn path.
+    feedback_payloads: list[dict[str, object]] = Field(
+        default_factory=list,
+        description=(
+            'Feedback context from a prior failed attempt. Each entry has a `kind:` '
+            "discriminator (`end2end_failure` / `ai_review_finding`); the agent's prompt "
+            'construction surfaces it as a "fix this before iterating" block. Populated '
+            "by the PR watcher's re-spawn path; defaults to empty for fresh runs."
+        ),
+    )
+
     @model_validator(mode='after')
     def _normalise_repos(self) -> Initiative:
         legacy_set = bool(self.repo or self.branch or self.base)

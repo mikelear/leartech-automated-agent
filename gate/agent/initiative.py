@@ -64,6 +64,7 @@ from gate.mcp_servers import (
     build_pr_context_server,
     build_tekton_server,
 )
+from gate.watcher.iteration_loop import format_feedback_payloads_for_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -542,12 +543,26 @@ async def run_initiative(
         add_dirs=[str(cwd)],
     )
 
-    user_prompt = (
+    # v6p0.5 step 2 — when the PR watcher re-spawned this run with prior-
+    # attempt feedback, prepend the structured failure context BEFORE the
+    # standard "Run this initiative end-to-end..." instruction. The order
+    # matters: the agent must read the failure detail BEFORE starting its
+    # standard loop (otherwise it begins from "branch check" and uses the
+    # feedback as ambient context, which empirically gets de-prioritised
+    # against the loop steps). ``format_feedback_payloads_for_prompt``
+    # returns the empty string on a fresh first-attempt run, so this is
+    # a no-op for runs that aren't re-spawns.
+    feedback_block = format_feedback_payloads_for_prompt([dict(p) for p in initiative.feedback_payloads])
+    base_prompt = (
         f'Run this initiative end-to-end. Your working directory is `{cwd}`.\n\n'
         f'```yaml\n{initiative_path.read_text()}\n```\n\n'
         f'Begin by checking what state the branch is in (`git status`, `git branch --show-current`), '
         f'then proceed through the loop in your system prompt.'
     )
+    if feedback_block:
+        user_prompt = feedback_block + '\n\n---\n\n' + base_prompt
+    else:
+        user_prompt = base_prompt
 
     click.echo(click.style(f'→ initiative: {initiative.name}', fg='green', bold=True), err=True)
     click.echo(click.style(f'  repo: {primary.qualified_repo}  branch: {primary.branch}', fg='green'), err=True)
