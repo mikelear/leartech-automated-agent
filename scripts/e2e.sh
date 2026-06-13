@@ -241,6 +241,58 @@ else
   failures=$((failures + 1))
 fi
 
+# end2end-gate watcher smoke — v6p0.5 step 1. Verifies the module imports
+# cleanly, exposes the three behaviours documented in its public surface
+# (gate detection, results.json parsing, classification → real_failure /
+# preview_infra), and round-trips the JSON payload contract documented in
+# `gate/tools/end2end_gate.py`. We exercise the parser via a small in-process
+# Python invocation (no HTTP surface yet — wiring into the iteration
+# mechanism is step 2 of the v6p0.5 plan).
+if uv run python -c "
+import json
+from gate.tools.end2end_gate import (
+    build_end2end_failure,
+    classify_end2end_failure,
+    is_end2end_gate,
+    is_end2end_ui_gate,
+    parse_results_json_from_log,
+)
+
+# Gate detection.
+assert is_end2end_gate('az/end2end')
+assert is_end2end_gate('gcp/end2end-ui')
+assert is_end2end_ui_gate('gcp/end2end-ui')
+assert not is_end2end_gate('lint')
+
+# Canonical PR #58 shape — preview-infra classification, non-actionable.
+results = {
+    'success': False,
+    'summary': '1/4 checks passed',
+    'tests': [
+        {'name': '00-seed', 'status': 'pass'},
+        {'name': '01-smoke', 'status': 'fail',
+         'message': 'GET /health/live HTTP 000 FAIL'},
+    ],
+}
+log = '+ ./end2end/01-smoke.sh\n' + json.dumps(results) + '\nexit 1\n'
+
+parsed = parse_results_json_from_log(log)
+assert parsed is not None and parsed['summary'] == '1/4 checks passed'
+assert classify_end2end_failure(parsed, log) == 'preview_infra'
+
+payload = build_end2end_failure(gate='az/end2end', log_tail=log).to_dict()
+assert payload['kind'] == 'end2end_failure'
+assert payload['classification'] == 'preview_infra'
+assert payload['actionable'] is False
+assert payload['failed_tests'][0]['message'].startswith('GET /health/live')
+" > /tmp/e2e-end2end-gate.txt 2>&1; then
+  echo "✓ end2end_gate watcher (parse, classify, payload contract)"
+else
+  echo "✗ end2end_gate watcher smoke failed" >&2
+  cat /tmp/e2e-end2end-gate.txt >&2
+  failures=$((failures + 1))
+fi
+
 # pipx-install smoke — the operator-facing "no clone needed" entry point.
 # We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
 # every invocation and add ~30s of dep-resolution); instead we verify

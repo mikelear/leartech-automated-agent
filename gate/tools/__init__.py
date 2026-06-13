@@ -2,6 +2,17 @@
 
 from gate.tools.ai_review import AIReviewVerdict, read_ai_review_verdicts
 from gate.tools.coverage import CoverageReport, read_coverage_from_pr_comments, read_coverage_threshold
+from gate.tools.end2end_gate import (
+    End2EndFailure,
+    End2EndTest,
+    build_end2end_failure,
+    classify_end2end_failure,
+    extract_failed_tests,
+    fetch_end2end_failure,
+    is_end2end_gate,
+    is_end2end_ui_gate,
+    parse_results_json_from_log,
+)
 from gate.tools.pipelines import PipelineCheck, list_pr_checks
 from gate.tools.playwright_artifacts import (
     Artifact,
@@ -51,6 +62,15 @@ __all__ = [
     'read_coverage_from_pr_comments',
     'AIReviewVerdict',
     'read_ai_review_verdicts',
+    'End2EndFailure',
+    'End2EndTest',
+    'build_end2end_failure',
+    'classify_end2end_failure',
+    'extract_failed_tests',
+    'fetch_end2end_failure',
+    'is_end2end_gate',
+    'is_end2end_ui_gate',
+    'parse_results_json_from_log',
     'fetch_pr_diff',
     'added_files',
     'added_lines',
