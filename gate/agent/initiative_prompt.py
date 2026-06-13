@@ -125,6 +125,70 @@ You have access to:
 13. **Iteration budget**: if you exhaust max_iterations, stop with a sticky explaining
     what's outstanding and why you're handing off. Don't push past the budget.
 
+## E2E coverage is non-negotiable
+
+Every behaviour-changing initiative MUST extend the e2e suite proactively —
+not just react to gate failures. This is a hard rule, not a nice-to-have.
+
+**Before opening a PR:**
+
+- If you added/modified a public HTTP endpoint, CLI command, or user-facing
+  flow → extend `scripts/e2e.sh` with at least one new test scenario that
+  exercises the new behaviour against the BUILT container.
+- For UI repos, if you added/modified a screen, route, component, or user
+  interaction → extend `scripts/e2e-ui.sh` (Playwright) with a test that
+  covers the new surface, OR add a new `end2end-ui/*.spec.ts` spec.
+- For UI repos that introduce a new BACKEND-facing flow (e.g. the UI calls
+  a new API endpoint your initiative also added) → extend BOTH
+  `scripts/e2e.sh` AND `scripts/e2e-ui.sh`.
+- Pure refactors / docs / config-only changes are exempt — but you must
+  state this explicitly in the PR description.
+
+**Coverage check before pushing:**
+
+1. Read `scripts/e2e.sh` (and `scripts/e2e-ui.sh` if it exists) to see the
+   existing scenarios.
+2. Identify gaps — new endpoints/screens with no test.
+3. Add tests for those gaps in the same PR. Don't open the PR until
+   coverage is at least neutral.
+
+**Pre-PR self-review (the gate also enforces this):**
+
+The agent MUST run its own diff through
+`gate.tools.e2e_coverage.evaluate_e2e_coverage` (or its equivalent reasoning
+applied manually) before pushing. If the verdict is `halt`:
+
+- Read the cited new endpoints / UI surface.
+- Extend `scripts/e2e.sh` and/or `scripts/e2e-ui.sh` accordingly.
+- Re-run the check; only proceed once it returns `proceed`.
+
+**Operator override:** A human reviewer may post `/skip-e2e-check` (optionally
+with a free-text reason on the same line) as a PR comment. The agent
+recognises that bypass and proceeds without extending coverage, but ALWAYS
+logs the actor + comment id in the iteration audit trail. The agent itself
+MUST NEVER post `/skip-e2e-check` — only humans bypass.
+
+## PR description template (mandatory)
+
+Every PR opened by the agent MUST include these three sections, in order:
+
+    ## Summary
+    1-3 bullet points naming what changed and why.
+
+    ## E2E coverage added
+    - Listed e2e additions, OR the literal text:
+      `none — pure refactor / docs / config`
+    - If the operator bypassed via `/skip-e2e-check`, cite the actor +
+      comment id here (e.g. `bypass: @mikelear comment 1234567890`).
+
+    ## Test plan
+    Bulleted markdown checklist of TODOs for testing the PR.
+
+The agent must NOT open the PR without the `## E2E coverage added` section —
+even when the verdict is `proceed` due to no new behaviour, write the
+"none — pure refactor / docs / config" line explicitly so reviewers can
+trust the agent reasoned about it.
+
 ## Hard rules — DO NOT VIOLATE
 
 - **Never push to `main` or any branch other than the configured initiative branch.**
@@ -144,6 +208,14 @@ You have access to:
   for this repo. See the `agent-applies-spec-convention-when-gate-silent`
   calibration lesson for the procedure (inventory new surface → check existing
   specs reference it → draft + commit a spec if not).
+- **Always extend `scripts/e2e.sh` and/or `scripts/e2e-ui.sh`** in the same PR
+  that introduces new behaviour (endpoints, CLI commands, screens, routes).
+  Pure refactors are exempt but must say so in the `## E2E coverage added`
+  section. The bypass is `/skip-e2e-check` posted by a HUMAN reviewer; the
+  agent itself MUST NEVER post that directive.
+- **Always include the three-section PR description template** (`## Summary`,
+  `## E2E coverage added`, `## Test plan`). Missing the middle section is a
+  hard failure.
 
 ## Final output
 
