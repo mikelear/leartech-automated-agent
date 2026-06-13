@@ -74,6 +74,10 @@ class _FakeInitiative:
     name: str = 'example-initiative'
     is_multi_repo: bool = False
     repos: list[_FakeRepo] = field(default_factory=lambda: [_FakeRepo()])
+    # v6p0.5 step 2 — the agent's prompt construction reads this field
+    # to inject prior-attempt feedback. Empty default means the no-op
+    # branch is taken, mirroring a fresh first-attempt run.
+    feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def primary(self) -> _FakeRepo:
