@@ -607,6 +607,110 @@ else
   failures=$((failures + 1))
 fi
 
+# v6p0.6 step 3 — per-gate iteration counter + same-error escalation.
+# Verifies the new escalation module imports cleanly, fingerprints are
+# stable across cycles + ignore artefact URLs, and the canonical
+# "same end2end failure twice" walk-through trips
+# SAME_ERROR_REPEATED escalation (the worked example the initiative
+# PR description references). Also exercises the cross-gate cap, the
+# /retry-all manual override, and env-var overrides — proves the
+# operator-facing knobs are wired end-to-end through the deployed
+# wheel.
+if uv run python -c "
+import os
+from gate.watcher.escalation import (
+    DEFAULT_CROSS_GATE_CAP,
+    DEFAULT_SAME_ERROR_THRESHOLD,
+    ENV_SAME_ERROR_THRESHOLD,
+    MANUAL_RETRY_COMMAND,
+    AttemptHistory,
+    EscalationReason,
+    compute_fingerprint,
+    escalation_comment_body,
+    escalation_label,
+    is_manual_retry_command,
+    mark_gate_passed,
+    record_attempt,
+    reset_all,
+    same_error_threshold,
+    should_escalate,
+)
+
+# Label must agree with iteration_loop so Keeper's hold contract is uniform.
+from gate.watcher.iteration_loop import manual_fix_label
+assert escalation_label() == manual_fix_label() == 'do-not-merge/manual-fix'
+
+# Defaults are the documented values; env vars override.
+assert DEFAULT_SAME_ERROR_THRESHOLD == 2
+assert DEFAULT_CROSS_GATE_CAP == 5
+os.environ[ENV_SAME_ERROR_THRESHOLD] = '4'
+assert same_error_threshold() == 4
+del os.environ[ENV_SAME_ERROR_THRESHOLD]
+assert same_error_threshold() == DEFAULT_SAME_ERROR_THRESHOLD
+
+# Fingerprint stability: trace/screenshot URLs vary per cycle but the
+# fingerprint must NOT — that's what lets us detect 'same error twice'.
+canonical = {
+    'kind': 'end2end_failure',
+    'gate': 'az/end2end',
+    'classification': 'real_failure',
+    'failed_tests': [{'name': '03-list', 'message': 'HTTP 500',
+                      'trace_url': 'https://art/run-1/t.zip',
+                      'screenshot_url': 'https://art/run-1/s.png'}],
+}
+next_cycle = dict(canonical)
+next_cycle['failed_tests'] = [dict(canonical['failed_tests'][0])]
+next_cycle['failed_tests'][0]['trace_url'] = 'https://art/run-2/t.zip'
+next_cycle['failed_tests'][0]['screenshot_url'] = 'https://art/run-2/s.png'
+assert compute_fingerprint(canonical) == compute_fingerprint(next_cycle)
+
+# The worked example from the initiative PR description: same end2end
+# failure twice → SAME_ERROR_REPEATED escalation.
+h = AttemptHistory()
+fp = compute_fingerprint(canonical)
+record_attempt(h, gate='az/end2end', fingerprint=fp)
+assert should_escalate(h, gate='az/end2end') is None
+record_attempt(h, gate='az/end2end', fingerprint=fp)
+assert should_escalate(h, gate='az/end2end') == EscalationReason.SAME_ERROR_REPEATED
+body = escalation_comment_body(EscalationReason.SAME_ERROR_REPEATED, h, gate='az/end2end')
+assert 'az/end2end' in body and fp in body and escalation_label() in body
+
+# Green transition resets that gate's counter.
+mark_gate_passed(h, gate='az/end2end')
+record_attempt(h, gate='az/end2end', fingerprint=fp)
+assert should_escalate(h, gate='az/end2end') is None
+
+# Cross-gate cap escalates even when each fp differs.
+h2 = AttemptHistory()
+for i in range(DEFAULT_CROSS_GATE_CAP):
+    record_attempt(h2, gate=f'g{i}', fingerprint=f'fp{i}')
+assert should_escalate(h2, gate='g0') == EscalationReason.CROSS_GATE_BUDGET_EXHAUSTED
+
+# Manual override.
+assert is_manual_retry_command(MANUAL_RETRY_COMMAND)
+assert is_manual_retry_command('Fixed cluster issue\n/retry-all\n')
+assert not is_manual_retry_command('please /retest')
+reset_all(h2)
+assert h2.total_attempts == 0
+
+# AttemptHistory round-trips via to_dict / from_dict — the catalog-DB
+# storage shape must survive a JSON round-trip without losing data.
+import json
+h3 = AttemptHistory()
+record_attempt(h3, gate='a', fingerprint='1')
+record_attempt(h3, gate='a', fingerprint='2')
+record_attempt(h3, gate='b', fingerprint='3')
+restored = AttemptHistory.from_dict(json.loads(json.dumps(h3.to_dict())))
+assert restored.gate_attempts == h3.gate_attempts
+assert restored.total_attempts == 3
+" > /tmp/e2e-escalation.txt 2>&1; then
+  echo "✓ escalation watcher (fingerprints, same-error, cross-gate cap, /retry-all, env overrides, round-trip)"
+else
+  echo "✗ escalation watcher smoke failed" >&2
+  cat /tmp/e2e-escalation.txt >&2
+  failures=$((failures + 1))
+fi
+
 # pipx-install smoke — the operator-facing "no clone needed" entry point.
 # We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
 # every invocation and add ~30s of dep-resolution); instead we verify
