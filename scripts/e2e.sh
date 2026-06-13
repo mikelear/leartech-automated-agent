@@ -711,6 +711,185 @@ else
   failures=$((failures + 1))
 fi
 
+# v6p0.6 step 2 — extended gate dispatcher. Verifies that govulncheck,
+# dynamic-scan severity split, and Helm preview-deploy subclasses route
+# to the right action (fix_code / escalate / retry) rather than falling
+# through to the generic ``security_scan_finding`` / ``preview_deploy_failure``
+# escalate buckets. The classifier is pure; no HTTP / cluster needed —
+# just an in-process Python invocation.
+if uv run python -c "
+from gate.agent.step_failure_diagnosis import (
+    ACTION_ESCALATE,
+    ACTION_FIX_CODE,
+    ACTION_RETRY,
+    classify_step_failure,
+)
+
+# govulncheck — fix_code (module bump)
+f = classify_step_failure('govulncheck',
+    'Vulnerability #1: GO-2024-3107\nYour code is affected by 1 vulnerability')
+assert f.classification == 'govulncheck_vulnerability'
+assert f.action == ACTION_FIX_CODE
+
+# dynamic-scan HIGH — fix_code
+f = classify_step_failure('dynamic-scan',
+    'High (Medium): Cross-Site Scripting (Reflected) [40012]')
+assert f.classification == 'dynamic_scan_high_finding'
+assert f.action == ACTION_FIX_CODE
+
+# dynamic-scan LOW — escalate
+f = classify_step_failure('dynamic-scan',
+    'Low (Medium): X-Content-Type-Options Header Missing [10021]')
+assert f.classification == 'dynamic_scan_low_finding'
+assert f.action == ACTION_ESCALATE
+
+# Helm missing-value — fix_code (chart patch)
+f = classify_step_failure('helm-promote',
+    'Error: INSTALLATION FAILED: nil pointer evaluating interface {}.repository '
+    'at <.Values.image.repository>')
+assert f.classification == 'helm_missing_value'
+assert f.action == ACTION_FIX_CODE
+
+# Helm missing-secret — escalate (operator must seed)
+f = classify_step_failure('helm-promote',
+    'Error: INSTALLATION FAILED: secrets \"preview-db-creds\" not found')
+assert f.classification == 'helm_missing_secret'
+assert f.action == ACTION_ESCALATE
+
+# Helm timeout — retry (transient rollout race)
+f = classify_step_failure('helm-promote',
+    'Error: UPGRADE FAILED: timed out waiting for the condition')
+assert f.classification == 'helm_timeout'
+assert f.action == ACTION_RETRY
+" > /tmp/e2e-extended-dispatch.txt 2>&1; then
+  echo "✓ extended gate dispatcher (govulncheck, dynamic-scan severity, helm subclasses)"
+else
+  echo "✗ extended gate dispatcher smoke failed" >&2
+  cat /tmp/e2e-extended-dispatch.txt >&2
+  failures=$((failures + 1))
+fi
+
+# v6p0.6 step 4 — ai-review auto-iterate on red findings. Verifies the
+# extended parser exposes structured red findings, the watcher's pure
+# decision module maps verdicts to RESPAWN / ESCALATE_LOW_CONFIDENCE / NOOP
+# correctly across the canonical scenarios (all-green / yellow-only /
+# red+high-score / red+low-score), the structured payload round-trips
+# through build_feedback_payloads, and idempotency holds (same verdict =
+# no double-iterate, superseded verdict = re-evaluate). Same in-process
+# Python pattern as the v6p0.5 step-2 smoke above.
+if uv run python -c "
+from gate.tools.ai_review import (
+    AIReviewFinding,
+    AIReviewVerdict,
+    parse_ai_review_comment,
+    parse_ai_review_findings,
+)
+from gate.watcher.ai_review_iteration import (
+    SCORE_CONFIDENCE_THRESHOLD,
+    AIReviewDecision,
+    AIReviewIterationContext,
+    build_ai_review_failure_payload,
+    build_ai_review_failure_payloads,
+    decide_ai_review_action,
+    format_ai_review_failure_payload,
+    verdict_idempotency_key,
+)
+from gate.watcher.iteration_loop import (
+    build_feedback_payloads,
+    format_feedback_payloads_for_prompt,
+)
+
+# Parser: extracts only Issues Found bullets, not Suggestions.
+body = '''## :warning: AI Code Review: **95/100 — Good** \`[gcp]\`
+
+### Issues Found
+
+- :red_circle: [claude] \`a.go:1\` real-issue
+
+### Suggestions
+
+- :red_circle: [claude] \`b.go:9\` looks-like-an-issue-but-isnt
+'''
+findings = parse_ai_review_findings(body)
+assert len(findings) == 1, findings
+assert findings[0].severity == 'red'
+assert findings[0].location == 'a.go:1'
+
+verdict = parse_ai_review_comment(body)
+assert verdict is not None
+assert verdict.score == 95
+assert len(verdict.red_findings) == 1
+
+# Decision matrix:
+# - all green: NOOP
+green = parse_ai_review_comment('## :white_check_mark: AI Code Review: **95/100 — Excellent** \`[gcp]\`\n')
+assert green is not None
+ctx_green = AIReviewIterationContext(repo='m/r', pr_number=1, verdicts=(green,))
+assert decide_ai_review_action(ctx_green) == AIReviewDecision.NOOP
+
+# - red + score 95 (≥86): RESPAWN
+ctx_high = AIReviewIterationContext(repo='m/r', pr_number=1, verdicts=(verdict,))
+assert decide_ai_review_action(ctx_high) == AIReviewDecision.RESPAWN
+
+# - red + score 70 (<86): ESCALATE_LOW_CONFIDENCE (Class A)
+low_body = '''## :warning: AI Code Review: **70/100 — Needs Work** \`[az]\`
+### Issues Found
+
+- :red_circle: [claude] \`Dockerfile:27\` Hardcoded secret
+'''
+low = parse_ai_review_comment(low_body)
+assert low is not None and low.score < SCORE_CONFIDENCE_THRESHOLD
+ctx_low = AIReviewIterationContext(repo='m/r', pr_number=1, verdicts=(low,))
+assert decide_ai_review_action(ctx_low) == AIReviewDecision.ESCALATE_LOW_CONFIDENCE
+
+# Idempotency: same verdict, key in handled set → NOOP.
+key = verdict_idempotency_key(verdict)
+ctx_handled = AIReviewIterationContext(
+    repo='m/r', pr_number=1, verdicts=(verdict,),
+    already_handled_keys=frozenset({key}),
+)
+assert decide_ai_review_action(ctx_handled) == AIReviewDecision.NOOP
+
+# Superseded verdict: same cluster, different finding text → different key.
+superseded_body = '''## :warning: AI Code Review: **95/100 — Good** \`[gcp]\`
+### Issues Found
+
+- :red_circle: [claude] \`a.go:1\` real-issue UPDATED with more context
+'''
+superseded = parse_ai_review_comment(superseded_body)
+assert superseded is not None
+assert verdict_idempotency_key(superseded) != verdict_idempotency_key(verdict)
+
+# Payload contract: kind='ai_review_failure', carries red findings.
+payload = build_ai_review_failure_payload(verdict)
+assert payload['kind'] == 'ai_review_failure'
+assert payload['cluster'] == 'gcp'
+assert payload['score'] == 95
+assert len(payload['red_findings']) == 1
+assert payload['red_findings'][0]['location'] == 'a.go:1'
+
+# build_ai_review_failure_payloads filters non-red verdicts.
+payloads = build_ai_review_failure_payloads([green, verdict])
+assert len(payloads) == 1
+
+# build_feedback_payloads routes ai_review_failures into the output list.
+out = build_feedback_payloads([], ai_review_failures=[payload])
+assert len(out) == 1
+assert out[0]['kind'] == 'ai_review_failure'
+
+# Prompt-block rendering surfaces the red finding's location + fix hint.
+block = format_feedback_payloads_for_prompt([payload])
+assert 'AI code review (gcp)' in block
+assert 'a.go:1' in block
+assert 'Red findings' in block
+" > /tmp/e2e-ai-review-iterate.txt 2>&1; then
+  echo "✓ ai-review auto-iterate (red findings → respawn / escalate / noop, idempotency, payload contract)"
+else
+  echo "✗ ai-review auto-iterate smoke failed" >&2
+  cat /tmp/e2e-ai-review-iterate.txt >&2
+  failures=$((failures + 1))
+fi
+
 # pipx-install smoke — the operator-facing "no clone needed" entry point.
 # We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
 # every invocation and add ~30s of dep-resolution); instead we verify
