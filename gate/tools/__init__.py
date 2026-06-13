@@ -13,6 +13,23 @@ from gate.tools.end2end_gate import (
     is_end2end_ui_gate,
     parse_results_json_from_log,
 )
+from gate.tools.parsers import (
+    ARTEFACT_PARSERS,
+    GATE_TO_ARTEFACT_TYPE,
+    Finding,
+    GateFailure,
+    normalise_severity,
+    parse_coverage_json,
+    parse_gate_artefact,
+    parse_gate_artefact_auto,
+    parse_govulncheck_json,
+    parse_junit_xml,
+    parse_playwright_json,
+    parse_results_json,
+    parse_sarif,
+    parse_trivy_json,
+    resolve_artefact_type,
+)
 from gate.tools.pipelines import PipelineCheck, list_pr_checks
 from gate.tools.playwright_artifacts import (
     Artifact,
@@ -101,4 +118,20 @@ __all__ = [
     'SpecSuggestion',
     'suggest_spec',
     'is_anthropic_key_present',
+    # v6p0.6 step 1 — structured artefact parsers + dispatcher
+    'ARTEFACT_PARSERS',
+    'Finding',
+    'GATE_TO_ARTEFACT_TYPE',
+    'GateFailure',
+    'normalise_severity',
+    'parse_coverage_json',
+    'parse_gate_artefact',
+    'parse_gate_artefact_auto',
+    'parse_govulncheck_json',
+    'parse_junit_xml',
+    'parse_playwright_json',
+    'parse_results_json',
+    'parse_sarif',
+    'parse_trivy_json',
+    'resolve_artefact_type',
 ]

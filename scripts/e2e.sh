@@ -405,6 +405,208 @@ else
   failures=$((failures + 1))
 fi
 
+# v6p0.6 step 1 — structured artefact parsers (SARIF / JUnit / Trivy /
+# govulncheck / coverage / Playwright / results.json). Verifies that the
+# parser registry imports cleanly, every documented artefact type has a
+# parser registered, the gate-name → artefact-type resolution covers the
+# canonical Tekton gates, and the dispatcher returns a GateFailure payload
+# in the contract shape from the initiative goal. The fixtures here are the
+# same minimal shapes the unit tests use (see
+# tests/test_structured_artefact_parsers.py), exercised via the deployed
+# wheel so a packaging miss (missing __init__.py, wrong wheel includes)
+# fails this script — exactly the gap scripts/e2e.sh is meant to catch per
+# `every-initiative-extends-the-e2e-script` lesson.
+if uv run python -c "
+import json
+from gate.tools.parsers import (
+    ARTEFACT_PARSERS,
+    GATE_TO_ARTEFACT_TYPE,
+    GateFailure,
+    parse_gate_artefact,
+    parse_gate_artefact_auto,
+    parse_sarif,
+    parse_junit_xml,
+    parse_trivy_json,
+    parse_govulncheck_json,
+    parse_coverage_json,
+    parse_playwright_json,
+    parse_results_json,
+    resolve_artefact_type,
+)
+from gate.watcher.artefact_dispatch import dispatch_structured_failure
+
+# Registry covers every documented artefact type.
+assert set(ARTEFACT_PARSERS) == {
+    'sarif', 'junit', 'results_json', 'coverage_json',
+    'trivy_json', 'govulncheck_json', 'playwright_json',
+}
+
+# Each gate→type mapping points at a real parser.
+for gate, atype in GATE_TO_ARTEFACT_TYPE.items():
+    assert atype in ARTEFACT_PARSERS, (gate, atype)
+
+# Gate-name resolution handles cluster prefixes both ways.
+assert resolve_artefact_type('security-scan') == 'sarif'
+assert resolve_artefact_type('gcp/security-scan') == 'sarif'
+assert resolve_artefact_type('az/end2end-ui') == 'playwright_json'
+assert resolve_artefact_type('lint') is None  # unmapped → fall-back
+
+# SARIF — score-based severity inference (security-severity → critical).
+sarif = json.dumps({
+    'version': '2.1.0',
+    'runs': [{
+        'tool': {'driver': {'name': 'trivy'}},
+        'results': [{
+            'ruleId': 'CVE-2024-9999',
+            'level': 'error',
+            'message': {'text': 'demo'},
+            'properties': {'security-severity': '9.8'},
+            'locations': [{'physicalLocation': {
+                'artifactLocation': {'uri': 'lib/x'},
+                'region': {'startLine': 1},
+            }}],
+        }],
+    }],
+})
+findings = parse_sarif(sarif)
+assert len(findings) == 1 and findings[0].severity == 'critical'
+
+# JUnit XML — one failure, one skipped.
+junit_xml = '''<?xml version=\"1.0\"?>
+<testsuites><testsuite name=\"t\">
+  <testcase classname=\"c\" name=\"ok\"/>
+  <testcase classname=\"c\" name=\"bad\"><failure type=\"AssertionError\" message=\"boom\">stack</failure></testcase>
+  <testcase classname=\"c\" name=\"skip\"><skipped message=\"ci-only\"/></testcase>
+</testsuite></testsuites>'''
+findings = parse_junit_xml(junit_xml)
+assert len(findings) == 2  # failure + skipped
+
+# Trivy native JSON — vuln + misconfig.
+trivy = json.dumps({
+    'Results': [{
+        'Target': 'alpine',
+        'Vulnerabilities': [{
+            'VulnerabilityID': 'CVE-2024-1',
+            'PkgName': 'openssl',
+            'InstalledVersion': '1.0',
+            'Severity': 'HIGH',
+            'Title': 'demo',
+        }],
+        'Misconfigurations': [{'ID': 'AVD-1', 'Severity': 'LOW', 'Title': 'as root'}],
+    }],
+})
+findings = parse_trivy_json(trivy)
+assert len(findings) == 2
+
+# govulncheck — CALLED finding has trace[0].position; severity high.
+govuln = '\\n'.join([
+    json.dumps({'osv': {'id': 'GO-1', 'summary': 's', 'references': []}}),
+    json.dumps({'finding': {
+        'osv': 'GO-1',
+        'trace': [{
+            'function': {'name': 'pkg.Fn'},
+            'position': {'filename': 'main.go', 'line': 1},
+        }],
+    }}),
+])
+findings = parse_govulncheck_json(govuln)
+assert len(findings) == 1
+assert findings[0].severity == 'high'
+assert findings[0].extra['called'] is True
+
+# Coverage JSON — total below threshold + per-file findings.
+coverage = json.dumps({
+    'totals': {'percent_covered': 60.0},
+    'files': {'a.py': {'summary': {'percent_covered': 10.0, 'missing_lines': [1, 2]}}},
+})
+findings = parse_coverage_json(coverage, threshold=80.0)
+assert any(f.location == '<total>' for f in findings)
+assert any(f.location == 'a.py' for f in findings)
+
+# Playwright JSON — flat suite with one failure (with attachments).
+pw = json.dumps({
+    'suites': [{
+        'title': 'login.spec.ts', 'file': 'login.spec.ts',
+        'specs': [{
+            'title': 'shows', 'file': 'login.spec.ts',
+            'tests': [{
+                'results': [{
+                    'status': 'failed',
+                    'error': {'message': 'timeout'},
+                    'attachments': [{'name': 'screenshot', 'url': 'https://x/p.png'}],
+                }],
+            }],
+        }],
+    }],
+})
+findings = parse_playwright_json(pw)
+assert len(findings) == 1
+assert findings[0].extra['screenshot_urls'] == ['https://x/p.png']
+
+# results.json — v6p0.5 PR #58 shape still parses through the new wrapper.
+results = json.dumps({
+    'success': False,
+    'summary': '0/1 checks passed',
+    'tests': [{'name': '01-smoke', 'status': 'fail', 'message': 'HTTP 000 FAIL'}],
+})
+findings = parse_results_json(results)
+assert len(findings) == 1 and findings[0].location == '01-smoke'
+
+# Dispatcher: gate → artefact-type → parser → GateFailure payload.
+gf = parse_gate_artefact(gate='az/security-scan', artefact_type='sarif', content=sarif)
+assert gf is not None
+assert gf.gate == 'az/security-scan'
+assert gf.artefact_type == 'sarif'
+assert gf.actionable is True
+payload = gf.to_dict()
+assert payload['kind'] == 'gate_failure'
+assert payload['top_severity'] == 'critical'
+
+# Auto-resolve via gate name alone.
+gf2 = parse_gate_artefact_auto(gate='gcp/security-scan', content=sarif)
+assert gf2 is not None and gf2.artefact_type == 'sarif'
+
+# Watcher seam — dispatch_structured_failure with an injected fetcher.
+calls = []
+def fake_fetch(gate, prun, cluster):
+    calls.append((gate, prun, cluster))
+    return sarif.encode('utf-8')
+gf3 = dispatch_structured_failure(
+    gate='az/security-scan',
+    pipelinerun_name='svc-pr1-abc',
+    cluster='az',
+    artefact_fetcher=fake_fetch,
+)
+assert gf3 is not None and gf3.artefact_type == 'sarif'
+assert calls == [('az/security-scan', 'svc-pr1-abc', 'az')]
+
+# Fall-through: unmapped gate → None (caller uses heuristic dispatcher).
+def must_not_be_called(*_):  # type: ignore[no-untyped-def]
+    raise AssertionError('fetcher must not be called for unmapped gate')
+assert dispatch_structured_failure(
+    gate='gcp/lint',
+    pipelinerun_name='x',
+    cluster='gcp',
+    artefact_fetcher=must_not_be_called,
+) is None
+
+# Soft-fail: fetcher raises → dispatcher returns None (heuristic fallback).
+def raises_fetch(*_):  # type: ignore[no-untyped-def]
+    raise RuntimeError('kubectl context error')
+assert dispatch_structured_failure(
+    gate='az/security-scan',
+    pipelinerun_name='x',
+    cluster='az',
+    artefact_fetcher=raises_fetch,
+) is None
+" > /tmp/e2e-artefact-parsers.txt 2>&1; then
+  echo "✓ structured artefact parsers (sarif/junit/trivy/govulncheck/coverage/playwright/results_json + dispatcher)"
+else
+  echo "✗ structured artefact parsers smoke failed" >&2
+  cat /tmp/e2e-artefact-parsers.txt >&2
+  failures=$((failures + 1))
+fi
+
 # pipx-install smoke — the operator-facing "no clone needed" entry point.
 # We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
 # every invocation and add ~30s of dep-resolution); instead we verify
