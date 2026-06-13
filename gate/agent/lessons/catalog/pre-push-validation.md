@@ -13,6 +13,8 @@ applies_to:
 status: encoded
 encoded_in:
   - gate/agent/lessons/catalog/pre-push-validation.md
+  - gate/agent/gauntlets.py
+  - gate/agent/initiative_prompt.py
 encoded_at: 2026-05-25T00:00:00Z
 ---
 
@@ -97,21 +99,37 @@ With `uv` available in the agent image, all of these are locally runnable via
 `uv run ruff ...` / `uv run mypy ...` / `uv run pytest`. Run them before
 pushing any self-modification PR.
 
-## Layer 1 vs Layer 2
+## Layer 1 vs Layer 1.5 vs Layer 2
 
-This lesson is **Layer 1** of the pre-push validation design:
+This lesson is **Layer 1** of the pre-push validation design. As of v6p0.6
+step 5 (2026-06-13) it's promoted to **Layer 1.5** — enforcement via a
+dedicated `gate.agent.gauntlets` module:
 
-- **Layer 1 (this lesson)**: The agent reads the consumer repo's actual
-  pipeline YAML files at push time and extracts commands from `script:` blocks.
-  Simple, zero infrastructure, brittle only if pipeline scripts are very
-  complex (multi-step pipelines with uses: references, templating, etc.).
+- **Layer 1 (the original lesson)**: The agent reads the consumer repo's
+  actual pipeline YAML files at push time and extracts commands from
+  `script:` blocks. Simple, zero infrastructure, brittle only if pipeline
+  scripts are very complex (multi-step pipelines with `uses:` references,
+  templating, etc.). This text remains the fallback when the agent can't
+  import `gate.agent.gauntlets` (e.g. running in a consumer repo's
+  container that doesn't ship this codebase).
 
-- **Layer 2 (follow-up if Layer 1 proves brittle)**: An MCP server
+- **Layer 1.5 (`gate/agent/gauntlets.py` + prompt enforcement)**: A
+  per-language `GAUNTLETS` dict + `run_gauntlet()` dispatcher promotes
+  the "best-effort guidance" of Layer 1 to an enforced step in the
+  agent's loop. The `initiative_prompt.py` system prompt now says
+  `commit → run gauntlet → push if green` for BOTH the initial-PR push
+  (Step 4) AND every iteration push (Step 10). Failures surface as
+  `{kind: gauntlet_failure, ...}` payloads consumed by the same
+  iteration mechanism that handles Tekton-gate failures. Operator
+  bypass via `/skip-gauntlet <check>` (HUMAN-only, audited).
+
+- **Layer 2 (follow-up if Layer 1.5 proves brittle)**: An MCP server
   (`mcp__leartech-gate__list_local_runnable_commands`) parses the pipeline
   catalog, resolves `uses:` references, and returns a structured list of
   `{task, command, toolchain, runnable_locally}` objects. The agent calls
-  the MCP tool instead of parsing YAML manually. Layer 2 is a separate
-  initiative if/when Layer 1 proves insufficient.
+  the MCP tool instead of relying on the hand-curated `GAUNTLETS` dict.
+  Layer 2 is a separate initiative if/when the static dict drifts from
+  the actual pipeline definitions.
 
 ## See also
 

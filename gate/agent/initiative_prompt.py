@@ -29,8 +29,12 @@ You have access to:
    Read/Glob/Grep before writing — don't fabricate. Look at adjacent specs / configs
    the goal references.
 3. **Make the changes**. Follow any constraints in the goal section verbatim.
-4. **Commit + push**: use `git add` for the specific files you changed (never `git add -A`).
-   Conventional commit message. Push to origin.
+4. **Commit → run gauntlet → push if green**: use `git add` for the specific files
+   you changed (never `git add -A`). Conventional commit message. Then, BEFORE
+   `git push`, run the locally-available pre-push gauntlet for the detected
+   language (see "Pre-push gauntlet" below). Only push if every available
+   gauntlet check passes. If a check fails, iterate on the code, re-commit,
+   re-run the gauntlet, push only when green.
 5. **Open or update the PR + place a merge hold**: `gh pr create` if it doesn't exist;
    otherwise just push triggers an update. Title summarises the change; description
    cites the initiative.
@@ -88,8 +92,8 @@ You have access to:
        | action | meaning | what to do |
        |---|---|---|
        | `rebase` | git_merge_conflict in git-clone step | call `mcp__leartech-tekton__rebase_branch_on_base(repo_cwd, branch, base)`; on `status: conflict` post sticky + escalate, do NOT retry |
-       | `fix_code` | ruff_format_error / ruff_lint_error / mypy_type_error / ai_review_red_finding | edit the cited file(s), commit, push |
-       | `fix_test` | pytest_test_failure | edit the test, commit, push |
+       | `fix_code` | ruff_format_error / ruff_lint_error / mypy_type_error / ai_review_red_finding | edit the cited file(s), commit, **run gauntlet (see below)**, push only if green |
+       | `fix_test` | pytest_test_failure | edit the test, commit, **run gauntlet**, push only if green |
        | `retry` | tekton_step_timeout — transient | `gh pr comment <pr> --body "/test <check>"`, wait_for_first_failure_or_all_pass again |
        | `escalate` | kaniko_build_failure / image_pull_backoff / OOM / security_scan / preview_deploy / unknown | post sticky describing the diagnosed cause, stop iterating, hand off |
 
@@ -124,6 +128,62 @@ You have access to:
 
 13. **Iteration budget**: if you exhaust max_iterations, stop with a sticky explaining
     what's outstanding and why you're handing off. Don't push past the budget.
+
+## Pre-push gauntlet (MANDATORY before every `git push`)
+
+The locally-available subset of the gate's PR pipeline MUST run BEFORE every
+`git push` — both the initial PR push (Step 4) AND every iteration push
+(Step 10). A gauntlet failure surfaces as the structured payload
+`{kind: gauntlet_failure, check: <name>, command: <cmd>, output: <log>,
+language: <lang>, returncode: <int>}` and is fed back into the same
+iteration mechanism as Tekton-gate failures (same fingerprinting + same
+iteration counter). Big budget win: gauntlet failures cost ~1 turn vs the
+~10 min CI cycle a push-without-gauntlet would burn.
+
+Use the helper module:
+
+    from gate.agent.gauntlets import run_gauntlet, parse_skip_gauntlet_directives
+    result = run_gauntlet(repo_root='.', language=initiative.language)
+    if not result.passed:
+        # Iterate on the FIRST failure. Don't push.
+        for failure in result.failures:
+            ...  # edit the cited file/test, re-commit
+
+If you can't import `gate.agent.gauntlets` (e.g. running in a consumer repo's
+container that doesn't ship this codebase), fall back to invoking the
+gauntlet commands manually for the detected language:
+
+| Language | Gauntlet commands (run in repo root, in order) |
+|---|---|
+| **python** | `ruff format --check .`, `ruff check .`, `mypy .`, `pytest -x -q` |
+| **go** | `gofmt -l .` (fail if output non-empty), `go vet ./...`, `golangci-lint run`, `go test -count=1 ./...` |
+| **angular** | `npm run lint`, `npm test -- --watch=false --browsers=ChromeHeadless` |
+| **rust** | `cargo fmt -- --check`, `cargo clippy -- -D warnings`, `cargo test` |
+
+**Cannot-run-locally checks** (image-scan, dynamic-scan, ai-review, end2end,
+end2end-ui, security-scan): explicitly DON'T try to reproduce these locally.
+They require cluster infrastructure (kaniko-built image, preview deploy, DAST
+runner). The locally-runnable subset above is all the gauntlet is for; the
+cluster gate covers the rest.
+
+**Missing toolchains**: if `command -v <tool>` fails (e.g. `golangci-lint`
+isn't in the agent's container image), skip that check with a warning log
+and continue. Do NOT try to install missing tools — that's a separate
+concern (extending the base image). Note skipped checks in the PR sticky
+under "Pre-push validation" so reviewers see what was bypassed.
+
+**Operator override**: a HUMAN reviewer may post `/skip-gauntlet <check-name>`
+as a PR comment to bypass a specific check (e.g. `/skip-gauntlet mypy` if a
+typing regression is known and being handled separately). The agent picks
+up the directive on the next iteration via
+`parse_skip_gauntlet_directives()`. The agent itself MUST NEVER post
+`/skip-gauntlet` — only humans bypass. Bypasses are audited via the
+directive's `actor` + `comment_id` fields.
+
+**E2E scripts cannot run locally**: do NOT try to run `scripts/e2e.sh` as
+part of the gauntlet — it needs a real preview deploy / running server.
+The gauntlet covers the locally-runnable subset only; `scripts/e2e.sh`
+runs in CI against the deployed preview.
 
 ## E2E coverage is non-negotiable
 
@@ -208,6 +268,11 @@ trust the agent reasoned about it.
   for this repo. See the `agent-applies-spec-convention-when-gate-silent`
   calibration lesson for the procedure (inventory new surface → check existing
   specs reference it → draft + commit a spec if not).
+- **Always run the pre-push gauntlet** before every `git push` — both the
+  initial PR push and every iteration push. A failing gauntlet check is a
+  HARD STOP: iterate on the failure instead of pushing. The only permitted
+  bypass is a HUMAN-posted `/skip-gauntlet <check>` PR comment; the agent
+  MUST NEVER post that directive. See the "Pre-push gauntlet" section.
 - **Always extend `scripts/e2e.sh` and/or `scripts/e2e-ui.sh`** in the same PR
   that introduces new behaviour (endpoints, CLI commands, screens, routes).
   Pure refactors are exempt but must say so in the `## E2E coverage added`

@@ -665,6 +665,119 @@ else
   failures=$((failures + 1))
 fi
 
+# v6p0.6 step 5 — pre-push gauntlet enforcement. Verifies that the
+# `gate.agent.gauntlets` module imports cleanly via the deployed wheel
+# (catches a packaging miss), that the GAUNTLETS dict covers the four
+# supported languages, that language auto-detection works against an
+# in-process tmpdir, that the dispatcher runs commands in order via an
+# injected runner, and that a failing check produces the structured
+# `gauntlet_failure` payload documented in the initiative goal. No
+# real subprocess execution — the injected runner returns deterministic
+# outcomes so this stays portable across CI shells.
+if uv run python -c "
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
+
+from gate.agent.gauntlets import (
+    GAUNTLETS, SKIP_LOCALLY, GauntletCheck, GauntletRunner,
+    _RunOutcome, detect_language, parse_skip_gauntlet_directives, run_gauntlet,
+)
+
+# GAUNTLETS dict — minimum required language coverage.
+assert {'python', 'go', 'angular', 'rust'}.issubset(GAUNTLETS)
+assert {'image-scan', 'dynamic-scan', 'ai-review', 'end2end', 'end2end-ui'}.issubset(SKIP_LOCALLY)
+
+# Python gauntlet check order: format → lint → types → tests.
+py_names = [c.name for c in GAUNTLETS['python']]
+assert py_names == ['ruff-format', 'ruff-check', 'mypy', 'pytest']
+
+# Language detection against fresh tmpdir.
+with TemporaryDirectory() as tmp:
+    Path(tmp, 'pyproject.toml').write_text('[project]\nname=\"x\"\n')
+    assert detect_language(tmp) == 'python'
+with TemporaryDirectory() as tmp:
+    Path(tmp, 'go.mod').write_text('module example\n')
+    assert detect_language(tmp) == 'go'
+with TemporaryDirectory() as tmp:
+    assert detect_language(tmp) is None  # empty dir → no marker
+
+# Dispatcher happy path — injected runner, all checks pass.
+class FakeRunner(GauntletRunner):
+    def __init__(self, outcomes):
+        self.outcomes = outcomes
+        self.calls = []
+    def which(self, tool):
+        return tool in self.outcomes
+    def run(self, argv, *, cwd, timeout):
+        self.calls.append(tuple(argv))
+        return self.outcomes[argv[0]]
+
+with TemporaryDirectory() as tmp:
+    Path(tmp, 'pyproject.toml').write_text('[project]\nname=\"x\"\n')
+    runner = FakeRunner({
+        'ruff': _RunOutcome(returncode=0),
+        'mypy': _RunOutcome(returncode=0),
+        'pytest': _RunOutcome(returncode=0),
+    })
+    result = run_gauntlet(tmp, runner=runner)
+    assert result.passed is True
+    assert result.language == 'python'
+    assert result.failures == ()
+    # ruff invoked twice (format + check), then mypy, then pytest.
+    assert [c[0] for c in runner.calls] == ['ruff', 'ruff', 'mypy', 'pytest']
+
+# Dispatcher failure path — ruff fails, mypy + pytest must NOT run.
+with TemporaryDirectory() as tmp:
+    Path(tmp, 'pyproject.toml').write_text('[project]\nname=\"x\"\n')
+    runner = FakeRunner({
+        'ruff': _RunOutcome(returncode=1, stderr='boom'),
+        'mypy': _RunOutcome(returncode=0),
+        'pytest': _RunOutcome(returncode=0),
+    })
+    result = run_gauntlet(tmp, runner=runner)
+    assert result.passed is False
+    assert len(result.failures) == 1
+    payload = result.failures[0].to_dict()
+    assert payload['kind'] == 'gauntlet_failure'
+    assert payload['check'] == 'ruff-format'
+    assert payload['language'] == 'python'
+    assert payload['returncode'] == 1
+    assert 'boom' in payload['output']
+    assert [c[0] for c in runner.calls] == ['ruff']  # mypy + pytest skipped
+
+# Operator /skip-gauntlet directive parsing.
+comments = [
+    {'body': '/skip-gauntlet mypy', 'user': {'login': 'mikelear'}, 'id': 99},
+    {'body': '/skip-gauntlet ruff-format', 'user': {'login': 'leartech-agent-bot'}, 'id': 100},
+]
+directives = parse_skip_gauntlet_directives(comments, agent_login='leartech-agent-bot')
+# Only the human directive survives — agent self-bypass is rejected (audit).
+assert len(directives) == 1
+assert directives[0].check == 'mypy'
+assert directives[0].actor == 'mikelear'
+assert directives[0].comment_id == 99
+
+# Missing toolchain → skip (not crash).
+with TemporaryDirectory() as tmp:
+    Path(tmp, 'go.mod').write_text('module x\n')
+    runner = FakeRunner({
+        'gofmt': _RunOutcome(returncode=0, stdout=''),
+        'go': _RunOutcome(returncode=0),
+        # golangci-lint deliberately absent → which() returns False.
+    })
+    result = run_gauntlet(tmp, runner=runner)
+    assert result.passed is True
+    skipped_names = {name for name, _ in result.skipped}
+    assert 'golangci-lint' in skipped_names
+" > /tmp/e2e-pre-push-gauntlet.txt 2>&1; then
+  echo "✓ pre-push gauntlet (language detection, runner dispatch, failure payload, /skip-gauntlet, missing-toolchain)"
+else
+  echo "✗ pre-push gauntlet smoke failed" >&2
+  cat /tmp/e2e-pre-push-gauntlet.txt >&2
+  failures=$((failures + 1))
+fi
+
 # pipx-install smoke — the operator-facing "no clone needed" entry point.
 # We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
 # every invocation and add ~30s of dep-resolution); instead we verify
