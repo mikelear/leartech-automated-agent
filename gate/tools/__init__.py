@@ -1,6 +1,12 @@
 """Primitives the criteria layer depends on. Each module is also wrappable as an MCP server (see gate/mcp_servers/)."""
 
-from gate.tools.ai_review import AIReviewVerdict, read_ai_review_verdicts
+from gate.tools.ai_review import (
+    AIReviewFinding,
+    AIReviewVerdict,
+    parse_ai_review_comment,
+    parse_ai_review_findings,
+    read_ai_review_verdicts,
+)
 from gate.tools.coverage import CoverageReport, read_coverage_from_pr_comments, read_coverage_threshold
 from gate.tools.end2end_gate import (
     End2EndFailure,
@@ -77,7 +83,10 @@ __all__ = [
     'CoverageReport',
     'read_coverage_threshold',
     'read_coverage_from_pr_comments',
+    'AIReviewFinding',
     'AIReviewVerdict',
+    'parse_ai_review_comment',
+    'parse_ai_review_findings',
     'read_ai_review_verdicts',
     'End2EndFailure',
     'End2EndTest',
