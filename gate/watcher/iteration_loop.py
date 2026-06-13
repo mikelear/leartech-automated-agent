@@ -51,6 +51,10 @@ Two payload kinds are supported today:
   (warning / blocking verdicts on AI Code Review). Merges into the same
   list so the agent sees one unified "here is what failed last time"
   block regardless of which gate produced the feedback.
+- ``ai_review_failure`` — v6p0.6 step-4 structured-red-finding shape
+  produced by :func:`gate.watcher.ai_review_iteration.build_ai_review_failure_payload`.
+  Carries per-bullet severity + reviewer + location + fix_hint so the
+  agent can cite findings verbatim when iterating.
 
 Both payloads are plain JSON-serialisable dicts so they survive the
 round-trip through the catalog / Job-spec env injection without needing a
@@ -284,6 +288,7 @@ def _failure_to_payload(failure: End2EndFailure) -> dict[str, Any]:
 def build_feedback_payloads(
     failures: tuple[End2EndFailure, ...] | list[End2EndFailure],
     ai_review_findings: tuple[dict[str, Any], ...] | list[dict[str, Any]] | None = None,
+    ai_review_failures: tuple[dict[str, Any], ...] | list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Build the ``feedback_payloads`` list passed to the spawned agent.
 
@@ -292,12 +297,26 @@ def build_feedback_payloads(
     construction (see :func:`format_feedback_payloads_for_prompt`)
     dispatches on ``kind`` to render the right per-kind block.
 
-    end2end failures come first so the most-recent infrastructure / app
-    failures lead the prompt; ai-review findings (older, less specific)
-    follow. Order matters only for human readability; the agent reads
-    both blocks unconditionally.
+    Ordering is intentional and human-facing:
+
+    1. ``end2end_failure`` — most-recent infrastructure / app failures lead
+       the prompt because they cite tests the agent just ran.
+    2. ``ai_review_failure`` (v6p0.6 step 4) — structured red findings from
+       the ai-review verdicts. The agent must address these.
+    3. ``ai_review_finding`` — softer (legacy) ai-review context that is
+       not necessarily red. Carried at the tail so the agent reads it
+       last; for new spawns the watcher will populate the structured
+       ``ai_review_failure`` form preferentially.
+
+    The agent reads all blocks unconditionally; ordering is purely for
+    human review of the prompt.
     """
     out: list[dict[str, Any]] = [_failure_to_payload(f) for f in failures]
+    if ai_review_failures:
+        for failure in ai_review_failures:
+            payload = dict(failure)
+            payload.setdefault('kind', 'ai_review_failure')
+            out.append(payload)
     if ai_review_findings:
         for finding in ai_review_findings:
             # Defensive normalisation — the ai-review path historically
@@ -416,6 +435,14 @@ def format_feedback_payloads_for_prompt(payloads: list[dict[str, Any]]) -> str:
             lines.extend(_format_end2end_payload(payload))
         elif kind == 'ai_review_finding':
             lines.extend(_format_ai_review_payload(payload))
+        elif kind == 'ai_review_failure':
+            # v6p0.6 step 4 — structured red-finding feedback. Lazy import to
+            # keep iteration_loop free of a hard dependency on the ai-review
+            # sibling module (avoids an import cycle if the order of imports
+            # ever changes in the package's ``__init__``).
+            from gate.watcher.ai_review_iteration import format_ai_review_failure_payload
+
+            lines.extend(format_ai_review_failure_payload(payload))
         else:
             # Unknown kind — surface raw JSON so a human reading the
             # prompt can debug. The model is told above to read each
