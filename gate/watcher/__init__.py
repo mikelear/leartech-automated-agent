@@ -9,6 +9,7 @@ shape.
 Public surface lives in :mod:`gate.watcher.iteration_loop`.
 """
 
+from gate.watcher.artefact_dispatch import ArtefactFetcher, dispatch_structured_failure
 from gate.watcher.iteration_loop import (
     IterationContext,
     IterationDecision,
@@ -22,11 +23,13 @@ from gate.watcher.iteration_loop import (
 )
 
 __all__ = [
+    'ArtefactFetcher',
     'IterationContext',
     'IterationDecision',
     'PriorAttempt',
     'build_feedback_payloads',
     'decide_action',
+    'dispatch_structured_failure',
     'failure_idempotency_key',
     'format_feedback_payloads_for_prompt',
     'manual_fix_comment_body',
