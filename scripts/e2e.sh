@@ -607,6 +607,64 @@ else
   failures=$((failures + 1))
 fi
 
+# v6p0.6 step 2 — extended gate dispatcher. Verifies that govulncheck,
+# dynamic-scan severity split, and Helm preview-deploy subclasses route
+# to the right action (fix_code / escalate / retry) rather than falling
+# through to the generic ``security_scan_finding`` / ``preview_deploy_failure``
+# escalate buckets. The classifier is pure; no HTTP / cluster needed —
+# just an in-process Python invocation.
+if uv run python -c "
+from gate.agent.step_failure_diagnosis import (
+    ACTION_ESCALATE,
+    ACTION_FIX_CODE,
+    ACTION_RETRY,
+    classify_step_failure,
+)
+
+# govulncheck — fix_code (module bump)
+f = classify_step_failure('govulncheck',
+    'Vulnerability #1: GO-2024-3107\nYour code is affected by 1 vulnerability')
+assert f.classification == 'govulncheck_vulnerability'
+assert f.action == ACTION_FIX_CODE
+
+# dynamic-scan HIGH — fix_code
+f = classify_step_failure('dynamic-scan',
+    'High (Medium): Cross-Site Scripting (Reflected) [40012]')
+assert f.classification == 'dynamic_scan_high_finding'
+assert f.action == ACTION_FIX_CODE
+
+# dynamic-scan LOW — escalate
+f = classify_step_failure('dynamic-scan',
+    'Low (Medium): X-Content-Type-Options Header Missing [10021]')
+assert f.classification == 'dynamic_scan_low_finding'
+assert f.action == ACTION_ESCALATE
+
+# Helm missing-value — fix_code (chart patch)
+f = classify_step_failure('helm-promote',
+    'Error: INSTALLATION FAILED: nil pointer evaluating interface {}.repository '
+    'at <.Values.image.repository>')
+assert f.classification == 'helm_missing_value'
+assert f.action == ACTION_FIX_CODE
+
+# Helm missing-secret — escalate (operator must seed)
+f = classify_step_failure('helm-promote',
+    'Error: INSTALLATION FAILED: secrets \"preview-db-creds\" not found')
+assert f.classification == 'helm_missing_secret'
+assert f.action == ACTION_ESCALATE
+
+# Helm timeout — retry (transient rollout race)
+f = classify_step_failure('helm-promote',
+    'Error: UPGRADE FAILED: timed out waiting for the condition')
+assert f.classification == 'helm_timeout'
+assert f.action == ACTION_RETRY
+" > /tmp/e2e-extended-dispatch.txt 2>&1; then
+  echo "✓ extended gate dispatcher (govulncheck, dynamic-scan severity, helm subclasses)"
+else
+  echo "✗ extended gate dispatcher smoke failed" >&2
+  cat /tmp/e2e-extended-dispatch.txt >&2
+  failures=$((failures + 1))
+fi
+
 # pipx-install smoke — the operator-facing "no clone needed" entry point.
 # We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
 # every invocation and add ~30s of dep-resolution); instead we verify
