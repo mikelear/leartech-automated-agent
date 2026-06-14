@@ -27,6 +27,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from sqlalchemy.exc import IntegrityError
 
+from app import auth as auth_middleware
 from app.db import dispose_engine, init_engine, is_db_enabled
 from app.db import session as db_session
 from app.db.initiative_catalog import create_initiative, get_initiative
@@ -146,6 +147,20 @@ app = FastAPI(
     description='Criteria-driven agent runtime exposed as a long-running service.',
     version='0.2.0',
     lifespan=lifespan,
+)
+
+# v7-P1 step 2: OIDC bearer validation + tenant_id extraction. Settings are
+# loaded from LEARTECH_AUTH_* env (chart-rendered). When required=true is set
+# on a cluster (production) every non-bypassed request must carry a Bearer
+# issued by the configured Hydra and with the agent-specific audience. Dev
+# and preview clusters keep required=false (default) so they continue to
+# accept anonymous traffic on /initiatives.
+_auth_settings = auth_middleware.install(app)
+_logger.info(
+    'auth middleware installed: required=%s, issuer=%r, audience=%r',
+    _auth_settings.required,
+    _auth_settings.issuer or '(unset)',
+    _auth_settings.audience or '(unset)',
 )
 
 app.include_router(health.router, tags=['health'])

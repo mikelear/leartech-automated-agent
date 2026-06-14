@@ -211,6 +211,36 @@ spec:
         - name: LEARTECH_AGENT_MODEL
           value: {{ .Values.agent.model | quote }}
         {{- end }}
+        # v7-P1 step 2 — OIDC bearer validation. The whole block is gated on
+        # `agent.auth.enabled` so a cluster can flip the feature off
+        # atomically (no env vars rendered → middleware loads with empty
+        # settings → behaves as required=false). Inside the gated block,
+        # `required: true` is what makes 401 fire on missing / invalid
+        # tokens. Issuer is shared Hydra (same as orchestrator); audience
+        # is agent-specific (different from orchestrator's so a token
+        # issued for one service can't be replayed at the other).
+        {{- if .Values.agent.auth.enabled }}
+        {{- if .Values.agent.auth.required }}
+        - name: LEARTECH_AUTH_REQUIRED
+          value: "true"
+        {{- end }}
+        {{- if .Values.agent.auth.issuer }}
+        - name: LEARTECH_AUTH_ISSUER
+          value: {{ .Values.agent.auth.issuer | quote }}
+        {{- end }}
+        {{- if .Values.agent.auth.audience }}
+        - name: LEARTECH_AUTH_AUDIENCE
+          value: {{ .Values.agent.auth.audience | quote }}
+        {{- end }}
+        {{- if .Values.agent.auth.tenantClaim }}
+        - name: LEARTECH_AUTH_TENANT_CLAIM
+          value: {{ .Values.agent.auth.tenantClaim | quote }}
+        {{- end }}
+        {{- if .Values.agent.auth.jwksTtlSeconds }}
+        - name: LEARTECH_AUTH_JWKS_TTL
+          value: {{ .Values.agent.auth.jwksTtlSeconds | quote }}
+        {{- end }}
+        {{- end }}
         {{- if .Values.postgresql.enabled }}
         # DB-backed initiative catalog DSN — flows from the in-namespace
         # Secret materialised by templates/externalsecret-postgres-db.yaml
