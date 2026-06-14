@@ -18,7 +18,7 @@ import time) doesn't bleed into the assertions.
 from __future__ import annotations
 
 import time
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -420,6 +420,57 @@ def test_optional_mode_still_attaches_tenant_when_token_valid(
     assert response.json()['tenant_id'] == 'tenant-delta'
 
 
+# ─── Validation edge branches ───────────────────────────────────────────────
+
+
+def test_optional_mode_with_unset_issuer_proceeds_anonymously_on_token(
+    rsa_keypair: tuple[str, dict[str, Any]],
+) -> None:
+    """When issuer/audience are blank (optional mode bootstrap) the middleware
+    can't validate — it must NOT 500 nor accept the bearer; it must degrade
+    to anonymous. Guards the ``empty issuer / empty audience`` branch in
+    ``_validate_token`` that's only reachable through the optional path.
+    """
+    private_pem, public_jwk = rsa_keypair
+    settings = AuthSettings(issuer='', audience='', required=False)
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_app(settings, cache)
+    token = _mint_token(private_pem)
+
+    with TestClient(app) as client:
+        response = client.get('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 200
+    assert response.json()['tenant_id'] is None
+
+
+def test_token_with_no_kid_header_returns_401(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """Tokens whose JWS header lacks ``kid`` are rejected — we can't look up the key."""
+    private_pem, public_jwk = rsa_keypair
+    settings = _required_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_app(settings, cache)
+    now = int(time.time())
+    # Hand-mint a token WITHOUT a kid header (jose's encode omits headers={} arg).
+    token = jwt.encode(
+        {
+            'iss': ISSUER,
+            'aud': AGENT_AUDIENCE,
+            'sub': 'user-456',
+            'iat': now,
+            'exp': now + 3600,
+        },
+        private_pem,
+        algorithm=ALG,
+    )
+
+    with TestClient(app) as client:
+        response = client.get('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 401
+    assert 'kid' in response.json()['detail']
+
+
 # ─── JWKS cache behaviour ────────────────────────────────────────────────────
 
 
@@ -470,3 +521,172 @@ def test_jwks_cache_refetches_after_ttl(rsa_keypair: tuple[str, dict[str, Any]])
             assert response.status_code == 200
 
     assert cache.fetch_calls == 3
+
+
+# ─── JWKS fetch error paths (added in response to AI-review red finding) ─────
+
+
+class _ExplodingJWKSCache(JWKSCache):
+    """JWKSCache that raises a configured exception on every fetch.
+
+    Used to exercise the 503 error branches in :meth:`JWKSCache.fetch_jwks`
+    end-to-end through the middleware. The real default implementation hits
+    the network via httpx and raises :class:`fastapi.HTTPException` 503 when
+    the upstream JWKS is unreachable or malformed; we mirror that contract
+    here without binding the tests to a particular httpx version.
+    """
+
+    def __init__(self, settings: AuthSettings, exc: Exception) -> None:
+        super().__init__(settings)
+        self._exc = exc
+
+    def fetch_jwks(self) -> list[dict[str, Any]]:
+        raise self._exc
+
+
+def test_jwks_fetch_network_failure_surfaces_503_when_required(
+    rsa_keypair: tuple[str, dict[str, Any]],
+) -> None:
+    """An httpx connect error during JWKS fetch surfaces as 503 (not 500)."""
+    from fastapi import HTTPException as _HTTPException
+
+    private_pem, _ = rsa_keypair
+    settings = _required_settings()
+    cache = _ExplodingJWKSCache(
+        settings,
+        _HTTPException(status_code=503, detail='auth: JWKS fetch failed against ...: connect timed out'),
+    )
+    app, _ = _build_app(settings, cache)
+    token = _mint_token(private_pem)
+
+    with TestClient(app) as client:
+        response = client.get('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    # required=true → middleware converts the HTTPException to a JSON response with
+    # the same status_code (503) and detail. Anything 5xx here would mean the
+    # error escaped through the ASGI layer untyped — that's the regression we guard.
+    assert response.status_code == 503
+    assert 'JWKS' in response.json()['detail']
+
+
+def test_jwks_fetch_network_failure_degrades_to_anonymous_when_optional(
+    rsa_keypair: tuple[str, dict[str, Any]],
+) -> None:
+    """Optional mode + JWKS fetch error → proceed anonymously (no 5xx)."""
+    from fastapi import HTTPException as _HTTPException
+
+    private_pem, _ = rsa_keypair
+    settings = _optional_settings()
+    cache = _ExplodingJWKSCache(
+        settings,
+        _HTTPException(status_code=503, detail='auth: JWKS fetch failed against ...: connect timed out'),
+    )
+    app, _ = _build_app(settings, cache)
+    token = _mint_token(private_pem)
+
+    with TestClient(app) as client:
+        response = client.get('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 200
+    assert response.json()['tenant_id'] is None
+
+
+def test_jwks_fetch_http_error_via_real_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real :class:`JWKSCache.fetch_jwks` raises 503 on httpx.HTTPError.
+
+    Uses ``monkeypatch`` to replace ``httpx.get`` with a stub that raises a
+    real :class:`httpx.ConnectError`, then asserts the cache converts it
+    into a :class:`fastapi.HTTPException` with status_code 503 and a
+    diagnostic detail that mentions the JWKS URL.
+    """
+    import httpx as _httpx
+    from fastapi import HTTPException as _HTTPException
+
+    settings = _required_settings()
+    cache = JWKSCache(settings)
+
+    def _boom(*_args: Any, **_kwargs: Any) -> None:
+        raise _httpx.ConnectError('simulated connect failure')
+
+    monkeypatch.setattr(_httpx, 'get', _boom)
+
+    with pytest.raises(_HTTPException) as excinfo:
+        cache.fetch_jwks()
+    assert excinfo.value.status_code == 503
+    assert 'JWKS fetch failed' in str(excinfo.value.detail)
+    assert settings.jwks_url in str(excinfo.value.detail)
+
+
+def test_jwks_fetch_invalid_json_via_real_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real :class:`JWKSCache.fetch_jwks` raises 503 when the JWKS body isn't JSON."""
+    import httpx as _httpx
+    from fastapi import HTTPException as _HTTPException
+
+    class _StubResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            raise ValueError('not json')
+
+    settings = _required_settings()
+    cache = JWKSCache(settings)
+    monkeypatch.setattr(_httpx, 'get', lambda *a, **kw: _StubResponse())
+
+    with pytest.raises(_HTTPException) as excinfo:
+        cache.fetch_jwks()
+    assert excinfo.value.status_code == 503
+
+
+def test_jwks_fetch_missing_keys_array_via_real_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real :class:`JWKSCache.fetch_jwks` raises 503 when the body lacks `keys`."""
+    import httpx as _httpx
+    from fastapi import HTTPException as _HTTPException
+
+    class _StubResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {'issuer': 'https://hydra/'}  # no `keys` field
+
+    settings = _required_settings()
+    cache = JWKSCache(settings)
+    monkeypatch.setattr(_httpx, 'get', lambda *a, **kw: _StubResponse())
+
+    with pytest.raises(_HTTPException) as excinfo:
+        cache.fetch_jwks()
+    assert excinfo.value.status_code == 503
+    assert 'missing `keys`' in str(excinfo.value.detail)
+
+
+def test_jwks_fetch_uses_injected_http_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Constructor-injected ``http_client`` is used in preference to module-level httpx.get."""
+    import httpx as _httpx
+
+    class _StubClient:
+        calls: int = 0
+
+        def get(self, url: str, timeout: float) -> Any:  # noqa: ARG002 — signature mirror
+            type(self).calls += 1
+            return _StubResponse()
+
+    class _StubResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, Any]:
+            return {'keys': [{'kid': 'test-1'}]}
+
+    # Trip the module-level httpx.get to make absolutely sure it's not used.
+    def _no_module_get(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError('module-level httpx.get must not be called when http_client is injected')
+
+    monkeypatch.setattr(_httpx, 'get', _no_module_get)
+    settings = _required_settings()
+    stub = _StubClient()
+    cache = JWKSCache(settings, http_client=cast(_httpx.Client, stub))
+
+    keys = cache.fetch_jwks()
+    assert keys == [{'kid': 'test-1'}]
+    assert _StubClient.calls == 1
