@@ -34,13 +34,11 @@ logger = logging.getLogger(__name__)
 # Issuer is the Hydra public URL (shared with the orchestrator — same Hydra
 # instance, same JWKS endpoint). Audience is agent-specific and MUST NOT
 # overlap with the orchestrator's — that's how a token issued for Orch is
-# rejected when replayed at the agent (and vice-versa). Per-cluster values:
-#
-#   gcp-staging: https://leartech-automated-agent-jx-staging.jx.leartech.com
-#   az-staging:  https://leartech-automated-agent-jx-staging.az.leartech.com
-#
-# Helmfile / ExternalSecret renders these into the deployment env on each
-# cluster. The agent reads them via ``LEARTECH_AUTH_*`` env vars at startup.
+# rejected when replayed at the agent (and vice-versa). The exact per-cluster
+# values are not hardcoded here — they're rendered into the deployment env
+# from the chart's `agent.auth.{issuer,audience}` values, which the cluster's
+# GitOps overlay sets per environment. The agent reads them via
+# ``LEARTECH_AUTH_*`` env vars at startup.
 AUTH_ISSUER_ENV = 'LEARTECH_AUTH_ISSUER'
 AUTH_AUDIENCE_ENV = 'LEARTECH_AUTH_AUDIENCE'
 AUTH_REQUIRED_ENV = 'LEARTECH_AUTH_REQUIRED'

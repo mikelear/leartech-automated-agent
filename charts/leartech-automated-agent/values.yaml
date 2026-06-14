@@ -18,23 +18,32 @@ service:
 agent:
   model: ""
   # v7-P1 step 2 — OIDC bearer validation. Off by default so existing dev /
-  # preview clusters continue to accept anonymous traffic. Flip `required: true`
-  # via GitOps per cluster (configs/leartech-automated-agent.yaml) once the
-  # Hydra OAuth client + audience are provisioned. Issuer is shared with the
-  # orchestrator (same Hydra). Audience MUST be the agent's own ingress URL
-  # — using the orchestrator's audience would let an Orch-issued token reach
-  # the agent and vice-versa.
-  #
-  # Per-cluster defaults (override via values overlay):
-  #   gcp-staging: https://leartech-automated-agent-jx-staging.jx.leartech.com
-  #   az-staging:  https://leartech-automated-agent-jx-staging.az.leartech.com
+  # preview clusters continue to accept anonymous traffic. Flip
+  # `auth.enabled: true` AND `auth.required: true` via GitOps per cluster
+  # (configs/leartech-automated-agent.yaml) once the Hydra OAuth client +
+  # audience are provisioned. Issuer is shared with the orchestrator (same
+  # Hydra). Audience MUST be the agent's own ingress URL — using the
+  # orchestrator's audience would let an Orch-issued token reach the agent
+  # and vice-versa. Per-cluster issuer / audience values are set by the
+  # cluster's GitOps overlay; the chart does NOT carry hardcoded cluster
+  # URLs (those belong in env-specific values files outside this repo).
   auth:
+    # Master toggle — when false, no LEARTECH_AUTH_* env vars are rendered
+    # at all, regardless of the other fields' values. This is the safe
+    # "feature off" switch: the middleware loads with empty settings and
+    # behaves as if required=false even if a stray issuer/audience were
+    # left set in a values overlay. Flip to true on clusters that have
+    # provisioned the Hydra OAuth client.
+    enabled: false
     required: false
     issuer: ""
     audience: ""
     # Claim name that carries the tenant_id in tokens minted by Hydra. The
     # leartech umbrella convention is `tenant_id` (top-level); override here
     # if a different Hydra config emits a nested or differently-named claim.
+    # Tokens that don't carry this claim still pass validation — `tenant_id`
+    # on request.state stays None and downstream handlers decide how to
+    # treat the anonymous-tenant case (typically: reject in step 4 / step 5).
     tenantClaim: tenant_id
     # JWKS document TTL in seconds. Hydra rotates keys infrequently so 5 min
     # is comfortable; bump for high-traffic clusters where the steady-state
