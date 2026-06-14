@@ -93,6 +93,11 @@ class InitiativeRecord(BaseModel):
     # GET /initiatives so operators see live "what is the agent doing
     # right now?" without polling the decision-log table.
     last_tool_call: str | None = None
+    # v7-P1 step 5 — owning tenant for the run. Set at register() from
+    # the request's authenticated tenant_id (extracted by the middleware
+    # in step 2 from the bearer's tenant_id claim). None on legacy rows
+    # and on unauthenticated dev/CI traffic.
+    tenant_id: str | None = None
 
 
 _records: dict[str, InitiativeRecord] = {}
@@ -127,6 +132,7 @@ def _run_record_to_initiative_record(run: InitiativeRunRecord) -> InitiativeReco
         branch=run.branch,
         started_executing_at=run.started_executing_at,
         last_tool_call=run.last_tool_call,
+        tenant_id=run.tenant_id,
     )
 
 
@@ -164,42 +170,76 @@ async def register(record: InitiativeRecord) -> None:
                 # Phase D.5.1.2 — YAML-declared branch, set once at INSERT
                 # and read back by the job_reconciler's PR fallback.
                 branch=record.branch,
+                # v7-P1 step 5 — owning tenant for the row. Captured at
+                # register() from the request's authenticated tenant_id
+                # so cross-tenant probes 404 at the reader paths.
+                tenant_id=record.tenant_id,
             )
 
 
-async def get(initiative_id: str) -> InitiativeRecord | None:
-    """Retrieve run state — from DB when configured, in-memory fallback otherwise."""
+async def get(initiative_id: str, *, tenant_id: str | None = None) -> InitiativeRecord | None:
+    """Retrieve run state — from DB when configured, in-memory fallback otherwise.
+
+    v7-P1 step 5 tenant scoping: when ``tenant_id`` is set, returns None
+    when the run is owned by a different tenant. The router maps None to
+    404 so cross-tenant probes cannot distinguish "doesn't exist" from
+    "exists but not yours". When ``tenant_id`` is None (service-internal
+    callers — agent loop, reconciler), the original row is returned
+    without scoping.
+    """
     if is_db_enabled():
         async with db_session() as s:
-            run = await get_run(s, initiative_id)
+            run = await get_run(s, initiative_id, tenant_id=tenant_id)
             if run is None:
                 return None
             return _run_record_to_initiative_record(run)
-    return _records.get(initiative_id)
+    rec = _records.get(initiative_id)
+    if rec is None:
+        return None
+    if tenant_id is not None and rec.tenant_id is not None and rec.tenant_id != tenant_id:
+        return None
+    return rec
 
 
-async def update(initiative_id: str, **fields: Any) -> None:
+async def update(initiative_id: str, *, tenant_id: str | None = None, **fields: Any) -> None:
     """Partial update — updates in-memory dict first, then DB if configured.
 
     The in-memory update is synchronous (no await) so callers in a background
     task see the change immediately even while a concurrent DB write is in
     flight.
+
+    Tenant scoping: when ``tenant_id`` is set, the update silently no-ops
+    for rows owned by a different tenant. Service-internal callers (agent
+    loop, reconciler) pass ``tenant_id=None`` to retain the pre-tenancy
+    write-anything semantics.
     """
     rec = _records.get(initiative_id)
     if rec is not None:
-        _records[initiative_id] = rec.model_copy(update=fields)
+        # In-memory tenant guard: a cross-tenant update is a no-op so the
+        # router-layer 404 path stays consistent with the DB row.
+        if tenant_id is not None and rec.tenant_id is not None and rec.tenant_id != tenant_id:
+            pass
+        else:
+            _records[initiative_id] = rec.model_copy(update=fields)
     if is_db_enabled():
         async with db_session() as s:
-            await update_run(s, id=initiative_id, **fields)
+            await update_run(s, id=initiative_id, tenant_id=tenant_id, **fields)
 
 
-async def list_records() -> list[InitiativeRecord]:
-    """List all run records — from DB when configured, in-memory fallback otherwise."""
+async def list_records(*, tenant_id: str | None = None) -> list[InitiativeRecord]:
+    """List all run records — from DB when configured, in-memory fallback otherwise.
+
+    v7-P1 step 5 tenant scoping: when ``tenant_id`` is set, returns
+    rows visible to that tenant (own + legacy NULL-tenant rows). When
+    None, returns everything.
+    """
     if is_db_enabled():
         async with db_session() as s:
-            runs = await list_runs(s)
+            runs = await list_runs(s, tenant_id=tenant_id)
             return [_run_record_to_initiative_record(r) for r in runs]
-    return list(_records.values())
+    if tenant_id is None:
+        return list(_records.values())
+    return [r for r in _records.values() if r.tenant_id is None or r.tenant_id == tenant_id]
 
 
 async def reconcile_orphaned_runs(older_than_seconds: int | None = None) -> int:

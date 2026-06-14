@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -58,6 +58,12 @@ class InitiativeRunRecord:
     # text turn. See ``InitiativeRunRow.last_tool_call`` for the
     # full rationale.
     last_tool_call: str | None
+    # v7-P1 step 5 — owning tenant for the run. None on legacy rows
+    # pre-dating the auth middleware, or on rows created in unauthenticated
+    # dev / CI traffic. Reader paths filter by tenant_id; cross-tenant
+    # access surfaces as 404 at the router (mirrors the orchestrator step 4
+    # contract).
+    tenant_id: str | None
     updated_at: datetime
 
     @classmethod
@@ -80,6 +86,7 @@ class InitiativeRunRecord:
             branch=row.branch,
             started_executing_at=row.started_executing_at,
             last_tool_call=row.last_tool_call,
+            tenant_id=row.tenant_id,
             updated_at=row.updated_at,
         )
 
@@ -97,6 +104,7 @@ async def create_run(
     runtime: str = 'job',
     job_name: str | None = None,
     branch: str | None = None,
+    tenant_id: str | None = None,
 ) -> InitiativeRunRecord:
     """Create a new DB-stored run row. Raises on IntegrityError for duplicate id.
 
@@ -123,6 +131,7 @@ async def create_run(
         runtime=runtime,
         job_name=job_name,
         branch=branch,
+        tenant_id=tenant_id,
     )
     session.add(row)
     await session.flush()
@@ -130,10 +139,27 @@ async def create_run(
     return InitiativeRunRecord.from_row(row)
 
 
-async def get_run(session: AsyncSession, id: str) -> InitiativeRunRecord | None:
-    """Return a single run record or None if not found."""
+async def get_run(
+    session: AsyncSession,
+    id: str,
+    *,
+    tenant_id: str | None = None,
+) -> InitiativeRunRecord | None:
+    """Return a single run record or None if not found.
+
+    Tenant scoping: when ``tenant_id`` is set, runs owned by a different
+    tenant return None — the router maps that to 404 so cross-tenant
+    probes can't distinguish "doesn't exist" from "exists but not yours".
+    Runs with ``row.tenant_id IS NULL`` (legacy / unauthenticated) are
+    visible to every tenant; the tightening direction is to NOT regress
+    legacy data when tenancy was added mid-lifecycle.
+    """
     row = await session.get(InitiativeRunRow, id)
-    return InitiativeRunRecord.from_row(row) if row is not None else None
+    if row is None:
+        return None
+    if tenant_id is not None and row.tenant_id is not None and row.tenant_id != tenant_id:
+        return None
+    return InitiativeRunRecord.from_row(row)
 
 
 async def list_runs(
@@ -142,17 +168,25 @@ async def list_runs(
     status: str | None = None,
     initiative: str | None = None,
     limit: int = 100,
+    tenant_id: str | None = None,
 ) -> list[InitiativeRunRecord]:
     """Return runs ordered by started_at DESC, with optional filters.
 
     `status` and `initiative` are exact-match filters. Both may be combined.
     `limit` caps the result set — default 100 to avoid unbounded scans.
+
+    Tenant scoping: when ``tenant_id`` is set, returns rows where
+    ``tenant_id IS NULL OR tenant_id = <caller>`` — i.e. legacy /
+    unauthenticated runs plus the caller's own. When ``tenant_id`` is
+    None (system tenant or unauthenticated), every row is returned.
     """
     stmt = select(InitiativeRunRow).order_by(InitiativeRunRow.started_at.desc())
     if status is not None:
         stmt = stmt.where(InitiativeRunRow.status == status)
     if initiative is not None:
         stmt = stmt.where(InitiativeRunRow.initiative == initiative)
+    if tenant_id is not None:
+        stmt = stmt.where(or_(InitiativeRunRow.tenant_id.is_(None), InitiativeRunRow.tenant_id == tenant_id))
     stmt = stmt.limit(limit)
     result = await session.execute(stmt)
     return [InitiativeRunRecord.from_row(row) for row in result.scalars()]
@@ -162,6 +196,7 @@ async def update_run(
     session: AsyncSession,
     *,
     id: str,
+    tenant_id: str | None = None,
     **fields: object,
 ) -> InitiativeRunRecord | None:
     """Partial update of a run row. Returns None if not found.
@@ -198,10 +233,16 @@ async def update_run(
     )
     filtered = {k: v for k, v in fields.items() if k in _mutable}
     if not filtered:
-        return await get_run(session, id)
+        return await get_run(session, id, tenant_id=tenant_id)
 
     row = await session.get(InitiativeRunRow, id)
     if row is None:
+        return None
+    # Tenant scoping: a tenant caller cannot mutate another tenant's run.
+    # Rows with row.tenant_id IS NULL (legacy / unauthenticated) are
+    # mutable by any caller — they pre-date tenancy and we don't want a
+    # backfill to lock the agent out of finishing them.
+    if tenant_id is not None and row.tenant_id is not None and row.tenant_id != tenant_id:
         return None
     for k, v in filtered.items():
         setattr(row, k, v)

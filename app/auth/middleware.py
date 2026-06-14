@@ -44,9 +44,25 @@ AUTH_AUDIENCE_ENV = 'LEARTECH_AUTH_AUDIENCE'
 AUTH_REQUIRED_ENV = 'LEARTECH_AUTH_REQUIRED'
 AUTH_JWKS_TTL_ENV = 'LEARTECH_AUTH_JWKS_TTL'
 AUTH_TENANT_CLAIM_ENV = 'LEARTECH_AUTH_TENANT_CLAIM'
+# v7-P1 step 5 — service-to-service tenant relay. When the bearer's
+# ``tenant_id`` claim equals this value, the middleware reads the
+# ``X-Tenant-Id`` request header and uses THAT as the effective tenant.
+# This is how Orchestrator (whose service-token is system-tenant-owned)
+# delegates on-behalf-of-a-tenant calls to the agent without minting a
+# fresh token per tenant. Unset (default) means no relay — the bearer's
+# claim is always authoritative.
+AUTH_SYSTEM_TENANT_ENV = 'LEARTECH_AUTH_SYSTEM_TENANT_ID'
 
 DEFAULT_TENANT_CLAIM = 'tenant_id'
 DEFAULT_JWKS_TTL_SECONDS = 300  # 5 min — Hydra rotates keys infrequently.
+# Header carrying the effective tenant_id when a system-tenant service
+# token is making an on-behalf-of call. Read only when the bearer's
+# claim matches AUTH_SYSTEM_TENANT_ENV — defence in depth so a regular
+# tenant cannot forge this header to elevate. Spelt with the same
+# title-cased shape Starlette uses everywhere internally; header lookup
+# is case-insensitive in the underlying parser so this is canonical
+# rather than required.
+TENANT_RELAY_HEADER = 'X-Tenant-Id'
 
 # Paths that bypass the bearer requirement. Kept narrow on purpose: anything
 # that can be probed by infra (health checks, OpenAPI clients) lives here;
@@ -78,6 +94,9 @@ class AuthSettings:
     required: bool
     tenant_claim: str = DEFAULT_TENANT_CLAIM
     jwks_ttl_seconds: int = DEFAULT_JWKS_TTL_SECONDS
+    # v7-P1 step 5 — see AUTH_SYSTEM_TENANT_ENV docstring. Empty string
+    # means relay disabled (any X-Tenant-Id header is ignored).
+    system_tenant_id: str = ''
 
     @property
     def jwks_url(self) -> str:
@@ -108,6 +127,7 @@ def load_settings_from_env(env: dict[str, str] | None = None) -> AuthSettings:
     audience = src.get(AUTH_AUDIENCE_ENV, '').strip()
     required = _parse_bool(src.get(AUTH_REQUIRED_ENV))
     tenant_claim = src.get(AUTH_TENANT_CLAIM_ENV, DEFAULT_TENANT_CLAIM).strip() or DEFAULT_TENANT_CLAIM
+    system_tenant_id = src.get(AUTH_SYSTEM_TENANT_ENV, '').strip()
     raw_ttl = src.get(AUTH_JWKS_TTL_ENV)
     jwks_ttl_seconds = DEFAULT_JWKS_TTL_SECONDS
     if raw_ttl is not None:
@@ -133,6 +153,7 @@ def load_settings_from_env(env: dict[str, str] | None = None) -> AuthSettings:
         required=required,
         tenant_claim=tenant_claim,
         jwks_ttl_seconds=jwks_ttl_seconds,
+        system_tenant_id=system_tenant_id,
     )
 
 
@@ -315,6 +336,25 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         tenant_value = claims.get(self._settings.tenant_claim)
         tenant_id: str | None = str(tenant_value) if tenant_value is not None else None
         subject = str(claims.get('sub', ''))
+
+        # v7-P1 step 5 — service-to-service tenant relay. When the bearer's
+        # claim matches the configured system tenant AND an ``X-Tenant-Id``
+        # header is present, the header value becomes the effective
+        # tenant_id. This lets the Orchestrator (whose service-token is
+        # system-tenant-owned) make on-behalf-of-a-tenant calls without
+        # minting a fresh token per tenant. The header is IGNORED when
+        # the bearer is not the system tenant — defence in depth so a
+        # regular tenant cannot forge the header to access another
+        # tenant's data. The system_tenant_id MUST be non-empty for the
+        # check to fire so non-production configs (empty env) cannot
+        # accidentally enable the relay.
+        if self._settings.system_tenant_id and tenant_id == self._settings.system_tenant_id:
+            relay_header = request.headers.get(TENANT_RELAY_HEADER)
+            if relay_header:
+                relay_value = relay_header.strip()
+                if relay_value:
+                    tenant_id = relay_value
+
         request.state.tenant_id = tenant_id
         request.state.user = AuthenticatedUser(subject=subject, tenant_id=tenant_id, claims=claims)
         return await call_next(request)

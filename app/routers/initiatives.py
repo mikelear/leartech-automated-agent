@@ -25,10 +25,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException
+from fastapi import APIRouter, Body, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 
+from app.auth import get_current_tenant_id
 from app.db import is_db_enabled
 from app.db import session as db_session
 from app.db.agent_run_commands import (
@@ -375,12 +376,17 @@ def _initiatives_dir() -> Path:
     )
 
 
-async def _resolve_yaml_path(name: str) -> Path | None:
+async def _resolve_yaml_path(name: str, *, tenant_id: str | None = None) -> Path | None:
     """Resolve an initiative by name — DB catalog first, filesystem fallback.
 
     DB-stored entries win over same-named filesystem entries: the DB is the
     live editable source of truth; the filesystem is the starter pack baked
     into each image release.
+
+    v7-P1 step 5 — when ``tenant_id`` is set, only entries visible to that
+    tenant resolve (tenant's own + global). Cross-tenant lookups fall
+    through to the filesystem (which is itself tenant-agnostic) — if the
+    name also isn't on disk the caller maps None to 404.
 
     When found in the DB the yaml_body is materialised to
     ``/tmp/agent-catalog/<name>.yaml`` (overwritten each call so a PUT via
@@ -392,7 +398,7 @@ async def _resolve_yaml_path(name: str) -> Path | None:
     if is_db_enabled():
         try:
             async with db_session() as sess:
-                record = await get_initiative(sess, name)
+                record = await get_initiative(sess, name, tenant_id=tenant_id)
             if record is not None:
                 _CATALOG_TMP_DIR.mkdir(parents=True, exist_ok=True)
                 tmp_path = _CATALOG_TMP_DIR / f'{name}.yaml'
@@ -409,8 +415,12 @@ async def _resolve_yaml_path(name: str) -> Path | None:
     return fs_path if fs_path.exists() else None
 
 
-async def _available_names() -> list[str]:
+async def _available_names(*, tenant_id: str | None = None) -> list[str]:
     """Return all known initiative names — DB union filesystem, sorted.
+
+    v7-P1 step 5 — when ``tenant_id`` is set, the DB half is filtered to
+    only that tenant's own + global entries. Filesystem entries are
+    always included (tenant-agnostic source-of-truth).
 
     Used to populate the 404 detail so callers know what's available without
     a separate discovery call.
@@ -419,7 +429,7 @@ async def _available_names() -> list[str]:
     if is_db_enabled():
         try:
             async with db_session() as sess:
-                records = await list_db_initiatives(sess)
+                records = await list_db_initiatives(sess, tenant_id=tenant_id)
             names.update(r.name for r in records)
         except Exception:  # noqa: BLE001 — best-effort; don't crash a 404 response
             logger.warning('Could not list DB initiatives for 404 detail')
@@ -515,7 +525,7 @@ async def _run_self_retrospect(initiative_id: str) -> None:
 
 
 @router.post('', response_model=InitiativeRecord, status_code=202)
-async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
+async def start_initiative(request: StartInitiativeRequest, http_request: Request) -> InitiativeRecord:
     """Validate the initiative YAML and spawn a K8s Job to execute it.
 
     Phase F: runtime is always 'job' — the run lives in its own K8s Job
@@ -538,6 +548,14 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
     - ``initiative_body: <raw YAML>`` — parsed verbatim, no catalog touch.
       The parsed ``name:`` field is used for bookkeeping (labels, DB rows).
     """
+    # v7-P1 step 5 — caller's authenticated tenant_id from the middleware
+    # (extracted in step 2 from the bearer's tenant_id claim, with the
+    # service-to-service X-Tenant-Id relay applied when the bearer is a
+    # system-tenant service token). Used both for catalog scoping (tenant
+    # only sees their own + global initiatives) AND row stamping (the
+    # spawned run's tenant_id matches the caller's).
+    tenant_id = get_current_tenant_id(http_request)
+
     if request.initiative_body is not None:
         # Inline-body path — no catalog lookup. The parsed `name:` field
         # is what shows up on the K8s Job's `leartech.io/initiative` label
@@ -555,9 +573,9 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         # `initiative_body` is None.
         assert request.initiative is not None  # noqa: S101 — guaranteed by validator
         initiative_name = request.initiative
-        yaml_path = await _resolve_yaml_path(initiative_name)
+        yaml_path = await _resolve_yaml_path(initiative_name, tenant_id=tenant_id)
         if yaml_path is None:
-            available = await _available_names()
+            available = await _available_names(tenant_id=tenant_id)
             raise HTTPException(
                 status_code=404,
                 detail={'message': f'Initiative {initiative_name!r} not found', 'available': available},
@@ -633,6 +651,11 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
         # job_reconciler's GH-side PR fallback can `gh pr list --head
         # <branch>` without name-mangling `record.initiative`.
         branch=loaded.primary.branch,
+        # v7-P1 step 5 — stamp the run with the caller's tenant_id.
+        # Cross-tenant probes (GET /initiatives/{id} from another
+        # tenant) will 404 once this is persisted. Tenant=None for
+        # unauthenticated dev/CI traffic or the system tenant.
+        tenant_id=tenant_id,
     )
     await register(record)
     # Phase D.5.3 — reflect that the Job is in flight. Without this, the
@@ -653,22 +676,34 @@ async def start_initiative(request: StartInitiativeRequest) -> InitiativeRecord:
 
 
 @router.get('', response_model=list[InitiativeRecord])
-async def list_initiatives() -> list[InitiativeRecord]:
-    """List all initiatives this process has seen — running, complete, or terminal."""
-    return await list_records()
+async def list_initiatives(http_request: Request) -> list[InitiativeRecord]:
+    """List initiatives visible to the caller — running, complete, or terminal.
+
+    v7-P1 step 5 — tenant-scoped: returns the caller's own runs plus
+    legacy / unauthenticated NULL-tenant runs. System-tenant / no-auth
+    contexts see everything.
+    """
+    tenant_id = get_current_tenant_id(http_request)
+    return await list_records(tenant_id=tenant_id)
 
 
 @router.get('/{initiative_id}', response_model=InitiativeRecord)
-async def get_initiative_status(initiative_id: str) -> InitiativeRecord:
-    """Get current status of a queued / running / completed initiative."""
-    record = await get_record(initiative_id)
+async def get_initiative_status(initiative_id: str, http_request: Request) -> InitiativeRecord:
+    """Get current status of a queued / running / completed initiative.
+
+    v7-P1 step 5 — tenant-scoped: cross-tenant lookups return 404 so
+    existence isn't leaked to a caller that has no business knowing the
+    row exists.
+    """
+    tenant_id = get_current_tenant_id(http_request)
+    record = await get_record(initiative_id, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
     return record
 
 
 @router.get('/{initiative_id}/logs', response_class=PlainTextResponse)
-async def get_initiative_logs(initiative_id: str, tail_lines: int = 500) -> PlainTextResponse:
+async def get_initiative_logs(initiative_id: str, http_request: Request, tail_lines: int = 500) -> PlainTextResponse:
     """Tail logs for a run.
 
     Phase D.6 — surfaces the spawned Job pod's stdout/stderr through the same
@@ -693,8 +728,12 @@ async def get_initiative_logs(initiative_id: str, tail_lines: int = 500) -> Plai
     in this library (do NOT await it). The async sibling is
     ``load_kube_config`` (file-based). See PR #50 root cause + the
     ``feedback_kubernetes_asyncio_load_incluster_is_sync`` memory.
+
+    v7-P1 step 5 — tenant-scoped: a tenant cannot read another tenant's
+    pod logs. Cross-tenant access returns 404.
     """
-    record = await get_record(initiative_id)
+    tenant_id = get_current_tenant_id(http_request)
+    record = await get_record(initiative_id, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
 
@@ -742,7 +781,7 @@ async def get_initiative_logs(initiative_id: str, tail_lines: int = 500) -> Plai
 
 
 @router.post('/{initiative_id}/cancel', response_model=InitiativeRecord)
-async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
+async def cancel_initiative(initiative_id: str, http_request: Request) -> InitiativeRecord:
     """Request cancellation of a running initiative. Idempotent for terminal records.
 
     Phase F: cancellation deletes the run's K8s Job (propagationPolicy
@@ -759,8 +798,12 @@ async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
     in this library (do NOT await it). Same pattern as the logs endpoint
     and ``spawn_initiative_job``; see PR #50 + the
     ``feedback_kubernetes_asyncio_load_incluster_is_sync`` memory.
+
+    v7-P1 step 5 — tenant-scoped: a tenant cannot cancel another tenant's
+    run. Cross-tenant access returns 404.
     """
-    record = await get_record(initiative_id)
+    tenant_id = get_current_tenant_id(http_request)
+    record = await get_record(initiative_id, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
 
@@ -820,7 +863,11 @@ async def cancel_initiative(initiative_id: str) -> InitiativeRecord:
     await update(initiative_id, status='cancelled', finished_at=now())
     logger.info('initiative %s cancelled: Job %s/%s deleted', initiative_id, namespace, record.job_name)
 
-    refreshed = await get_record(initiative_id)
+    # Re-fetch with the same tenant scoping so a state.update race between
+    # threads (or a future cross-tenant invariant violation) still returns
+    # 404 to the caller. The just-cancelled row is owned by ``tenant_id``,
+    # so this reads the row we just wrote.
+    refreshed = await get_record(initiative_id, tenant_id=tenant_id)
     if refreshed is None:  # pragma: no cover — record was just confirmed above
         raise HTTPException(status_code=500, detail='Record disappeared between get and refresh')
     return refreshed
@@ -848,13 +895,17 @@ def _summary_of(loaded: Initiative) -> dict[str, object]:
 
 
 @router.get('/_validate/{initiative}')
-async def validate_initiative(initiative: str) -> dict[str, object]:
+async def validate_initiative(initiative: str, http_request: Request) -> dict[str, object]:
     """Resolve and parse an initiative YAML by name, returning a summary dict.
 
     No side effects. Useful for callers (Tekton task, CRD controller) to
     verify YAML correctness before POST.
+
+    v7-P1 step 5 — tenant-scoped: validates the caller's own initiative
+    or a global one. Cross-tenant names 404.
     """
-    yaml_path = await _resolve_yaml_path(initiative)
+    tenant_id = get_current_tenant_id(http_request)
+    yaml_path = await _resolve_yaml_path(initiative, tenant_id=tenant_id)
     if yaml_path is None:
         raise HTTPException(status_code=404, detail=f'Initiative {initiative!r} not found')
     try:
@@ -983,7 +1034,7 @@ def _require_db_enabled_for_commands() -> None:
 
 
 @router.post('/{run_id}/commands', response_model=SubmitCommandResponse, status_code=201)
-async def submit_command(run_id: str, request: SubmitCommandRequest) -> SubmitCommandResponse:
+async def submit_command(run_id: str, request: SubmitCommandRequest, http_request: Request) -> SubmitCommandResponse:
     """Queue a command for the agent driving ``run_id`` to process.
 
     Lookups happen in two stages:
@@ -1024,7 +1075,10 @@ async def submit_command(run_id: str, request: SubmitCommandRequest) -> SubmitCo
                 detail='inject_guidance requires payload.text to be a non-empty string.',
             )
 
-    record = await get_record(run_id)
+    # v7-P1 step 5 — tenant-scoped: a tenant can only queue commands on
+    # their own run. Cross-tenant lookups 404.
+    tenant_id = get_current_tenant_id(http_request)
+    record = await get_record(run_id, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {run_id!r}')
     if record.status in {'complete', 'failed', 'cancelled', 'orphaned', 'timed_out'}:
@@ -1061,6 +1115,7 @@ async def submit_command(run_id: str, request: SubmitCommandRequest) -> SubmitCo
 @router.get('/{run_id}/commands', response_model=list[CommandRecordResponse])
 async def list_run_commands(
     run_id: str,
+    http_request: Request,
     unacked_only: bool = False,
 ) -> list[CommandRecordResponse]:
     """Return queued commands for ``run_id`` (newest first per submission).
@@ -1077,7 +1132,10 @@ async def list_run_commands(
     """
     _require_db_enabled_for_commands()
 
-    record = await get_record(run_id)
+    # v7-P1 step 5 — tenant-scoped: a tenant can only list commands on
+    # their own run. Cross-tenant lookups 404.
+    tenant_id = get_current_tenant_id(http_request)
+    record = await get_record(run_id, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {run_id!r}')
 

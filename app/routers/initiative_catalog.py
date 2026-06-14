@@ -16,10 +16,11 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
+from app.auth import get_current_tenant_id
 from app.db import is_db_enabled
 from app.db import session as db_session
 from app.db.initiative_catalog import (
@@ -60,6 +61,10 @@ class InitiativeResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     created_by: str | None
+    # v7-P1 step 5 — exposed so clients (orchestrator, operators) can see
+    # which tenant owns the row. None means "global" (visible to all
+    # tenants).
+    tenant_id: str | None = None
 
     @classmethod
     def from_record(cls, rec: InitiativeRecord) -> InitiativeResponse:
@@ -70,6 +75,7 @@ class InitiativeResponse(BaseModel):
             created_at=rec.created_at,
             updated_at=rec.updated_at,
             created_by=rec.created_by,
+            tenant_id=rec.tenant_id,
         )
 
 
@@ -104,37 +110,54 @@ def _validate_yaml(yaml_body: str) -> Initiative:
 
 
 @router.get('', response_model=list[InitiativeResponse])
-async def list_db_initiatives() -> list[InitiativeResponse]:
-    """List all DB-stored initiatives.
+async def list_db_initiatives(request: Request) -> list[InitiativeResponse]:
+    """List DB-stored initiatives visible to the caller.
 
     Filesystem-backed initiatives are NOT included — for the merged
     catalog used by the fire endpoint, see `GET /initiatives` (the
     existing list-available endpoint).
+
+    v7-P1 step 5 — tenant-scoped: returns the caller's own initiatives
+    plus the global set (rows with ``tenant_id IS NULL``). Unauthenticated
+    / system-tenant callers see every row, mirroring pre-tenancy behaviour.
     """
     _require_db()
+    tenant_id = get_current_tenant_id(request)
     async with db_session() as sess:
-        records = await list_initiatives(sess)
+        records = await list_initiatives(sess, tenant_id=tenant_id)
     return [InitiativeResponse.from_record(r) for r in records]
 
 
 @router.get('/{name}', response_model=InitiativeResponse)
-async def get_db_initiative(name: str) -> InitiativeResponse:
+async def get_db_initiative(name: str, request: Request) -> InitiativeResponse:
+    """Get a single DB-stored initiative by name.
+
+    v7-P1 step 5 — tenant-scoped: returns 404 (not 403) when the row
+    is owned by a different tenant. 403 would leak existence to a
+    caller that has no business knowing the row exists.
+    """
     _require_db()
+    tenant_id = get_current_tenant_id(request)
     async with db_session() as sess:
-        record = await get_initiative(sess, name)
+        record = await get_initiative(sess, name, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No DB-stored initiative {name!r}')
     return InitiativeResponse.from_record(record)
 
 
 @router.post('', response_model=InitiativeResponse, status_code=status.HTTP_201_CREATED)
-async def create_db_initiative(body: CreateInitiativeRequest) -> InitiativeResponse:
+async def create_db_initiative(body: CreateInitiativeRequest, request: Request) -> InitiativeResponse:
     """Create a new DB-stored initiative.
 
     Validates the YAML through the canonical loader before persisting —
     rejects malformed YAML with 422. Rejects names that already exist
     (in DB) with 409. Filesystem names are NOT checked here — the loader
     merge handles conflicts at fire-time (filesystem wins).
+
+    v7-P1 step 5 — the row's ``tenant_id`` is stamped from the caller's
+    authenticated tenant_id. Unauthenticated / system-tenant callers
+    (``tenant_id is None``) create global rows; tenant callers create
+    tenant-scoped rows visible only to themselves + global readers.
     """
     _require_db()
     parsed = _validate_yaml(body.yaml_body)
@@ -145,6 +168,7 @@ async def create_db_initiative(body: CreateInitiativeRequest) -> InitiativeRespo
             detail=f"YAML body's `name:` is {parsed.name!r} but request specified {body.name!r}",
         )
 
+    tenant_id = get_current_tenant_id(request)
     async with db_session() as sess:
         try:
             record = await create_initiative(
@@ -152,6 +176,7 @@ async def create_db_initiative(body: CreateInitiativeRequest) -> InitiativeRespo
                 name=body.name,
                 yaml_body=body.yaml_body,
                 description=body.description,
+                tenant_id=tenant_id,
             )
         except IntegrityError as exc:
             raise HTTPException(
@@ -163,7 +188,15 @@ async def create_db_initiative(body: CreateInitiativeRequest) -> InitiativeRespo
 
 
 @router.put('/{name}', response_model=InitiativeResponse)
-async def update_db_initiative(name: str, body: UpdateInitiativeRequest) -> InitiativeResponse:
+async def update_db_initiative(name: str, body: UpdateInitiativeRequest, request: Request) -> InitiativeResponse:
+    """Update a DB-stored initiative.
+
+    v7-P1 step 5 — tenant-scoped: cross-tenant updates return 404 (not
+    403) so existence isn't leaked. Tenant callers cannot edit global
+    rows (``row.tenant_id IS NULL``) — those are only editable by the
+    system tenant (which the middleware represents as
+    ``tenant_id is None`` here after the X-Tenant-Id relay check).
+    """
     _require_db()
     if body.yaml_body is not None:
         parsed = _validate_yaml(body.yaml_body)
@@ -173,12 +206,14 @@ async def update_db_initiative(name: str, body: UpdateInitiativeRequest) -> Init
                 detail=f"YAML body's `name:` is {parsed.name!r} but path specified {name!r}",
             )
 
+    tenant_id = get_current_tenant_id(request)
     async with db_session() as sess:
         record = await update_initiative(
             sess,
             name=name,
             yaml_body=body.yaml_body,
             description=body.description,
+            tenant_id=tenant_id,
         )
     if record is None:
         raise HTTPException(status_code=404, detail=f'No DB-stored initiative {name!r}')
@@ -186,14 +221,19 @@ async def update_db_initiative(name: str, body: UpdateInitiativeRequest) -> Init
 
 
 @router.delete('/{name}', status_code=status.HTTP_204_NO_CONTENT)
-async def delete_db_initiative(name: str) -> None:
+async def delete_db_initiative(name: str, request: Request) -> None:
     """Delete a DB-stored initiative.
 
     Cannot delete filesystem-backed initiatives via this endpoint — those
     are managed via PR to the repo's `initiatives/` directory.
+
+    v7-P1 step 5 — tenant-scoped: cross-tenant deletes return 404. A
+    tenant cannot delete global rows (``tenant_id IS NULL``); only the
+    system tenant can.
     """
     _require_db()
+    tenant_id = get_current_tenant_id(request)
     async with db_session() as sess:
-        deleted = await delete_initiative(sess, name)
+        deleted = await delete_initiative(sess, name, tenant_id=tenant_id)
     if not deleted:
         raise HTTPException(status_code=404, detail=f'No DB-stored initiative {name!r}')
