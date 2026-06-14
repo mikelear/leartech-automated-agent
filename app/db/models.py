@@ -78,6 +78,12 @@ class InitiativeRow(Base):
     name: Mapped[str] = mapped_column(String(255), primary_key=True)
     yaml_body: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # v7-P1 step 5 — tenant_id is the row's owning tenant. NULL means
+    # "global, system-tenant-owned" — visible to every tenant via the
+    # catalog reader (WHERE tenant_id IS NULL OR tenant_id = ?). A
+    # tenant-specific initiative is only visible to that tenant. See
+    # migration 0009_tenant_id.sql for the column rationale.
+    tenant_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -121,6 +127,13 @@ class InitiativeRunRow(Base):
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     initiative: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
+    # v7-P1 step 5 — tenant_id is the run's owning tenant. NULL means
+    # "no tenant context" (legacy rows pre-dating the auth middleware,
+    # or unauthenticated dev/CI traffic). All reader paths in
+    # app/db/initiative_runs.py filter by tenant_id when one is
+    # supplied; cross-tenant lookups 404 (not 403 — leaking presence
+    # is the same harm as leaking content).
+    tenant_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)

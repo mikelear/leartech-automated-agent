@@ -38,6 +38,7 @@ invalid tokens. Production clusters MUST set ``LEARTECH_AUTH_REQUIRED=true``.
 from __future__ import annotations
 
 from app.auth.middleware import (
+    TENANT_RELAY_HEADER,
     AuthenticationMiddleware,
     AuthSettings,
     JWKSCache,
@@ -48,6 +49,7 @@ from app.auth.middleware import (
 )
 
 __all__ = [
+    'TENANT_RELAY_HEADER',
     'AuthSettings',
     'AuthenticationMiddleware',
     'JWKSCache',

@@ -23,9 +23,10 @@ from collections import Counter
 from importlib.metadata import PackageNotFoundError, version
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from app.auth import get_current_tenant_id
 from app.state import get as get_record
 from gate.agent.lessons.loader import Lesson, load_all_lessons
 from gate.agent.mcp_catalog import (
@@ -233,9 +234,14 @@ class WhyResponse(BaseModel):
 
 
 @router.get('/initiatives/{initiative_id}/timeline', response_model=TimelineResponse)
-async def get_initiative_timeline(initiative_id: str) -> TimelineResponse:
-    """Per-run timeline derived from the durable run record."""
-    record = await get_record(initiative_id)
+async def get_initiative_timeline(initiative_id: str, request: Request) -> TimelineResponse:
+    """Per-run timeline derived from the durable run record.
+
+    v7-P1 step 5 — tenant-scoped: cross-tenant lookups return 404 so
+    existence is not leaked.
+    """
+    tenant_id = get_current_tenant_id(request)
+    record = await get_record(initiative_id, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
 
@@ -279,9 +285,13 @@ async def get_initiative_timeline(initiative_id: str) -> TimelineResponse:
 
 
 @router.get('/initiatives/{initiative_id}/why', response_model=WhyResponse)
-async def get_initiative_why(initiative_id: str) -> WhyResponse:
-    """Lessons injected at session start for this run."""
-    record = await get_record(initiative_id)
+async def get_initiative_why(initiative_id: str, request: Request) -> WhyResponse:
+    """Lessons injected at session start for this run.
+
+    v7-P1 step 5 — tenant-scoped: cross-tenant lookups return 404.
+    """
+    tenant_id = get_current_tenant_id(request)
+    record = await get_record(initiative_id, tenant_id=tenant_id)
     if record is None:
         raise HTTPException(status_code=404, detail=f'No initiative with id {initiative_id!r}')
     lessons: list[Lesson] = load_all_lessons()
