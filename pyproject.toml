@@ -15,6 +15,7 @@ dependencies = [
     "prompt-toolkit>=3.0.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
+    "python-jose[cryptography]>=3.3.0",
     "pyyaml>=6.0",
     "rich>=13.7.0",
     "sqlalchemy[asyncio]>=2.0",
@@ -90,6 +91,14 @@ ignore_missing_imports = true
 # costs nothing.
 [[tool.mypy.overrides]]
 module = ["prompt_toolkit", "prompt_toolkit.*"]
+ignore_missing_imports = true
+
+# python-jose ships type stubs as `types-python-jose` in a separate dist,
+# but their JWT helpers' overloads are loose; the strict-mode wrapper in
+# app/auth/middleware.py narrows the call sites we use, so silencing the
+# imports avoids dragging in another dev-only dep just for strict mypy.
+[[tool.mypy.overrides]]
+module = ["jose", "jose.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
