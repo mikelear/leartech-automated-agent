@@ -95,7 +95,9 @@ def _mint_token(
         'exp': now + expires_in,
     }
     if tenant_id is not None:
-        claims['tenant_id'] = tenant_id
+        # Hydra nests custom access-token claims under `ext`; the middleware
+        # reads `ext.tenant_id` (matching the orchestrator + the real IdP).
+        claims['ext'] = {'tenant_id': tenant_id}
     if extra_claims:
         claims.update(extra_claims)
     return jwt.encode(claims, private_pem, algorithm=ALG, headers={'kid': KID})
@@ -166,7 +168,7 @@ def test_load_settings_from_env_returns_defaults_when_unset() -> None:
     assert settings.required is False
     assert settings.issuer == ''
     assert settings.audience == ''
-    assert settings.tenant_claim == 'tenant_id'
+    assert settings.tenant_claim == 'ext.tenant_id'
     assert settings.jwks_ttl_seconds == 300
 
 
