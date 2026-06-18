@@ -118,7 +118,8 @@ def _mint(
         'exp': now + 3600,
     }
     if tenant_id is not None:
-        claims['tenant_id'] = tenant_id
+        # Hydra nests custom access-token claims under `ext` → `ext.tenant_id`.
+        claims['ext'] = {'tenant_id': tenant_id}
     return jwt.encode(claims, private_pem, algorithm=ALG, headers={'kid': KID})
 
 

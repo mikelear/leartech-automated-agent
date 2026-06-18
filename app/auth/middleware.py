@@ -53,7 +53,9 @@ AUTH_TENANT_CLAIM_ENV = 'LEARTECH_AUTH_TENANT_CLAIM'
 # claim is always authoritative.
 AUTH_SYSTEM_TENANT_ENV = 'LEARTECH_AUTH_SYSTEM_TENANT_ID'
 
-DEFAULT_TENANT_CLAIM = 'tenant_id'
+# Hydra nests custom access-token claims under `ext`, so tenant_id lives at
+# `ext.tenant_id` (matching the orchestrator middleware). Dotted = nested path.
+DEFAULT_TENANT_CLAIM = 'ext.tenant_id'
 DEFAULT_JWKS_TTL_SECONDS = 300  # 5 min — Hydra rotates keys infrequently.
 # Header carrying the effective tenant_id when a system-tenant service
 # token is making an on-behalf-of call. Read only when the bearer's
@@ -79,6 +81,22 @@ _BYPASS_EXACT: frozenset[str] = frozenset(
     }
 )
 _BYPASS_PREFIX: tuple[str, ...] = ('/.well-known/',)
+
+
+def _extract_claim(claims: dict[str, Any], path: str) -> Any:
+    """Navigate a dotted claim path (e.g. ``ext.tenant_id``) into ``claims``.
+
+    Returns None if any segment is missing or a non-dict is hit. A single
+    segment (e.g. ``tenant_id``) reads the top level — backward compatible.
+    """
+    cur: Any = claims
+    for seg in path.split('.'):
+        if not isinstance(cur, dict):
+            return None
+        cur = cur.get(seg)
+        if cur is None:
+            return None
+    return cur
 
 
 @dataclass(frozen=True)
@@ -333,7 +351,7 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             request.state.user = None
             return await call_next(request)
 
-        tenant_value = claims.get(self._settings.tenant_claim)
+        tenant_value = _extract_claim(claims, self._settings.tenant_claim)
         tenant_id: str | None = str(tenant_value) if tenant_value is not None else None
         subject = str(claims.get('sub', ''))
 
