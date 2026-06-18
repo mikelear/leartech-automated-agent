@@ -1,0 +1,44 @@
+# auth-service-add-tenant-id-claim — V6 auth close-out (1 of 3).
+#
+# The orchestrator + agent OIDC middleware already EXTRACT `ext.tenant_id` from
+# tokens and filter every DB query by it (orch plan_store.py, agent app/auth).
+# But the IdP never SETS it: auth-service GetConsent injects only email +
+# ext.Permissions. So tenant filtering currently runs on an empty tenant.
+# This init closes that gap. Must deploy BEFORE OIDC enforcement is activated.
+#
+# Run with: `make initiative INITIATIVE=auth-service-add-tenant-id-claim`
+
+name: auth-service-add-tenant-id-claim
+
+description: |
+  Inject the authenticated user's tenant_id into OIDC token claims as
+  `ext.tenant_id`, so the orchestrator + agent tenant-scoping middleware
+  (which already reads that claim) receives a real value instead of empty.
+
+repo: leartech-auth-service
+branch: agent/add-tenant-id-claim
+base: main
+
+goal: |
+  In internal/handlers/auth.go, GetConsent's claim-building block (where
+  `claims["ext"]` is currently set to a map containing `Permissions`), add the
+  user's tenant to that same `ext` map:
+
+      ext := claims["ext"].(map[string]interface{})
+      ext["tenant_id"] = user.TenantID
+
+  Notes:
+  - The user record is already fetched in GetConsent to inject Permissions —
+    reuse it; `user.TenantID` already exists on the model (internal/models/user.go).
+  - The claim key MUST be `ext.tenant_id` — that is exactly what the
+    orchestrator (app/tenants.py) and agent (app/auth/__init__.py) read.
+  - Do not change the existing `email` or `Permissions` claims.
+  - If `user.TenantID` is empty, still set the key (empty string) — downstream
+    falls back to the platform/system tenant; don't special-case.
+
+  ## Acceptance criteria
+  - A first-party user consent issues a token whose claims contain
+    `ext.tenant_id` equal to the user's `TenantID`.
+  - A unit test in internal/handlers asserts `ext.tenant_id` is present and
+    equals the user's tenant; existing email/Permissions assertions still pass.
+  - All PR gates green; no admin-merge needed.
