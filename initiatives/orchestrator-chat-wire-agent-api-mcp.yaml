@@ -1,0 +1,98 @@
+name: orchestrator-chat-wire-agent-api-mcp
+description: |
+  Depends on `platform-mcps-add-agent-api-mcp-server`. Once the
+  agent-api MCP server ships, orch chat needs to proxy its tools so
+  operators can inspect in-flight initiative runs directly from the
+  chat surface — closing the dead zone surfaced 2026-06-11 (memory
+  `feedback_orch_chat_blind_to_run_progress_pre_pr`).
+
+  Mirrors the v5h parity pattern used to wire tekton and pr-context
+  MCPs into chat.
+
+repo: leartech-orchestrator
+branch: agent/orchestrator-chat-wire-agent-api-mcp
+base: main
+
+goal: |
+  Wire the new agent-api MCP server into orch chat, following the
+  exact v5h parity pattern used for tekton and pr-context MCPs.
+
+  ## 1. Read first
+
+  - `gate/orch/chat_tools.py` — TOOL_NAMES tuple + existing MCP proxy
+    pattern for tekton and pr-context tools
+  - `gate/orch/chat_prompt.py` — system prompt sections referencing
+    MCP tools; find where tekton tools are described
+  - `app/routers/mcp_status.py` — probe pattern for existing MCPs
+  - `app/config.py` — MCP base URL env vars
+  - v5h PR diff for the tekton/pr-context wiring as the canonical
+    pattern to mirror
+  - Memory: `feedback_orch_chat_blind_to_run_progress_pre_pr`
+
+  ## 2. chat_tools.py — add proxy tools
+
+  Add to TOOL_NAMES and implement proxy functions for all 10 tools
+  from platform-mcps-add-agent-api-mcp-server:
+  - get_initiative_run
+  - list_initiative_runs
+  - get_catalog_entry
+  - list_catalog_entries
+  - get_run_decisions
+  - get_run_snapshot
+  - list_roles
+  - fire_initiative
+  - cancel_initiative_run
+  - send_command_to_run
+
+  Each proxy: thin httpx call to
+  `{LEARTECH_PLATFORM_MCPS_URL}/agent-api/mcp/...` matching the
+  pattern of existing tekton proxies. Forward auth header. Return
+  result verbatim.
+
+  CRITICAL: tool names must be unique in TOOL_NAMES — this was the
+  0.0.60 bug. Assert no duplicates in the same PR (add or extend the
+  existing uniqueness guard if present).
+
+  ## 3. chat_prompt.py — system prompt update
+
+  Add a new section describing the agent-api MCP tools, parallel to
+  the existing tekton and pr-context sections. Cover:
+  - When to use get_initiative_run vs list_initiative_runs
+  - get_run_decisions for turn-level debug
+  - get_run_snapshot as the cheap "what is it doing right now" call
+  - cancel_initiative_run requires operator confirmation (mirror
+    the hold-cancel gate pattern)
+  - fire_initiative: note it bypasses plan-runner budget tracking;
+    prefer fire_initiative_inline at the plan level
+
+  ## 4. mcp_status.py — health probe
+
+  Add agent-api MCP probe entry alongside tekton and pr-context:
+  - Probe URL: `{LEARTECH_PLATFORM_MCPS_URL}/agent-api/mcp/health`
+    (or equivalent ping endpoint per platform-mcps convention)
+  - Key in healthz response: `agent_api_mcp`
+  - Failure behaviour: same as existing MCP probes (degraded, not
+    down)
+
+  ## 5. config.py
+
+  `LEARTECH_PLATFORM_MCPS_URL` already exists (used for tekton proxy).
+  Confirm agent-api routes are served from the same base URL — no new
+  env var needed unless platform-mcps uses separate service endpoints.
+
+  ## 6. Tests
+
+  `tests/test_chat_agent_api_tools.py`:
+  - Unit tests with httpx mock for each of the 10 proxy functions
+  - Test TOOL_NAMES uniqueness assertion (regression for 0.0.60 bug)
+  - Test mcp_status probe reflects agent_api_mcp key in /healthz
+
+  `tests/smoke/test_chat.py` update (from bfd9b632f554 PR):
+  - Add entries for each new agent-api tool in the living-contract
+    coverage assertion
+
+gate_marks:
+  - unit
+  - integration
+
+max_iterations: 5

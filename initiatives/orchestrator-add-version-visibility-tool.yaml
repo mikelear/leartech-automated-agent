@@ -1,0 +1,83 @@
+name: orchestrator-add-version-visibility-tool
+description: |
+  Today there's no easy way to answer "is plan X using the deployed
+  code, or is there a release lag?". V5e session 2026-06-10 hit
+  exactly this — 0.0.48 was released (with PR #88's persistence fix)
+  but 0.0.47 was still deployed. The plan-runner ran the old code
+  without anyone noticing until /chat surfaced it minutes later.
+
+  This init adds a small read-only tool that surfaces deploy vs.
+  release skew, plus a /chat hook.
+
+repo: leartech-orchestrator
+branch: agent/add-version-visibility-tool
+base: main
+
+goal: |
+  Make deploy-vs-release skew explicit and queryable.
+
+  ## 1. Read first
+
+  - `app/settings.py` — current image tag is in settings (from chart
+    env injection) — surface it
+  - GitHub Releases API for the latest release tag
+  - `kubectl get deploy leartech-orchestrator` for currently-deployed
+    image (Job RBAC may need a deployments:get grant)
+
+  ## 2. Tool: get_version_state()
+
+  ```
+  Returns:
+  {
+    deployed_image: "ghcr.io/.../leartech-orchestrator:0.0.47",
+    deployed_tag: "0.0.47",
+    deployed_at: "<deployment.status.conditions[Available].lastTransitionTime>",
+    latest_release_tag: "0.0.48",
+    skew: True,  # deployed_tag != latest_release_tag
+    plan_runner_image_for_plan: "..." (optional, if plan_id passed),
+    notes: ["GitOps reconcile typically takes 5-15 min after release."],
+  }
+  ```
+
+  Pure read; no mutations. Cheap. Cost ~$0.
+
+  ## 3. /chat surface
+
+  System prompt addition:
+  ```
+  When operator asks "is the deploy fresh" / "are we running latest"
+  / "did my PR deploy yet":
+    - Call get_version_state
+    - Surface skew clearly with timestamps
+    - If asking about a specific plan, include plan_runner_image_for_plan
+
+  When ANY plan diagnosis surfaces skew as a contributing factor (e.g.
+  recovery flow), include get_version_state output in the explanation.
+  ```
+
+  ## 4. CLI surface
+
+  `leartech-agent version` — runs get_version_state, prints a short
+  human report. Helps the operator see skew without launching chat.
+
+  ## 5. Tests
+
+  - `tests/test_version_state_no_skew.py` — same tag both sides
+  - `tests/test_version_state_skew_detected.py` — newer release than
+    deployed → skew=True
+  - `tests/test_version_state_handles_no_releases.py` — fresh repo
+    with no releases yet
+  - `tests/test_chat_version_query_calls_tool.py` — chat dispatches
+    correctly
+
+  ## 6. JX3 conventions
+
+  Standard. May need GitHub PAT secret to query releases — reuse
+  existing.
+
+  ## 7. Conventional commit
+
+  `feat(orchestrator): add get_version_state tool + /chat + CLI`
+
+gate_marks: [unit, integration]
+max_iterations: 8

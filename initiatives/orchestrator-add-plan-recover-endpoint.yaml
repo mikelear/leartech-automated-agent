@@ -1,0 +1,113 @@
+name: orchestrator-add-plan-recover-endpoint
+description: |
+  When a plan-runner Job dies mid-flight (GKE autoscaler eviction, OOM,
+  node failure, missed activeDeadlineSeconds), recovery is currently a
+  manual psql + curl operator pass. This init formalizes that into a
+  single endpoint with three modes.
+
+  Surfaced 2026-06-10 by V5e plan 385d73899880 — autoscaler killed the
+  plan-runner pod, 2 of 5 agent runs survived and opened PRs, the other
+  3 stayed `pending` forever. Manual recovery: UPDATE plan_steps for the
+  2 completed agents + fire 3 remaining inits. Repeatable enough to be
+  a primitive.
+
+repo: leartech-orchestrator
+branch: agent/add-plan-recover-endpoint
+base: main
+
+goal: |
+  Add POST /plans/{plan_id}/recover with three modes that handle the
+  most common operator-recovery scenarios.
+
+  ## 1. Read first
+
+  - `gate/orch/plan_runner.py` — current plan-runner SDK loop
+  - `gate/orch/job_runner.py` — Job spawn logic (recovery re-spawns)
+  - `app/plan_store.py` — update_step, list_plan_steps
+  - `gate/orch/plan_reconcile.py` — reconcile_plan tool (recover reuses
+    its detection logic)
+  - Memory: `feedback_plan_runner_killed_by_gke_autoscaler` —
+    the failure mode this fixes
+  - Memory: `project_v5_intervention_playbook` — 8 manual patterns
+
+  ## 2. Endpoint shape
+
+  ```
+  POST /plans/{plan_id}/recover
+  body: { mode: "resume" | "fork" | "restart", reason?: string }
+
+  → 200: { plan_id, mode, action_taken, fresh_plan_id? }
+  → 404: plan not found
+  → 409: plan not in a recoverable state (already running healthy)
+  → 422: bad mode
+  ```
+
+  ### Mode: resume (recommended default)
+  1. Run reconcile_plan to bring plan_steps in sync with reality
+  2. For each step with `running` status and a populated `agent_run_id`:
+     - Check that agent_run terminal status
+     - If complete → mark step `awaiting_review` (or complete if PR merged)
+     - If failed → apply retry_on_fail policy
+  3. For each step with `pending` status: leave as-is
+  4. Spawn a NEW plan-runner Job for plan_id (same plan, fresh runner)
+  5. Plan-runner reads current plan_steps state and picks up where it
+     left off
+
+  ### Mode: fork
+  1. Run reconcile_plan
+  2. Create a NEW plan with the same yaml_body, but mark steps that
+     already completed in the original as `complete` in the new plan
+     (carrying agent_run_id and pr_number forward)
+  3. Old plan: status='superseded_by:<new_id>'
+  4. New plan: status='submitted', plan-runner spawns fresh
+  5. Returns: { plan_id: original, mode: 'fork', fresh_plan_id: <new> }
+
+  Use when the original plan is too broken to resume — e.g. plan_steps
+  has corrupt state, plan-runner Job is in unrecoverable Failed.
+
+  ### Mode: restart
+  1. Cancel all in-flight agent runs (POST /initiatives/{id}/cancel)
+  2. Reset all plan_steps to status='pending', clear agent_run_id +
+     pr_number + fired_at
+  3. Spawn fresh plan-runner Job
+  4. Plan re-fires everything from scratch
+
+  Operator escape hatch. Loses work (cancels in-flight agents). Used
+  only when other modes can't recover.
+
+  ## 3. Tests
+
+  - `tests/test_plan_recover_resume_picks_up_inflight.py` — simulate
+    plan_steps with mix of complete/running/pending; assert
+    correct status transitions + new Job spawned
+  - `tests/test_plan_recover_fork_carries_state.py` — assert new plan
+    inherits completed agent_run_ids and pr_numbers
+  - `tests/test_plan_recover_restart_cancels_inflight.py` — assert
+    cancel-initiative called for each running agent_run
+  - `tests/test_plan_recover_already_running_returns_409.py` — guard
+    against double-recover
+  - `tests/test_plan_recover_bad_mode_returns_422.py` — input validation
+  - `tests/test_plan_recover_records_decision.py` — recovery event
+    appended to plan_decisions with reason + mode
+
+  ## 4. Chat tool
+
+  Add `recover_plan(plan_id, mode, reason)` to chat_tools so /chat can
+  drive recovery conversationally:
+  ```
+  > plan X looks stuck — agents finished but plan-runner dead
+  [chat calls reconcile_plan, sees the gap]
+  [chat suggests: recover_plan(X, mode='resume')]
+  [operator confirms]
+  ```
+
+  ## 5. JX3 conventions
+
+  Standard. New router file or extension of plans router.
+
+  ## 6. Conventional commit
+
+  `feat(orchestrator): add POST /plans/{id}/recover with resume/fork/restart modes`
+
+gate_marks: [unit, integration]
+max_iterations: 10

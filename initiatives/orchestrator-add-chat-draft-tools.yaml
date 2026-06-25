@@ -1,0 +1,153 @@
+name: orchestrator-add-chat-draft-tools
+description: |
+  Phase 2 of the draft-model migration (see plan v5f-draft-model). The
+  drafts table from Phase 1 gives us the storage layer. This init adds
+  the chat tool surface so the operator can author / rework / verify /
+  fire drafts entirely through conversation.
+
+  Today's dog-food session 2026-06-10 proved the BA-shaped capabilities
+  Orch's chat ALREADY has:
+  - Synthesis (14-init bundle → narrative + capability map) — done for
+    $0.06 in conversation b7d182fd7dda
+  - Mermaid rendering — done for $0.05 in same conversation
+  Both rely only on the LLM + system prompt. They work today.
+
+  What's MISSING is the persistence + iteration loop:
+  - Draft authoring (chat writes the YAML body into a draft row)
+  - Rework (apply a change request to an existing draft, create child draft)
+  - Verify across a batch (synthesize end-state from N drafts at once)
+  - Fire (use fire_initiative with the draft's yaml_body inline)
+
+  This init wires those four operations as chat tools.
+
+repo: leartech-orchestrator
+branch: agent/add-chat-draft-tools
+base: main
+
+goal: |
+  Add four new chat tools that operate on the initiative_drafts table from
+  Phase 1.
+
+  ## 1. Read first
+
+  - `gate/orch/chat_tools.py` — existing chat tool registration; mirror
+    this shape
+  - `gate/orch/chat_prompt.py` — system prompt; this init adds the new
+    tool advertisements
+  - `app/initiative_drafts_store.py` — Phase 1's CRUD module (depends_on)
+  - `gate/orch/mcp_servers/automated_agent_client.py` — fire_initiative
+    accepts `yaml_body` inline; that's the path fire_draft uses
+
+  ## 2. Four new tools
+
+  ### `propose_init_draft(name, change_request, parent_draft_id?)`
+  Authors or reworks a draft. LLM-generated yaml_body from the change
+  request (and parent draft body if reworking). Returns the new draft
+  row.
+
+  ```
+  Args:
+    name: str         — initiative name (e.g. "mortgages-api-add-search-products")
+    change_request: str — natural-language description of what the init should do
+    parent_draft_id: str | None — if reworking, the draft to base from
+  Returns:
+    {draft_id, name, status, yaml_body_preview (first 500 chars)}
+  ```
+
+  Implementation: this tool USES the LLM internally — it's an LLM-calling-LLM
+  pattern. The chat LLM calls this tool, which invokes a sub-LLM to generate
+  the YAML body. The sub-LLM has access to:
+  - The catalog format (read sample yamls from leartech-automated-agent/initiatives/)
+  - The parent draft body (if reworking)
+  - The change request
+  Cost: $0.02–0.05 per call.
+
+  ### `verify_batch(draft_ids)`
+  Synthesizes end-state narrative + Mermaid for a set of drafts. Reuses
+  today's manual chat pattern as a tool.
+
+  ```
+  Args:
+    draft_ids: list[str]
+  Returns:
+    {narrative: str, capability_map: dict, mermaid: str, risks: list[str]}
+  ```
+
+  Same prompt as today's dog-food session (b7d182fd7dda). Cap response at
+  600 words to keep cost bounded.
+
+  ### `fire_draft(draft_id)`
+  Fires the draft via fire_initiative with inline yaml_body. Marks the
+  draft as fired + records the run_id.
+
+  ```
+  Args:
+    draft_id: str
+  Returns:
+    {run_id, branch, pr_repo, status} — same shape as fire_initiative
+  ```
+
+  Idempotency: if draft.status is already 'fired', return the existing
+  fired_run_id rather than re-firing. Operator can re-fire by explicitly
+  using propose_init_draft to make a new revision first.
+
+  ### `list_drafts(name?, status?)` + `view_draft(id)` + `delete_draft(id)`
+  Read-side tools. Cheap. Operator inspects what's in flight before
+  reworking / firing.
+
+  ## 3. System prompt update
+
+  Add to gate/orch/chat_prompt.py:
+
+  ```
+  You have four tools for authoring and managing initiative drafts:
+  - propose_init_draft(name, change_request, parent_draft_id?) — author or rework
+  - verify_batch([draft_ids]) — synthesize end-state across drafts
+  - fire_draft(draft_id) — fire the agent
+  - list_drafts / view_draft / delete_draft — read & manage
+
+  Operator workflow:
+  1. Operator describes intent → propose_init_draft creates a draft
+  2. Operator asks for changes → propose_init_draft with parent_draft_id
+     creates a revision
+  3. Operator asks for verification → verify_batch returns narrative +
+     Mermaid + risks
+  4. Operator says "fire" → fire_draft launches the agent
+
+  Do NOT auto-fire. Always confirm "ready to fire X drafts?" first.
+  ```
+
+  ## 4. Tests
+
+  - `tests/test_chat_draft_tool_propose.py` — mocked sub-LLM; verify
+    yaml_body lands in row, status='draft', parent_draft_id walks
+  - `tests/test_chat_draft_tool_verify.py` — multi-draft synthesis;
+    verify Mermaid block present
+  - `tests/test_chat_draft_tool_fire.py` — assert fire_initiative called
+    with yaml_body=...; draft transitions to 'fired'; idempotent re-fire
+    returns existing run_id
+  - `tests/test_chat_draft_tool_list_view_delete.py` — read/manage
+
+  ## 5. Cost ballpark per session
+
+  | Operation | Cost |
+  |---|---|
+  | propose_init_draft × 3 (rework cycle) | $0.10 |
+  | verify_batch (10 drafts) | $0.08 |
+  | fire_draft (no LLM) | $0 |
+
+  Full BA session ~$0.20 to refactor + verify + ship a batch. Bookended
+  against today's manual cost of "write 14 YAMLs by hand, hope they
+  cohere".
+
+  ## 6. JX3 conventions
+
+  Standard.
+
+  ## 7. Conventional commit
+
+  `feat(chat): add draft tools — propose / verify / fire / list`
+
+depends_on: [orchestrator-add-initiative-drafts-table]
+gate_marks: [unit, integration]
+max_iterations: 10

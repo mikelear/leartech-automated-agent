@@ -1,0 +1,124 @@
+name: orchestrator-chat-split-summarise-verify
+description: |
+  Surfaced 2026-06-11. v5h plan failed to fire because its 2 inits
+  weren't in the deployed catalog. The plan-runner caught this and
+  escalated cleanly. But the BIGGER problem: yesterday's mortgage-batch
+  "verify_batch" capability produces a beautiful narrative + Mermaid
+  WITHOUT ever checking whether the inits exist or the repos are reachable.
+
+  Mike's framing: "summarise" and "verify" are different operations.
+  Summarise = BA-shaped narrative (LLM-heavy, expensive). Verify =
+  deterministic preflight (cheap HTTP probes). They got conflated into
+  one tool. The result: summarise's "risks" section is pure LLM
+  speculation, not grounded in reality.
+
+  This init splits them, makes summarise CALL verify so its risks are
+  evidence-based, and adds server-side preflight that runs on every
+  POST /plans (a sister init in this plan).
+
+  Depends on chat-platform-mcps-parity (v5h) landing — verify needs
+  HTTP access to probe catalog/repo/branch state.
+
+repo: leartech-orchestrator
+branch: agent/chat-split-summarise-verify
+base: main
+
+goal: |
+  Make summarise + verify separate chat tools with the right call shape.
+
+  ## 1. Read first
+
+  - `gate/orch/chat_tools.py` — current shape, including platform-mcps
+    proxy tools (post chat-platform-mcps-parity merge)
+  - `gate/orch/chat_prompt.py` — system prompt advertising tools
+  - Memory: this session's "summarise calls verify" framing
+  - The yet-unmerged `orchestrator-add-chat-draft-tools` spec from V5f
+    — make sure the split aligns with that init when it eventually fires
+
+  ## 2. Two distinct tools
+
+  ### `verify_plan_firability(plan_yaml_or_id)`
+  Cheap, deterministic, ~50ms total. Returns:
+  ```
+  {
+    "ok": bool,
+    "checks": {
+      "catalog": [{"name": "X", "in_catalog": True|False}],
+      "repos":   [{"repo": "Y", "exists": True|False, "default_branch": "..."}],
+      "branches":[{"repo": "Y", "branch": "Z", "available": True|False, "conflicts_with_open_pr": #|null}],
+      "same_repo_parallelism": [{"repo": "Y", "steps": [...], "ok": True|False}]
+    },
+    "blocking_issues": ["X not in catalog", ...]
+  }
+  ```
+
+  No LLM cost. Pure HTTP probes against the agent catalog endpoint +
+  GitHub API. Used by:
+  - `summarise_batch` internally for risk grounding
+  - Server-side preflight on POST /plans (sister init)
+  - Operator's CLI for ad-hoc preflight: `leartech-agent verify-plan <file>`
+
+  ### `summarise_batch(plan_yaml_or_ids)`
+  LLM-heavy, $0.05-0.10. Calls verify_plan_firability FIRST, then:
+  - Synthesizes narrative + capability map
+  - Renders Mermaid diagram
+  - Risks section is grounded in verify's blocking_issues + LLM analysis
+  - Returns structured response with narrative, mermaid, capability_map,
+    risks (annotated with "deterministic" vs "synthesized" provenance)
+
+  ## 3. System prompt update
+
+  ```
+  When operator asks about a batch/plan:
+  - For "what does this produce?" / "describe the end-state" / "what
+    will land?" → call summarise_batch (LLM-heavy, expensive)
+  - For "will this fire successfully?" / "anything broken in this plan?"
+    / "preflight" → call verify_plan_firability (cheap, deterministic)
+
+  ALWAYS prefer verify alone if operator just wants to know
+  fire-readiness. Save summarise for true BA-narrative requests.
+
+  When operator says "fire X" without prior verify: call verify first.
+  If blocking_issues non-empty, surface them; ask operator to confirm
+  knowing the issues, OR offer to fire with inline_body to bypass
+  catalog miss.
+  ```
+
+  ## 4. CLI surface
+
+  Add to leartech-agent CLI:
+  - `leartech-agent verify-plan <yaml-file>` — call verify_plan_firability
+    against staging; print blocking_issues + check table
+  - `leartech-agent summarise <yaml-file>` — call summarise_batch
+  - `leartech-agent --json verify-plan ...` — JSON output for tooling
+
+  ## 5. Tests
+
+  - `tests/test_verify_plan_firability_returns_catalog_misses.py` —
+    seed catalog, verify against plan with missing init → blocking
+  - `tests/test_verify_plan_firability_repo_not_found.py`
+  - `tests/test_verify_plan_firability_branch_conflicts.py`
+  - `tests/test_summarise_calls_verify_for_risks_section.py` — verify's
+    blocking_issues appear annotated in summarise output
+  - `tests/test_summarise_provenance_annotated.py` — risks marked
+    "deterministic" (from verify) vs "synthesized" (from LLM)
+
+  ## 6. Cost ballpark
+
+  | Operation | Cost |
+  |---|---|
+  | verify_plan_firability | $0 (HTTP only) |
+  | summarise_batch (calls verify) | $0.05-0.10 |
+  | Both per typical session | $0.05-0.10 |
+
+  ## 7. JX3 conventions
+
+  Standard. New chat tools, system prompt update, CLI additions.
+
+  ## 8. Conventional commit
+
+  `feat(chat): split summarise (LLM) from verify (deterministic) — summarise calls verify`
+
+depends_on: [orchestrator-chat-platform-mcps-parity]
+gate_marks: [unit, integration]
+max_iterations: 10

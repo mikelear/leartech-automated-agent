@@ -1,0 +1,78 @@
+name: orchestrator-add-command-queue-with-injection
+description: |
+  Symmetric to the agent-side command queue but for plan-runner.
+  Operator can cancel, pause/resume, or inject guidance into a running
+  plan-runner LLM mid-flight.
+
+repo: leartech-orchestrator
+branch: agent/command-queue
+base: main
+
+goal: |
+  Add bidirectional control to plan-runner.
+
+  ## 1. Read first
+
+  - `gate/orch/plan_runner.py` — plan-runner SDK loop
+  - `app/models.py` — plans + plan_decisions schema
+  - The orchestrator-add-comprehensive-failure-diagnostics init (V5d)
+
+  ## 2. Schema + endpoint + SDK loop poll
+
+  Same shape as agent-side command queue but bound to `plan_id`:
+
+  ```
+  CREATE TABLE plan_runner_commands (
+    id BIGSERIAL PRIMARY KEY,
+    plan_id VARCHAR(64) NOT NULL REFERENCES orchestration_plans(id),
+    command_type VARCHAR(32) NOT NULL CHECK (command_type IN
+      ('cancel','pause','resume','inject_guidance','fire_now','skip_step')),
+    payload JSONB,
+    submitted_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    acked_at TIMESTAMPTZ,
+    ack_message TEXT
+  );
+  ```
+
+  ```
+  POST /plans/{plan_id}/commands
+  body: { command_type, payload }
+  ```
+
+  Plan-runner polls between every wait_for_terminal call.
+
+  ## 3. Plan-specific command types
+
+  In addition to cancel/pause/resume/inject:
+  - `fire_now <step_name>` — force-fire a step that's pending or
+    blocked, recording the operator override in plan_decisions
+  - `skip_step <step_name>` — mark a step as skipped, allow downstream
+    to proceed (used when operator decides a step is no longer needed)
+
+  ## 4. CLI surface (in scope for THIS init)
+
+  ```
+  leartech-agent ops cancel-plan --plan <id> --reason "<text>"
+  leartech-agent ops pause-plan --plan <id> --reason "<text>"
+  leartech-agent ops resume-plan --plan <id>
+  leartech-agent ops inject-plan --plan <id> "<text>"
+  leartech-agent ops fire-now --plan <id> --step <step_name>
+  leartech-agent ops skip-step --plan <id> --step <step_name>
+  ```
+
+  ## 5. Tests
+
+  - test_cancel_plan_terminates: cancel-plan → plan-runner exits
+    cleanly with reason recorded in plans.error
+  - test_inject_guidance_into_plan_runner: inject "fire only Phase 1"
+    → next plan-runner turn sees the UserMessage
+  - test_fire_now_overrides_blocked_step: step is dep-blocked →
+    fire_now records override in plan_decisions and fires it
+  - test_skip_step_unblocks_downstream: skip step X → step Y
+    (which depends on X) becomes eligible
+
+  ## 6. Conventional commit
+  `feat(orchestrator): add bidirectional plan-runner command queue`
+
+gate_marks: [unit, integration]
+max_iterations: 14

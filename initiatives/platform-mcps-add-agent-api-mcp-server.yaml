@@ -1,0 +1,111 @@
+name: platform-mcps-add-agent-api-mcp-server
+description: |
+  Surfaced 2026-06-11 during v5j dogfood: orch chat has a dead zone for
+  initiative runs between fire and PR open. No tool exposes the
+  automated-agent's /initiatives/{run_id} endpoint to the chat surface,
+  so operators cannot see turn count, last tool call, or cost-so-far
+  while an agent Job is running. Stored as memory
+  `feedback_orch_chat_blind_to_run_progress_pre_pr`.
+
+  This init adds a new MCP server to the platform-mcps service that
+  wraps the automated-agent's HTTP API — mirroring the existing tekton
+  MCP server shape in the same repo.
+
+repo: leartech-dockerfiles
+branch: agent/platform-mcps-add-agent-api-mcp-server
+base: main
+
+goal: |
+  Add a new `agent-api` MCP server to the platform-mcps service,
+  mirroring the existing tekton MCP server shape.
+
+  ## 1. Read first
+
+  - Existing tekton MCP server implementation in platform-mcps subdir
+  - Existing pr-context MCP server for second shape reference
+  - platform-mcps service entrypoint + server registration pattern
+  - automated-agent OpenAPI spec / route list for endpoint shapes
+  - Memory: `feedback_orch_chat_blind_to_run_progress_pre_pr`
+
+  ## 2. New file: `platform-mcps/agent_api_mcp/server.py`
+
+  Mirror the tekton MCP server shape exactly:
+  - FastMCP or equivalent server instantiation
+  - One function per tool, decorated with @mcp.tool()
+  - Each tool is a thin HTTP proxy to the automated-agent base URL
+  - Base URL from env var `LEARTECH_AGENT_API_URL`
+  - Auth forwarded via `LEARTECH_AGENT_API_TOKEN`
+  - Shared httpx client with configurable timeout
+
+  ## 3. Tools to implement
+
+  ### get_initiative_run(run_id: str)
+  GET /initiatives/{run_id}
+  Returns full run record: id, initiative, status, started_at,
+  finished_at, pr_number, pr_repo, turns, cost_usd, error, branch,
+  job_name, started_executing_at.
+
+  ### list_initiative_runs(limit: int = 20, status: str = None)
+  GET /initiatives?limit=N&status=S
+  Returns list of run records, newest first.
+
+  ### get_catalog_entry(name: str)
+  GET /catalog/{name}
+  Returns full initiative spec from the agent's catalog.
+
+  ### list_catalog_entries()
+  GET /catalog
+  Returns all catalog entry names + descriptions.
+
+  ### get_run_decisions(run_id: str)
+  GET /initiatives/{run_id}/decisions
+  Returns ordered list of decision records for the run (tool calls,
+  LLM turns, errors).
+
+  ### get_run_snapshot(run_id: str)
+  GET /initiatives/{run_id}/snapshot
+  Returns current step/turn snapshot — turn count, last tool, cost so
+  far, active branch.
+
+  ### list_roles()
+  GET /roles
+  Returns available agent roles + descriptions.
+
+  ### fire_initiative(initiative_body: str)
+  POST /initiatives
+  Proxy inline fire. Forwards body verbatim. Returns run_id + status.
+
+  ### cancel_initiative_run(run_id: str, reason: str)
+  POST /initiatives/{run_id}/cancel
+  Cancels an in-flight run. Requires reason string for audit.
+
+  ### send_command_to_run(run_id: str, command: str, payload: dict = None)
+  POST /initiatives/{run_id}/command
+  Sends a mid-flight command to a running agent Job (e.g. steer,
+  abort-step, inject-hint).
+
+  ## 4. Registration
+
+  Register `agent_api_mcp` in the platform-mcps service entrypoint
+  alongside tekton and pr-context. Same pattern: mount at
+  `/agent-api/mcp` (or equivalent path per existing convention).
+
+  ## 5. Tests
+
+  `platform-mcps/tests/test_agent_api_mcp.py`:
+  - Unit tests with httpx mock for each tool (happy path + 404 + 500)
+  - Integration test: `test_get_initiative_run_integration` — hits
+    staging agent URL if `LEARTECH_AGENT_API_URL` set, skipped otherwise
+  - Assert response shapes match tool return type annotations
+
+  ## 6. Env var documentation
+
+  Update platform-mcps README and Helm values.yaml with:
+  - `LEARTECH_AGENT_API_URL` (required)
+  - `LEARTECH_AGENT_API_TOKEN` (required, from existing agent secret)
+
+gate_marks:
+  - unit
+  - integration
+
+max_iterations: 5

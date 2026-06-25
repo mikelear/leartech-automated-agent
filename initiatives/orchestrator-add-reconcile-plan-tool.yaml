@@ -1,0 +1,86 @@
+name: orchestrator-add-reconcile-plan-tool
+description: |
+  Chat tool `reconcile_plan(plan_id)` that compares Orch's DB view
+  against reality (live PR state, agent run records, K8s pod state).
+  Auto-fixes safe drift; spawns iteration agents for bigger gaps.
+  Composes everything v3 + v4 shipped into a self-healing primitive.
+
+repo: leartech-orchestrator
+branch: agent/add-reconcile-plan-tool
+base: main
+
+goal: |
+  Build the chat tool that ties together all the diagnostic tools we've
+  added — gives the LLM a single "tell me where the truth diverges
+  from the DB" entry point.
+
+  ## 1. New chat tool — `gate/orch/chat_tools.py`
+
+  ```python
+  @tool
+  async def reconcile_plan(plan_id: str, auto_apply: bool = False) -> dict:
+      """Compare plan_steps with live reality across N sources.
+
+      Sources reconciled:
+        - plan_steps DB
+        - GitHub PR state per step (via view_live_pr_state)
+        - Agent run record per step (via get_initiative_run from v4 plan-runner-pr-link)
+        - tekton_diagnose_pr per failing PR (from platform-mcps)
+
+      Returns:
+        {
+          'diffs': [
+            {'kind': 'pr_number_missing', 'step': 'X', 'live_pr': 69, 'db_pr': null, 'safe_to_apply': true},
+            {'kind': 'pr_dirty', 'step': 'Y', 'pr': 75, 'recommended_action': 'spawn_rebuild', 'safe_to_apply': false},
+            {'kind': 'pr_check_failure', 'step': 'Z', 'pr': 76, 'failed_step': 'python-lint-format', 'recommended_action': 'spawn_iteration', 'safe_to_apply': false},
+          ],
+          'applied': [...],   # only populated when auto_apply=True
+          'requires_operator': [...],
+        }
+      """
+  ```
+
+  ## 2. Reconciliation logic
+
+  For each step in the plan:
+
+  1. **Read DB**: plan_steps.pr_number, status, agent_run_id, terminal_at
+  2. **Read agent run**: call `get_initiative_run(agent_run_id)` — its pr_number is the ground truth
+  3. **Read GH**: call `view_live_pr_state(pr_repo, pr_number)` — get state, labels, checks
+  4. **For RED checks**: call `tekton_diagnose_pr(pr_repo, pr_number)` — get classification
+
+  Build the diff list:
+
+  - **pr_number_missing**: DB says null but agent run says N — UPDATE plan_steps.pr_number=N (safe)
+  - **status_drift**: DB says complete but PR not merged — recommend spawn_iteration (NOT safe)
+  - **pr_dirty**: classified as DIRTY by tekton — recommend close+rebuild (NOT safe)
+  - **pr_check_failure**: real check failure with classification → spawn iteration with right body template (NOT safe)
+  - **hold_lingering**: PR has approved + green checks but still has hold AND plan had auto_unhold=true — post /hold cancel (safe with audit)
+
+  ## 3. auto_apply=True path
+
+  When the operator says "yes apply" (or the realtime-pr-failures-watcher
+  calls with auto_apply=True), execute only the `safe_to_apply: true`
+  diffs immediately. Record each as a `plan_decision` with
+  `kind='reconcile_applied'`.
+
+  Unsafe diffs are returned in `requires_operator` for chat-surface
+  review.
+
+  ## 4. Composability
+
+  This tool is what the `realtime-pr-failures-watcher` (sister init)
+  calls every 60s for each tracked plan. Self-healing closes here.
+
+  ## 5. Tests
+
+  - Mock all four sources. Assert correct diff classification per kind.
+  - Assert auto_apply only touches safe_to_apply rows.
+  - Assert plan_decisions recorded with right kind.
+  - Assert escalations land in `requires_operator`.
+
+  ## 6. Conventional commit
+  `feat(chat): add reconcile_plan tool — composes platform-mcps diagnostics into a self-healing primitive`
+
+gate_marks: [unit]
+max_iterations: 8

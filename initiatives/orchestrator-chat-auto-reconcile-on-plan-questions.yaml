@@ -1,0 +1,83 @@
+name: orchestrator-chat-auto-reconcile-on-plan-questions
+description: |
+  R3 (`reconcile_plan` tool) just landed in V5c and is deployed in orch
+  0.0.44 — it refreshes plan_steps from initiative_runs +
+  github_mcp + tekton_mcp authoritative sources. But /chat doesn't
+  invoke it routinely: today during V5d firing, /chat answered
+  "0 running, all pending" while initiative_runs had 2 live agent runs.
+  The DB single-view was stale, /chat trusted it, operator had to
+  prompt for triangulation. The tool sits unused on the shelf.
+
+  This init makes /chat call `reconcile_plan` automatically when the
+  question is about a specific plan, so the answer is always against
+  fresh authoritative state.
+
+repo: leartech-orchestrator
+branch: agent/chat-auto-reconcile
+base: main
+
+goal: |
+  When /chat receives a question that references a specific plan_id,
+  call `reconcile_plan(plan_id)` BEFORE answering. Cost-of-call is
+  microseconds (it's a DB read + diff + UPDATE) and operator gets the
+  freshest possible state every time.
+
+  ## 1. Read first
+
+  - `app/routers/chat.py` — current /chat endpoint, tool catalog
+  - `gate/orch/chat_tools.py` — chat tool surface (where reconcile_plan
+    likely lives after R3 PR #83)
+  - `gate/orch/reconcile_plan.py` — the actual tool implementation
+  - Memory: `feedback_orch_chat_view_is_stale` — the broader staleness
+    pattern
+
+  ## 2. Three places to hook auto-reconcile
+
+  ### Option A — chat system prompt directive
+  Add to the system prompt:
+  ```
+  IMPORTANT: When the user's question references a specific plan_id
+  (e.g. via 'plan X', 'how is X going', or any 8b9-style 12-char hex),
+  call `reconcile_plan(plan_id)` BEFORE forming your answer. This
+  ensures DB state matches reality.
+  ```
+  Pros: zero code change beyond prompt. Cons: LLM may forget.
+
+  ### Option B — pre-tool middleware
+  Before invoking the LLM, parse the user message for plan_id patterns.
+  If found, call reconcile_plan + include its summary in the prompt
+  context. Pros: deterministic. Cons: code change.
+
+  ### Option C — both
+  Recommended. System prompt guides the LLM AND middleware guarantees
+  it. Belt-and-braces.
+
+  ## 3. Acceptance
+
+  - User asks "how is plan X going" → reconcile_plan(X) is called
+    BEFORE the LLM responds (verifiable in plan_decisions)
+  - User asks generic questions ("what plans exist") → no reconcile
+    (cost-saving; list view doesn't need full reconcile)
+  - Reconcile failure is non-fatal — chat still responds with whatever
+    state was last known + warns user
+
+  ## 4. Tests
+
+  - test_chat_with_plan_id_triggers_reconcile: mock chat request with
+    plan_id → assert reconcile_plan was called BEFORE LLM
+  - test_chat_without_plan_id_skips_reconcile: generic question →
+    no reconcile call
+  - test_chat_reconcile_failure_graceful: reconcile_plan raises →
+    chat still answers, includes warning
+  - test_reconcile_diff_propagates_to_response: simulated plan_steps
+    drift → after reconcile, /chat answer reflects the corrected state
+
+  ## 5. JX3 conventions
+
+  Standard.
+
+  ## 6. Conventional commit
+  `feat(chat): auto-call reconcile_plan when message references plan_id`
+
+gate_marks: [unit, integration]
+max_iterations: 8

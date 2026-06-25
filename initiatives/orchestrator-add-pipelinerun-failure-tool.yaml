@@ -1,0 +1,98 @@
+name: orchestrator-add-pipelinerun-failure-tool
+description: |
+  Add chat tool `get_check_failure_detail(pr_repo, pr_number, check_name)`
+  that reads the actual Tekton pipelinerun's failed step + log tail.
+  Mike's framing 2026-06-09: "the pipelines tell it why it's failing —
+  it shouldn't just take a pipeline failure as a fail and not understand
+  the reason for the fail." LLM gets raw signal, not a wrapper bucket.
+
+repo: leartech-orchestrator
+branch: agent/add-pipelinerun-failure-tool
+base: main
+
+goal: |
+  Give Orch chat the same diagnostic depth a human operator has when
+  reading a failed PR check.
+
+  ## 1. New chat tool — `gate/orch/chat_tools.py`
+
+  Uses kubernetes_asyncio (already in deps). Cluster context: read from
+  env var `LEARTECH_ORCH_K8S_CONTEXT` or fall back to in-cluster auth
+  (per memory `feedback_kubernetes_asyncio_load_incluster_is_sync` —
+  use sync call, not awaited).
+
+  ```python
+  @tool
+  async def get_check_failure_detail(
+      pr_repo: str,
+      pr_number: int,
+      check_name: str,  # e.g. 'gcp/pr', 'az/lint'
+      log_tail_lines: int = 30,
+  ) -> dict:
+      """Read the actual failure of a PR check via Tekton pipelinerun.
+
+      Returns:
+          {
+              'pipelinerun_name': str,
+              'pipelinerun_status': 'Failed' | 'Succeeded' | 'Running',
+              'failed_step': str | None,        # e.g. 'git-merge', 'python-lint-format'
+              'exit_code': int | None,
+              'termination_message': str | None,
+              'log_tail': str,                  # last N lines of the failed step
+              'cluster': 'gcp' | 'az',
+          }
+      """
+  ```
+
+  Implementation:
+  - Parse `check_name` → split on `/` to get cluster prefix (gcp/az)
+  - List pipelineruns labeled `lighthouse.jenkins-x.io/refs.pull=<pr_number>` AND `lighthouse.jenkins-x.io/refs.repo=<repo_name>`
+  - Filter by check_name (e.g. `pr`, `lint`, `ai-review`)
+  - Sort by `metadata.creationTimestamp` desc, take newest
+  - From its TaskRun, find the failed step (`status.steps[*]` where `terminated.exitCode != 0`)
+  - Fetch the pod's logs for `step-<name>` container, tail N lines
+  - Return structured dict
+
+  ## 2. Chat system-prompt extension — `gate/orch/chat_prompt.py`
+
+  Add:
+  > "When a PR check is failing (`bucket='fail'` from view_live_pr_state),
+  > ALWAYS call `get_check_failure_detail` to read the actual failed
+  > step and log tail BEFORE classifying the cause. Common patterns:
+  > - step `git-merge` exit=1 → DIRTY (rebase conflict). Decision:
+  >   close + spawn rebuild iteration.
+  > - step `python-lint-format` exit=1 → real lint issue. Decision:
+  >   spawn iteration agent on the PR's branch.
+  > - step `build-python-test` failure → real test failure; read log to
+  >   see which test + whether it's cluster-asymmetric.
+  > - step `promote-jx-preview` with `secret X not found` →
+  >   ExternalSecret materialisation initiative needed.
+  > - Kyverno policy violation warnings → noise; look BELOW for real
+  >   exit reason."
+
+  ## 3. RBAC
+
+  Orch deployment ServiceAccount needs `get + list + watch` on:
+  - `pipelineruns.tekton.dev` (jx namespace)
+  - `taskruns.tekton.dev` (jx namespace)
+  - `pods` (jx namespace)
+  - `pods/log` (jx namespace)
+
+  Add to existing RBAC chart template from k8s-introspection init (PR
+  #69 rebuild — may or may not have shipped by the time this fires;
+  agent will check current chart state and extend the existing Role
+  rather than create a new one).
+
+  ## 4. Tests
+
+  Mock kubernetes_asyncio. Assert:
+  - test_get_check_failure_detail_dirty — pipelinerun with git-merge exit=1; assert failed_step='git-merge'
+  - test_get_check_failure_detail_lint — pipelinerun with python-lint-format exit=1
+  - test_get_check_failure_detail_no_failure — pipelinerun status=Running; returns failed_step=None
+  - test_get_check_failure_detail_pod_gced — pod no longer exists; falls back to taskrun terminated.message
+
+  ## 5. Conventional commit
+  `feat(chat): add get_check_failure_detail tool — raw pipelinerun signal`
+
+gate_marks: [unit]
+max_iterations: 8

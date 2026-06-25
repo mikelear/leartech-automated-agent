@@ -1,0 +1,93 @@
+name: orchestrator-add-recovery-chat-tools
+description: |
+  Wires the recovery primitives (POST /plans/{id}/recover, dead-runner
+  detector) into the chat surface so operator recovery is conversational
+  rather than psql + curl. Mirrors the V5e auto-reconcile pattern:
+  capability exists, chat needs the tool registered.
+
+repo: leartech-orchestrator
+branch: agent/add-recovery-chat-tools
+base: main
+
+goal: |
+  Add three chat tools that cover the recovery operator UX.
+
+  ## 1. Read first
+
+  - `gate/orch/chat_tools.py` — tool registration
+  - `gate/orch/chat_prompt.py` — system prompt
+  - `app/routers/plans.py` — recover endpoint (depends_on)
+  - V5e's `orchestrator-chat-auto-reconcile-on-plan-questions` for
+    the registration pattern
+
+  ## 2. Three tools
+
+  ### `diagnose_plan(plan_id)`
+  Wraps reconcile_plan + classification. Returns:
+  ```
+  {
+    plan_status: str,
+    runner_alive: bool,
+    in_flight_agent_runs: int,
+    pending_steps: int,
+    completed_unrecorded_steps: list[str],  # done in reality, pending in DB
+    recommended_action: "resume" | "fork" | "restart" | "wait" | "ok",
+    reasoning: str,
+  }
+  ```
+
+  Most-used tool — operator asks "what's wrong with plan X?" and gets
+  a clear classification.
+
+  ### `recover_plan(plan_id, mode, reason)`
+  Calls POST /plans/{plan_id}/recover with the specified mode. Returns
+  the endpoint's response.
+
+  System prompt should advise: prefer `mode='resume'` unless diagnose
+  says otherwise.
+
+  ### `list_plans_needing_recovery()`
+  Returns all plans with status='needs_recovery', ordered by most
+  recent first. Lets operator scan for fires.
+
+  ## 3. System prompt update
+
+  Add to chat_prompt.py:
+
+  ```
+  When operator asks "what's broken" / "anything stuck" / "are all
+  plans healthy":
+    - Call list_plans_needing_recovery
+    - If empty → respond "all healthy"
+    - If non-empty → list each, optionally diagnose_plan on each
+
+  When operator references a specific plan that seems stuck:
+    - Call diagnose_plan first
+    - Surface recommended_action
+    - If operator confirms, call recover_plan
+    - Always ask before mutating state — recover_plan is not idempotent
+      for mode='restart' (cancels in-flight agents)
+  ```
+
+  ## 4. Tests
+
+  - `tests/test_chat_diagnose_plan_healthy.py` — alive plan returns
+    "ok"
+  - `tests/test_chat_diagnose_plan_dead_runner.py` — dead runner +
+    in-flight agents → recommends 'resume'
+  - `tests/test_chat_diagnose_plan_corrupt_state.py` → recommends 'fork'
+  - `tests/test_chat_recover_dispatches_to_endpoint.py` — assert HTTP
+    POST with right body
+  - `tests/test_chat_list_needing_recovery_returns_only_that_status.py`
+
+  ## 5. JX3 conventions
+
+  Standard. New tools registered in chat_tools.
+
+  ## 6. Conventional commit
+
+  `feat(chat): add diagnose_plan + recover_plan + list_plans_needing_recovery`
+
+depends_on: [orchestrator-add-plan-recover-endpoint, orchestrator-add-dead-runner-detector]
+gate_marks: [unit, integration]
+max_iterations: 10
