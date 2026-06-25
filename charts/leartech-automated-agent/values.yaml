@@ -169,6 +169,9 @@ adminToken:
 # multi-cluster-ready out of the box. Activate one via the cluster's
 # configs/leartech-automated-agent.yaml override; never both at once.
 externalSecrets:
+  eso:
+    enabled: false  # set true on AZ via configs/leartech-automated-agent.yaml (ESO -> leartech-secrets)
+    storeName: leartech-secrets
   gcp:
     enabled: false  # set true on GCP via configs/leartech-automated-agent.yaml
     projectId: product-first
@@ -194,6 +197,8 @@ externalSecrets:
 # templates/externalsecret-tekton-git.yaml for the convention discussion
 # (long-term cleanup is to refactor ai-classifier onto the same toggle).
 tektonGit:
+  eso:
+    storeName: leartech-secrets
   create: false
   backend: ""  # "gsm" | "vault"
   gsm:
