@@ -1,0 +1,121 @@
+name: orchestrator-enforce-full-pytest-in-agent-iterate-loop
+description: |
+  Surfaced 2026-06-11 by V5g PRs #103 (closed for 3 test failures in
+  test_chat_tools.py) and #104 (failed because LEARTECH_AUTOMATED_AGENT_BASE_URL
+  wasn't set in CI env). Both PRs had `gate_marks: [unit, integration]`
+  declared. Both passed agent's local test gate. Both failed CI.
+
+  Two distinct failure modes (per memory `feedback_agent_local_tests_must_match_ci_env`):
+  1. Agent's local test run skipped test_chat_tools.py (the affected file).
+  2. Agent's local env has infrastructure vars (LEARTECH_AUTOMATED_AGENT_BASE_URL)
+     that CI doesn't have, masking failure modes.
+
+  This init enforces:
+  - Agent iterates run the FULL pytest suite (not just newly added tests)
+  - Agent's test environment unsets infra env vars that CI doesn't have
+  - Agent's iteration completion criterion includes
+    `pytest_result.failed_count == 0` — operator can verify
+
+repo: leartech-automated-agent
+branch: agent/enforce-full-pytest-in-iterate-loop
+base: main
+
+goal: |
+  Make agent's local test gate honest: full suite, env-aligned with CI.
+
+  ## 1. Read first
+
+  - `gate/agent/iterator.py` — current iteration loop
+  - `gate/agent/run_driver.py` — SDK loop integration
+  - `app/db/models.py` — initiative_runs row including test_result fields if any
+  - Memory: `feedback_agent_local_tests_must_match_ci_env`
+  - Memory: `feedback_async_tests_need_event_not_sleep`
+
+  ## 2. Three changes
+
+  ### 2a. Iterator runs the FULL pytest suite, not just new tests
+  Currently the agent may run `pytest tests/test_<new_file>.py` only.
+  Change to `pytest tests/ -x --tb=short -q` (or equivalent project-wide
+  invocation).
+
+  Capture results structurally:
+  ```python
+  result = await run_pytest_subprocess(cwd=repo, args=['-x','--tb=short','-q'])
+  initiative_run.test_pass_count = result.pass_count
+  initiative_run.test_fail_count = result.fail_count
+  initiative_run.test_log_excerpt = result.tail(40)
+  ```
+
+  If `fail_count > 0` → iteration does NOT complete; agent gets the
+  failure tail and another turn to fix.
+
+  ### 2b. Test environment matches CI
+  Before running pytest, agent's env should:
+  - `unset LEARTECH_AUTOMATED_AGENT_BASE_URL`
+  - `unset LEARTECH_PLATFORM_MCPS_URL`
+  - `unset GH_TOKEN` if it would affect tests (use pytest fixtures
+    instead)
+  - Keep DATABASE_URL etc that CI also sets
+
+  Alternative: run pytest inside a fresh subprocess with `env={}` passed
+  to subprocess.run — only inherit what's needed.
+
+  ### 2c. Surface test_result in the run record + PR description
+  The agent's PR body includes a test summary so the operator can verify
+  the agent's claim:
+  ```
+  ## Test summary
+  - pytest pass=1081 fail=0
+  - linters: ok
+  - coverage: NA
+  ```
+
+  If this section is missing from the PR description, the gate enforcement
+  is incomplete.
+
+  ## 3. Schema changes
+
+  Add columns to `initiative_runs`:
+  - `test_pass_count INTEGER`
+  - `test_fail_count INTEGER`
+  - `test_log_excerpt TEXT`
+  - `linter_status VARCHAR(16)` (`ok` | `fail` | `skipped`)
+
+  Migration: Alembic up/down. No data backfill for old rows.
+
+  ## 4. Endpoint surface
+
+  Extend `/initiatives/{run_id}` response to include `test_results`
+  block. Operator's CLI `leartech-agent runs view <id>` shows it.
+
+  ## 5. Tests
+
+  - `tests/test_iterator_runs_full_pytest_not_just_new.py` — simulate
+    a code change that doesn't touch test_X but BREAKS test_X; verify
+    iteration catches it
+  - `tests/test_iterator_unsets_infra_env_for_pytest.py` — verify
+    subprocess env doesn't contain LEARTECH_AUTOMATED_AGENT_BASE_URL
+  - `tests/test_iterator_does_not_complete_with_test_failures.py` —
+    fail_count > 0 → iteration continues
+  - `tests/test_initiative_run_records_test_results.py` — schema fields
+    populated
+  - `tests/test_pr_description_includes_test_summary.py` — PR body
+    contains the structured block
+
+  ## 6. Roll-out caveat
+
+  This is a stricter gate. Some existing inits that "pass locally"
+  today (because they skipped affected files) will surface as failing
+  iterations. That's the point — but operator should expect the
+  iteration count + cost to go up on the first few re-fires.
+
+  ## 7. JX3 conventions
+
+  Standard. Schema + iterator changes + endpoint + tests.
+
+  ## 8. Conventional commit
+
+  `feat(agent): enforce full pytest suite + CI-equivalent env in iterate loop`
+
+gate_marks: [unit, integration]
+max_iterations: 10

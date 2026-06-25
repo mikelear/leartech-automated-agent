@@ -1,0 +1,160 @@
+name: orchestrator-chat-platform-mcps-parity
+description: |
+  Surfaced 2026-06-11 during operator debugging session. Three related
+  bugs on the orch chat surface that should never have shipped:
+
+  1. **MCP path bug** — `gate/orch/chat_tools.py` POSTs platform-mcps
+     calls to `/mcp/<server>/sse` instead of `/mcp/<server>/messages`.
+     `/sse` is GET-only (server-sent events stream); `/messages` is the
+     JSON-RPC POST endpoint. Every tekton_diagnose_pr / tekton_step_logs
+     / pr_get_diff / pr_get_metadata returns 405. The tools have been
+     dead since they shipped.
+
+  2. **No identity on API pod** — Orch chat tools like `post_pr_chatops`
+     fail with "GH_TOKEN missing" because the API deployment doesn't
+     have a GitHub bot token mounted. Plan-runner Jobs DO mount
+     `leartech-orch-bot-git`. Chat shipped without the same.
+
+  3. **No MCP startup health check** — The agent side has
+     `gate/introspection/mcp_status.py` which probes each registered
+     MCP at startup. Orch chat has no equivalent. The 405 bug above
+     went unnoticed for the lifetime of the chat surface because
+     nothing verified the MCPs at boot.
+
+  Mike's framing 2026-06-11: "MCPs should be clear and defined in
+  config and startup of each service should verify and health check
+  them" — and "surprised the review didn't pick that up".
+
+  After this init lands, the chat surface gains parity with
+  dev-agent + plan-runner: same identity, working MCPs, startup
+  health surface.
+
+repo: leartech-orchestrator
+branch: agent/chat-platform-mcps-parity
+base: main
+
+goal: |
+  Align Orch chat with the agent-side MCP pattern.
+
+  ## 1. Read first
+
+  - `gate/orch/chat_tools.py` — current proxy tools, including the
+    405-bug POST URL
+  - `gate/introspection/mcp_status.py` (in leartech-automated-agent) —
+    the pattern to port. 68 LOC. Read first, then mirror its shape
+  - `gate/agent/mcp_catalog.py` (in leartech-automated-agent) — the
+    McpType + McpAuth typed catalog the probe operates on
+  - `charts/leartech-orchestrator/values.yaml` — where chart-driven
+    MCP URLs already live
+  - `app/routers/health.py` (if exists; else `app/main.py`) — current
+    /healthz wiring
+  - Memory: `feedback_create_distinct_bot_for_each_automation_identity`
+    — don't introduce a new identity; reuse `leartech-orch-bot-git`
+  - Memory: `reference_github_token_state_2026_06_07` — token rotation
+    pattern
+
+  ## 2. Fix the MCP path bug (critical, 1-line)
+
+  In `gate/orch/chat_tools.py`, every platform-mcps proxy POST sends
+  to `/mcp/<server>/sse`. Change to `/mcp/<server>/messages`.
+
+  Then add a tiny test in `tests/test_chat_tools_mcp_proxy.py`:
+    - Mock the platform-mcps HTTP endpoint
+    - Assert chat_tools POSTs to `/messages` not `/sse`
+    - One test per proxy tool (4 tools — keeps the contract stable)
+
+  ## 3. Mount leartech-orch-bot-git on the API deployment
+
+  Add to `charts/leartech-orchestrator/templates/deployment.yaml`:
+    env:
+      - name: LEARTECH_ORCH_GH_TOKEN
+        valueFrom:
+          secretKeyRef:
+            name: leartech-orch-bot-git
+            key: token
+            optional: true
+
+  Default `optional: true` — preserves preview environments without
+  the secret (memory: `feedback_chart_secretref_must_be_optional_for_previews`).
+
+  Update chat tools that need GH access (`post_pr_chatops`, future
+  `view_live_pr_state`, `pr_get_diff`, `pr_get_metadata`) to read
+  from `LEARTECH_ORCH_GH_TOKEN`. Skip the call (return graceful
+  error message) when env unset.
+
+  ## 4. Port mcp_status.py pattern
+
+  Create `gate/orch/introspection/mcp_status.py` mirroring the agent
+  shape (68 LOC). Adapt:
+  - Catalog source: `gate/orch/chat_tools.py` already lists the proxy
+    tools — factor the URL/path config into a small structure the
+    probe can iterate
+  - For http_sse MCPs: probe `<url>/healthz` (200/3xx/4xx OK,
+    5xx down) — same convention agent uses
+
+  ## 5. Wire into /healthz
+
+  `app/routers/health.py` (or wherever /healthz is) gains an MCP
+  status block:
+    GET /healthz
+    {
+      "status": "ok" | "degraded",
+      "checks": {
+        "database": "ok",
+        "platform_mcps": "ok" | "degraded",
+        "mcp_servers": {
+          "tekton": "ready" | "down",
+          "pr_context": "ready" | "down"
+        }
+      }
+    }
+
+  `status` is `degraded` (not `down`) when MCPs are down — service
+  still serves non-MCP requests; chat tools that need the MCP return
+  the per-tool error.
+
+  Optional: extra `/readyz` that returns 503 when MCPs aren't ready,
+  for K8s readiness probe semantics. Decide based on the existing
+  /healthz contract.
+
+  ## 6. Lesson capture
+
+  Save to orchestration_lessons via the V5e retrospect tool:
+  - topic: orch_chat_platform_mcps_path_bug
+  - rule: "MCP path bugs ship silently without startup health check.
+    Use mcp_status.py probe pattern at boot."
+  - provenance: this PR + memory references
+
+  ## 7. Acceptance
+
+  - Before this PR: `kubectl exec deploy/leartech-orchestrator --
+    curl -X POST .../mcp/tekton/sse` returns 405
+  - After this PR: `/healthz` shows mcp_servers.tekton=ready;
+    chat's tekton_diagnose_pr returns a real Tekton diagnosis
+  - Operator chat session asking "why is PR #X failing?" yields
+    evidence-based answer (tekton log inspection) not architectural
+    guess
+
+  ## 8. Tests
+
+  - `tests/test_chat_tools_mcp_proxy_uses_messages_path.py` —
+    proxy POST hits /messages, not /sse
+  - `tests/test_mcp_status_probes_each_registered_mcp.py` — startup
+    probe iterates registered MCPs + writes per-server status
+  - `tests/test_healthz_surfaces_mcp_status.py` — /healthz includes
+    mcp_servers block, status `degraded` when any down
+  - `tests/test_chat_uses_orch_gh_token_for_github_writes.py` —
+    post_pr_chatops uses LEARTECH_ORCH_GH_TOKEN
+  - `tests/test_chat_gh_writes_graceful_when_token_missing.py` —
+    optional env unset returns error message not crash
+
+  ## 9. JX3 conventions
+
+  Standard. New secret env in chart, new endpoint, new probe module.
+
+  ## 10. Conventional commit
+
+  `fix(chat): platform-mcps parity — correct path, mount bot token, startup health check`
+
+gate_marks: [unit, integration]
+max_iterations: 10

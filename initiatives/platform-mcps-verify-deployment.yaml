@@ -1,0 +1,92 @@
+name: platform-mcps-verify-deployment
+description: |
+  Verify that platform-mcps service is actually deployed and reachable
+  on both clusters before consumer registration (W1+W2) fires.
+
+  Without this guard, W1 + W2 would register catalog entries pointing
+  at a non-existent service URL, causing:
+  - Agent service restarts: spawned-Job MCP loaders fail to connect →
+    agent runs cannot start
+  - Orch service: plan-runner Jobs fail to load platform-mcps tools →
+    every subsequent plan would brick
+
+  This init verifies the dependency chain is actually in place before
+  W1+W2 register URLs.
+
+repo: leartech-platform-mcps
+branch: agent/verify-deployment
+base: main
+
+goal: |
+  Verify that the platform-mcps chart is deployed and the service
+  responds on both GCP and AZ clusters BEFORE consumer registration
+  (W1+W2) fires.
+
+  This is a verification-only init — no code changes. It either
+  succeeds quickly (chart deployed + /healthz responds) or fails
+  loudly so the operator knows to actually deploy.
+
+  ## 1. Verification checks (the agent runs these via Bash)
+
+  ### Check 1: GCP cluster has the deployment
+
+  ```sh
+  kubectl --context=gke_product-first_us-east1-b_tf-jx-usable-bird \
+    -n jx-staging get deployment leartech-platform-mcps \
+    -o jsonpath='ready={.status.readyReplicas}'
+  ```
+
+  Must return `ready=1` or higher. If 404 or 0: fail with message
+  "GCP platform-mcps deployment missing/not-ready — operator must add
+  helmfile config + trigger release"
+
+  ### Check 2: GCP service responds /healthz via debug pod
+
+  ```sh
+  kubectl --context=gke_product-first_us-east1-b_tf-jx-usable-bird \
+    -n jx-staging run mcps-check-$$ --rm -i --restart=Never \
+    --image=curlimages/curl:latest --command -- \
+    curl -sf -m 5 \
+    http://leartech-platform-mcps.jx-staging.svc.cluster.local:8080/healthz
+  ```
+
+  Must return 200. Per memory feedback_debug_pod_beats_port_forward.
+
+  ### Check 3: AZ cluster has the deployment
+
+  ```sh
+  kubectl --context=modern-burro -n jx-staging get deployment leartech-platform-mcps \
+    -o jsonpath='ready={.status.readyReplicas}'
+  ```
+
+  Same pass criterion as Check 1.
+
+  ### Check 4: AZ service responds /healthz
+
+  Same shape as Check 2 but with `--context=modern-burro`.
+
+  ## 2. Acceptance
+
+  All 4 checks pass within max_iterations. If any fails, the agent
+  reports failed with details on which cluster + which check failed
+  — the operator then knows exactly what's missing.
+
+  ## 3. No PR is opened
+
+  This is verification-only. The agent should NOT open a PR.
+
+  ## 4. JX3 conventions per memory
+
+  - Debug pod pattern (memory: feedback_debug_pod_beats_port_forward)
+  - Async-safe; use real Postgres-style verification (here just curl)
+  - Timeout each verification within max_iterations
+
+  ## 5. Tests
+
+  Local: not applicable (no code changes).
+
+  ## 6. Conventional commit
+  N/A — verification-only, no PR.
+
+gate_marks: [integration]
+max_iterations: 6

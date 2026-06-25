@@ -1,0 +1,60 @@
+name: agent-write-failure-reason-to-error-column
+description: |
+  Agent run records have an `error` text column on initiative_runs but
+  nothing ever writes to it on failure — we've now had multiple silent
+  failures (V1 in V5; R2 first attempt in V5c) with zero diagnostic data.
+  Pod is GC'd before we can see stderr. Without this, Orch can't classify
+  failures autonomously.
+
+repo: leartech-automated-agent
+branch: agent/write-failure-reason
+base: main
+
+goal: |
+  Populate `initiative_runs.error` on every failure path, before pod
+  termination. Even one line of "wait_for_first_failure timeout at
+  step X" is vastly more useful than NULL.
+
+  ## 1. Identify failure paths in the agent loop
+
+  Read these files:
+  - `gate/agent/run_driver.py` (the main SDK loop) — any path that
+    sets status=failed without writing error
+  - `gate/agent/job_runner.py` — Job-spawn-side failures
+  - `gate/agent/step_failure_diagnosis.py` — already classifies; use it
+
+  ## 2. Failure-path inventory
+
+  For each path where the run is marked failed, the agent must write a
+  one-line classified reason to the `error` column:
+
+  Examples:
+  - `clone_failed: Repository not found (likely missing bot collaborator)`
+  - `gate_timeout: wait_for_first_failure_or_all_pass exceeded N min`
+  - `gate_classification: pr_link_missing (PR=N actually merged but agent never observed)`
+  - `agent_sdk_error: SDK raised <ClassName>`
+  - `silent_terminate: pod terminated before first SDK turn fired`
+
+  Use `gate/agent/step_failure_diagnosis.py` classification taxonomy
+  as the reference vocabulary.
+
+  ## 3. Pod-shutdown hook
+
+  Add a SIGTERM handler that, before the pod exits, writes a one-line
+  reason to error column. The plan-runner's wait_for_terminal then has
+  data to act on even if the agent ran to pod-timeout.
+
+  ## 4. Tests required
+
+  - test_agent_failure_writes_reason: mock SDK error → assert error
+    column populated with classified reason before run record finalises
+  - test_silent_terminate_path: simulate pod SIGTERM during agent loop
+    → assert error='silent_terminate: ...' captured
+  - test_clone_failure_classified: missing collaborator path →
+    `clone_failed: Repository not found`
+
+  ## 5. Conventional commit
+  `feat(agent): write classified failure reason to initiative_runs.error`
+
+gate_marks: [unit, integration]
+max_iterations: 10

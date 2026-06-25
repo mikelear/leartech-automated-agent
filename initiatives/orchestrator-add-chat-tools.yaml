@@ -1,0 +1,86 @@
+# orchestrator-add-chat-tools — wire LLM tool-use to existing Orch endpoints.
+#
+# Without tools, /chat is just a wrapper around Anthropic. With tools, it
+# becomes the conversational shell that drives Orch operations.
+
+name: orchestrator-add-chat-tools
+
+description: |
+  Add the tool definitions Anthropic Messages API uses inside /chat.
+  Tools are thin wrappers around existing Orch endpoints + outbound
+  chatops + automated-agent MCP fire_initiative_inline.
+
+repo: leartech-orchestrator
+branch: agent/chat-tools
+base: main
+
+goal: |
+  Extend `POST /chat` with tool definitions that let the LLM drive Orch
+  operations on the operator's behalf.
+
+  ## 1. Tool definitions — `gate/orch/chat_tools.py` (new)
+
+  Each tool: name, description, input_schema. Tool functions are
+  async; they execute server-side, return results back to the LLM as
+  tool_result content blocks.
+
+  Tools:
+
+  - `list_plans(status?: str, limit?: int)` → calls
+    `app.plan_store.list_plans` directly
+  - `view_plan(plan_id: str, question?: str)` → calls the existing
+    `build_plan_view` helper from `orchestrator-add-plan-view-endpoint`
+  - `snapshot_plan(plan_id: str)` → calls `build_plan_snapshot`
+  - `validate_plan(plan_body?: str, plan_name?: str)` → calls
+    `_validate_plan_body` / `_validate_by_name`. Returns the
+    ValidationReport.
+  - `dry_run_plan(plan_body?: str, plan_name?: str)` → calls the
+    dry-run preview (from PR #33)
+  - `fire_initiative_inline(initiative_body: str)` → calls the agent's
+    `POST /initiatives` with `initiative_body` (from
+    `agent-support-inline-initiative-body`)
+  - `post_pr_chatops(pr_repo: str, pr_number: int, command: str)` →
+    posts `/test pr`, `/hold cancel`, etc. via gh CLI in subprocess
+  - `get_pr_jx3_stage(pr_repo: str, pr_number: int)` → calls the
+    `jx3_flow` MCP from `add-jx3-flow-mcp-server`
+  - `list_required_actions(pr_repo: str, pr_number: int)` → same MCP
+
+  ## 2. Tool execution loop in /chat
+
+  Update `app/routers/chat.py`:
+  - After Anthropic returns with tool_use content blocks, execute each
+    tool, append tool_result block to message history, call Anthropic
+    AGAIN with the tool results.
+  - Repeat until no tool_use blocks in response (final assistant turn).
+  - Persist EACH tool_use + tool_result as separate turns in
+    `conversation_turns` for the audit log.
+
+  ## 3. Per-tool budget gates
+
+  - `fire_initiative_inline` is the expensive one. Add a per-conversation
+    counter; only allow N initiative fires per conversation (env var
+    `LEARTECH_CHAT_MAX_INITIATIVES`, default 3). Return tool_result with
+    error when exceeded.
+
+  ## 4. Tests — `tests/test_chat_tools.py`
+
+  - Each tool returns expected shape (mock the underlying call sites)
+  - Tool execution loop terminates when LLM returns no tool_use
+  - Budget gate on fire_initiative_inline
+  - Tool errors propagate as tool_result with error flag
+
+  ## 5. Conventions
+
+  - Anthropic tool_use pattern per
+    https://docs.anthropic.com/en/docs/build-with-claude/tool-use
+  - Conventional commit: `feat(chat): wire tool-use to existing Orch endpoints`
+
+  ## What this is NOT
+
+  - NOT a new tool set — wraps existing endpoints only
+  - NOT a CLI client (sister init)
+
+gate_marks:
+  - unit
+
+max_iterations: 10

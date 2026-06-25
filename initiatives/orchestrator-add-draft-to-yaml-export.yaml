@@ -1,0 +1,111 @@
+name: orchestrator-add-draft-to-yaml-export
+description: |
+  Phase 3 of the draft-model migration (plan v5f-draft-model).
+
+  Drafts in DB are great for fast iteration — but some drafts prove
+  valuable as REUSABLE PATTERNS that other operators / agents should
+  see in a `cd initiatives/` walkthrough. The repo's role becomes the
+  "common library / example patterns" (Mike's stdlib framing 2026-06-10).
+
+  This init adds the promotion path: operator says "promote", Orch
+  opens a PR to leartech-automated-agent/initiatives/<name>.yaml with
+  the draft body. Standard PR review applies — humans gate what makes
+  it into the L2 library.
+
+  WITHOUT this init, drafts live forever in DB. WITH it, the operator
+  has a clean curation step: most drafts stay DB-only; the genuinely
+  reusable ones graduate to the repo.
+
+repo: leartech-orchestrator
+branch: agent/add-draft-to-yaml-export
+base: main
+
+goal: |
+  Add one chat tool + one HTTP endpoint that promotes a draft to a PR
+  in the catalog repo.
+
+  ## 1. Read first
+
+  - `gate/orch/chat_tools.py` — tool registration
+  - `app/initiative_drafts_store.py` — Phase 1 CRUD; uses
+    `mark_draft_promoted(draft_id, pr_url)`
+  - The github MCP server (platform-mcps) for opening the PR programmatically
+  - Memory: `feedback_never_edit_config_root` — repo writes go through
+    PR; we never push directly
+
+  ## 2. New tool — promote_draft
+
+  ```
+  promote_draft(draft_id, repo='leartech-automated-agent', commit_message?)
+  ```
+
+  Implementation:
+  1. Fetch draft from DB
+  2. Construct file path: `initiatives/<draft.name>.yaml`
+  3. Construct PR body explaining:
+     - Why this is being promoted (operator's reason, optional)
+     - Link to draft_id, fired_run_id if available
+     - Auto-generated note: "Promoted from DB draft — see L2 library docs"
+  4. Open PR via github MCP server:
+     - branch: `agent/promote-<draft.name>-<short_draft_id>`
+     - file: `initiatives/<draft.name>.yaml` with draft.yaml_body
+     - title: `feat(catalog): promote <name> from draft`
+  5. Update draft row: status='promoted', promoted_pr_url=<url>,
+     promoted_at=NOW()
+  6. Return {pr_url, draft_id}
+
+  ## 3. HTTP endpoint
+
+  ```
+  POST /drafts/{id}/promote
+  body: {repo?, commit_message?}
+  returns: {pr_url, draft_id, promoted_at}
+  ```
+
+  Returns 409 if draft is already promoted (return existing pr_url).
+  Returns 422 if draft.yaml_body is empty / malformed.
+
+  ## 4. Chat system prompt update
+
+  Add to the existing chat-draft-tools prompt:
+
+  ```
+  When operator says "promote" / "this should be in the library":
+    - Call promote_draft(draft_id)
+    - Surface the PR URL
+    - Remind operator: "PR opened; human review still applies before merge"
+  ```
+
+  ## 5. The repo's role evolves
+
+  After this lands:
+  - L1 (active drafts) = DB
+  - L2 (reusable library) = repo's initiatives/ directory — but ONLY
+    inits that an operator explicitly promoted
+  - L3 (archived) = DB row with status='archived'
+
+  The 50-stale-yaml cleanup pass from 2026-06-10 becomes the FIRST
+  expression of L2 hygiene — only the genuinely reusable ones stay in
+  repo; the rest were one-shot work that should never have been a
+  yaml file.
+
+  ## 6. Tests
+
+  - `tests/test_chat_draft_promote.py` — mocked github MCP; assert PR
+    created with right path/body, draft row updated, idempotent re-promote
+  - `tests/test_promote_endpoint.py` — HTTP layer; 409 on
+    already-promoted; 422 on malformed body
+  - `tests/test_promoted_status_excluded_from_active_list.py` — verify
+    list_drafts(status='draft') skips promoted ones
+
+  ## 7. JX3 conventions
+
+  Standard. New endpoint slot in app/routers/drafts.py from Phase 1.
+
+  ## 8. Conventional commit
+
+  `feat(chat): add promote_draft tool — graduates DB drafts to L2 library`
+
+depends_on: [orchestrator-add-initiative-drafts-table, orchestrator-add-chat-draft-tools]
+gate_marks: [unit, integration]
+max_iterations: 8

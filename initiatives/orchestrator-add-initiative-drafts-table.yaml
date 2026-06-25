@@ -1,0 +1,136 @@
+name: orchestrator-add-initiative-drafts-table
+description: |
+  Today initiatives live as YAML files in leartech-automated-agent/initiatives/
+  (104 of them as of 2026-06-10). Adding / editing one means a PR cycle: open,
+  review, merge, fetch. For BA-shaped work (rework batch, verify, iterate)
+  that friction is structural — the operator wants to talk to Orch and iterate
+  on draft inits in seconds, not minutes.
+
+  This init adds the foundational table: `initiative_drafts`. Drafts live in
+  the orchestrator DB. They can be authored, reworked, verified, and fired
+  without ever touching the repo. If a draft proves valuable as a reusable
+  template, a separate init (orchestrator-add-draft-to-yaml-export) handles
+  the promote → repo PR path.
+
+  Mike's framing 2026-06-10: the repo becomes the "common library / example
+  patterns" (like a stdlib); active intent lives in DB.
+
+repo: leartech-orchestrator
+branch: agent/add-initiative-drafts-table
+base: main
+
+goal: |
+  Add the schema, CRUD, and HTTP endpoints for managing initiative drafts
+  in the orchestrator DB.
+
+  ## 1. Read first
+
+  - `app/models.py` — existing OrchestrationPlan / PlanStep shape, follow the
+    same conventions (12-hex id, async SQLAlchemy, JSONB columns where
+    structured)
+  - `app/plan_store.py` — CRUD pattern for create / get / list / update /
+    delete; mirror this for InitiativeDraft
+  - `app/routers/plans.py` — HTTP endpoint conventions (Pydantic schemas,
+    error envelopes, pagination)
+  - Memory: `project_ba_agent_direction` — this is the data layer the BA
+    chat tools land on top of
+
+  ## 2. Schema
+
+  ```python
+  class InitiativeDraft(Base):
+      __tablename__ = 'initiative_drafts'
+
+      id: Mapped[str] = mapped_column(String(12), primary_key=True)  # 12-hex
+      name: Mapped[str] = mapped_column(String(128), nullable=False)
+      yaml_body: Mapped[str] = mapped_column(Text, nullable=False)
+      status: Mapped[str] = mapped_column(String(32), nullable=False, default='draft')
+      # statuses: draft, fired, archived, promoted
+
+      created_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+      created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+      modified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+      # When fired, link to the agent run it spawned
+      fired_run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+      fired_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+      # When promoted to repo as L2 reusable template
+      promoted_pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+      promoted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+      # Revision lineage — when a draft is reworked, parent points at the
+      # version that was reworked from. Lets the verify pass walk history.
+      parent_draft_id: Mapped[str | None] = mapped_column(
+          String(12), ForeignKey('initiative_drafts.id'), nullable=True
+      )
+
+  CREATE INDEX ix_drafts_status_modified ON initiative_drafts(status, modified_at DESC);
+  CREATE INDEX ix_drafts_name_status ON initiative_drafts(name, status);
+  ```
+
+  Notes:
+  - 12-hex IDs match plans + runs
+  - `name` is NOT unique — multiple drafts of the same conceptual init can
+    coexist (reworks). The (name, status='draft') combination is what callers
+    usually want
+  - `yaml_body` is stored as TEXT, not JSONB — the LLM should not have to
+    serialize/deserialize during a rework; raw YAML is what fire_initiative
+    accepts inline
+
+  ## 3. CRUD module — app/initiative_drafts_store.py
+
+  Mirror `app/plan_store.py`:
+
+  ```python
+  async def create_draft(session, *, name, yaml_body, created_by=None, parent_draft_id=None) -> InitiativeDraft
+  async def get_draft(session, draft_id) -> InitiativeDraft | None
+  async def list_drafts(session, status='draft', limit=50, offset=0) -> list[InitiativeDraft]
+  async def update_draft(session, draft_id, *, yaml_body=None, status=None, ...) -> InitiativeDraft | None
+  async def mark_draft_fired(session, draft_id, run_id) -> InitiativeDraft | None
+  async def mark_draft_promoted(session, draft_id, pr_url) -> InitiativeDraft | None
+  async def find_drafts_by_name(session, name) -> list[InitiativeDraft]  # for "latest draft of X"
+  ```
+
+  All async-session-aware. Returns the row or None for misses. No exceptions
+  on not-found (caller decides).
+
+  ## 4. HTTP endpoints — app/routers/drafts.py
+
+  ```
+  POST   /drafts                         body: {name, yaml_body, created_by?}
+  GET    /drafts                         query: status=draft&name=foo&limit=50
+  GET    /drafts/{id}
+  PUT    /drafts/{id}                    body: {yaml_body?, status?, ...}
+  DELETE /drafts/{id}                    (soft delete: status='archived')
+  ```
+
+  Pydantic schemas mirror existing endpoints. 404 on missing, 422 on
+  validation. No batch endpoints in this init (Phase 2 chat tools do that).
+
+  ## 5. Migration
+
+  Alembic migration adding the table. Standard up/down. No data migration
+  yet — the 14 mortgage inits + 50 stale yaml cleanup is a separate
+  operator-driven pass.
+
+  ## 6. Tests
+
+  - `tests/test_initiative_drafts_store.py` — full CRUD round-trip
+  - `tests/test_drafts_endpoint.py` — HTTP layer, error cases
+  - `tests/test_drafts_revision_lineage.py` — parent_draft_id walk
+  - `tests/test_drafts_status_transitions.py` — draft → fired → archived
+
+  All tests use aiosqlite in-memory pattern (matches plan_store tests).
+
+  ## 7. JX3 conventions
+
+  Standard. Update Alembic, no special chart changes (DB connection already
+  wired).
+
+  ## 8. Conventional commit
+
+  `feat(orchestrator): add initiative_drafts table + CRUD + HTTP endpoints`
+
+gate_marks: [unit, integration]
+max_iterations: 8

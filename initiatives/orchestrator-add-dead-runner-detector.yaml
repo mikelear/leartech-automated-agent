@@ -1,0 +1,91 @@
+name: orchestrator-add-dead-runner-detector
+description: |
+  Today nothing actively watches plan-runner Job health. When a Job
+  fails (autoscaler eviction, OOM, missed deadline), the plan stays in
+  whatever status it was last written to — often `running` — even
+  though the runner is dead. Operator only finds out when they look.
+
+  This init adds a background reconciler that polls plan-runner Jobs
+  and surfaces dead ones for recovery. Sister to
+  agent-side job_reconciler (which already does this for agent runs).
+
+repo: leartech-orchestrator
+branch: agent/add-dead-runner-detector
+base: main
+
+goal: |
+  Add a background task that detects dead plan-runner Jobs and marks
+  the corresponding plan as `needs_recovery`.
+
+  ## 1. Read first
+
+  - `gate/agent/job_reconciler.py` (in leartech-automated-agent) —
+    proven pattern; mirror its shape
+  - `gate/orch/job_runner.py` — how plan-runner Jobs are spawned
+  - `app/plan_store.py` — plan status field
+
+  ## 2. New status: needs_recovery
+
+  Extend PLAN_STATUSES to add `needs_recovery`. Meaning: the
+  plan-runner Job is dead but the plan has work that wasn't visibly
+  finished (steps not all terminal). Operator should invoke
+  /plans/{id}/recover.
+
+  This is distinct from `failed` (which means the runner exited cleanly
+  but the plan can't continue, e.g. unrecoverable error) and `complete`.
+
+  ## 3. Reconciler loop
+
+  ```
+  Every 30s:
+    For each plan with status IN ('running', 'submitted'):
+      Look up plan-runner Job by name=plan_id
+      If Job.status.conditions has Failed/BackoffLimitExceeded:
+        - If all plan_steps are terminal → mark plan complete/failed
+          based on aggregate
+        - Else → mark plan needs_recovery
+        - Append plan_decisions row: kind='runner_dead', detail=job_status
+        - Optionally: emit a /chat hint OR file a sticky GitHub issue
+      If Job not found at all (rare GC race):
+        - Treat as Failed; same logic
+  ```
+
+  Cadence: 30s is fine; the autoscaler / OOM case is not time-sensitive
+  beyond minutes.
+
+  ## 4. Chat surface
+
+  Add `list_plans_needing_recovery()` tool. The operator can ask
+  "anything broken right now?" and chat surfaces all
+  plans in needs_recovery.
+
+  ## 5. Tests
+
+  - `tests/test_dead_runner_detector_failed_job.py` — Job conditions
+    include Failed → plan marked needs_recovery
+  - `tests/test_dead_runner_detector_backoff_exceeded.py` — specific
+    BackoffLimitExceeded condition handled
+  - `tests/test_dead_runner_detector_terminal_plan_marked_complete.py` —
+    all steps terminal + Job dead → mark complete not needs_recovery
+  - `tests/test_dead_runner_detector_running_plan_left_alone.py` —
+    Job alive + plan running → no state change
+  - `tests/test_dead_runner_detector_records_plan_decision.py` — audit
+    trail
+
+  ## 6. Lifespan hook
+
+  Register the reconciler task in app lifespan (FastAPI startup),
+  mirror how job_reconciler is registered in automated-agent.
+
+  ## 7. JX3 conventions
+
+  Standard. May need RBAC role to list/watch Jobs cluster-wide if not
+  already granted.
+
+  ## 8. Conventional commit
+
+  `feat(orchestrator): add dead plan-runner detector + needs_recovery status`
+
+depends_on: [orchestrator-add-plan-recover-endpoint]
+gate_marks: [unit, integration]
+max_iterations: 10
