@@ -71,7 +71,7 @@ _CLUSTER = os.environ.get('CLUSTER', 'unknown')
 
 # Directory where DB-resolved initiatives are materialised so the spawned
 # Job pod can consume them as a plain Path.
-_CATALOG_TMP_DIR = Path('/tmp/agent-catalog')  # noqa: S108 — intentional service-internal tmp dir
+_CATALOG_TMP_DIR = Path('/tmp/agent-catalog')  # noqa: S108  # nosec B108 — intentional service-internal tmp dir
 
 
 # Phase E.1 — known language hints. Each entry maps the language string

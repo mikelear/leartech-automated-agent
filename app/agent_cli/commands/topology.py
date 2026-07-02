@@ -18,7 +18,7 @@ from app.agent_cli.render import client_from_ctx, console, print_http_error
     default='mermaid',
     help='Output format. mermaid=stdout, png=requires mmdc, browser=opens mermaid.live, copy=clipboard.',
 )
-@click.option('--output', '-o', default='/tmp/topo.png', help='Output path for --render png')
+@click.option('--output', '-o', default='/tmp/topo.png', help='Output path for --render png')  # nosec B108 - CLI default output path
 @click.option('--feedback', is_flag=True, help='Render only the feedback rings, not the full topology')
 @click.pass_context
 def topology(ctx: click.Context, render: str, output: str, feedback: bool) -> None:

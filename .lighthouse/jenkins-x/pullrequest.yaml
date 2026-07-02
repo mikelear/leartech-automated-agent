@@ -42,11 +42,17 @@ spec:
           resources: {}
           script: |
             #!/bin/sh
+            # set -e is CRITICAL: without it, `coverage run -m pytest` exiting
+            # non-zero followed by `coverage report` (exit 0) lets the step pass
+            # despite test failures (feedback_pr_pytest_step_must_set_e).
+            set -e
             pip install uv --quiet
             uv sync --dev --frozen --no-cache 2>/dev/null || uv sync --dev --no-cache
             echo "=== Running tests ==="
             uv run coverage run -m pytest -v
             uv run coverage report
+            echo "=== SAST (bandit) ==="
+            uv run bandit -r app/ -ll -q
         # D3 — per-module state-machine coverage gate. Runs AFTER
         # build-python-test (Tekton runs task steps sequentially; a
         # failure above this step short-circuits the rest, so "runs
