@@ -99,3 +99,26 @@ async def test_retrospect_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) 
 def test_phase_mapping_is_total_over_known_phases() -> None:
     for phase in ('Pending', 'Queued', 'Running', 'Iterating', 'Succeeded', 'Failed', 'Cancelled'):
         assert rec._PHASE_TO_STATUS[phase] in {'queued', 'running', 'complete', 'failed', 'cancelled'}
+
+
+@pytest.mark.asyncio
+async def test_reconciler_loop_runs_swallows_errors_and_exits_on_cancel(monkeypatch: pytest.MonkeyPatch) -> None:
+    import asyncio
+
+    calls: list[str] = []
+
+    async def fake_once(ns: str) -> int:
+        calls.append(ns)
+        if len(calls) == 1:
+            raise RuntimeError('transient')  # exercises the except-Exception swallow
+        raise asyncio.CancelledError  # exercises the CancelledError propagation → loop exit
+
+    async def fast_sleep(_s: float) -> None:
+        return None
+
+    monkeypatch.setattr(rec, 'reconcile_once', fake_once)
+    monkeypatch.setattr(rec.asyncio, 'sleep', fast_sleep)
+
+    with pytest.raises(asyncio.CancelledError):
+        await rec.reconciler_loop('ns')
+    assert calls == ['ns', 'ns']  # ran twice: swallowed the error, then cancelled

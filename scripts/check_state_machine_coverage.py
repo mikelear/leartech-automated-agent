@@ -68,7 +68,9 @@ from pathlib import Path
 # `[tool.coverage.run] omit`).
 STATE_MACHINE_MODULES: tuple[str, ...] = (
     'gate/agent/job_reconciler.py',
-    'gate/agent/job_runner.py',
+    # Slice B: job_runner.py retired; agentrun_client.py is the new spawn-side
+    # state-machine surface (create/ensure/cancel AgentRuns).
+    'gate/agent/agentrun_client.py',
     'app/state.py',
     # V5 D2.2 — set-once first-turn hook + staleness classifier. The
     # whole point of this module is to encode the run-driver state
