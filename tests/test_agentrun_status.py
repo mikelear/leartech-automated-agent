@@ -58,6 +58,7 @@ async def test_patches_status_subresource(monkeypatch: pytest.MonkeyPatch) -> No
     assert captured['group'] == 'agent.leartech.io'
     assert captured['plural'] == 'agentruns'
     assert captured['body'] == {'status': {'targetPR': '47'}}
+    assert captured['_content_type'] == 'application/merge-patch+json'
 
 
 @pytest.mark.asyncio

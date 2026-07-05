@@ -53,6 +53,10 @@ async def patch_pr_number(pr_number: int | None) -> None:
                 plural=_PLURAL,
                 name=name,
                 body={'status': {'targetPR': str(pr_number)}},
+                # Force merge-patch: without this the client negotiates
+                # application/json-patch+json and the apiserver rejects the
+                # merge object with 400 "cannot unmarshal object into []jsonPatchOp".
+                _content_type='application/merge-patch+json',
             )
         _logger.info('patched AgentRun %s/%s status.targetPR=%s', namespace, name, pr_number)
     except Exception as exc:  # noqa: BLE001 — best-effort; must never break the run
