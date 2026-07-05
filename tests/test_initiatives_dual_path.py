@@ -113,96 +113,91 @@ def test_pick_image_accepts_language_kwarg_no_behaviour_change(
 # ---------------------------------------------------------------------------
 
 
-def test_post_spawns_k8s_job(
+def test_post_creates_agentrun(
     initiative_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POST /initiatives must call spawn_initiative_job with the expected
-    fan-out and surface the Job's name + a running status on the record.
-
-    Phase F: there is no asyncio fallback any more — every POST takes
-    this path."""
+    """POST /initiatives must ensure the per-language AgentType and create an
+    AgentRun (the Go controller spawns + tracks the Job). Slice B — job_runner
+    is gone; every POST takes this path."""
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
     monkeypatch.setenv('LEARTECH_INITIATIVE_DEFAULT_IMAGE', 'ghcr.io/foo/agent:test')
 
-    captured: dict[str, Any] = {}
+    ensured: dict[str, Any] = {}
+    created: dict[str, Any] = {}
 
-    async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
-        captured.update(kwargs)
-        return kwargs['run_id'], kwargs['namespace']
+    async def fake_ensure(**kwargs: Any) -> str:
+        ensured.update(kwargs)
+        return 'leartech-agent-py'
 
-    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
+    async def fake_create(**kwargs: Any) -> str:
+        created.update(kwargs)
+        return kwargs['run_id']
+
+    with (
+        patch('gate.agent.agentrun_client.ensure_agent_type', side_effect=fake_ensure),
+        patch('gate.agent.agentrun_client.create_agent_run', side_effect=fake_create),
+    ):
         resp = _client.post('/initiatives', json={'initiative': initiative_name})
 
     assert resp.status_code == 202, resp.text
     body = resp.json()
     assert body['runtime'] == 'job'
-    # job_name equals the run_id by D.3 contract.
-    assert body['job_name'] == body['id']
-    # Phase D.5.3 — once the K8s API has accepted the Job (= spawn
-    # returned), the record's status must reflect that the run is in
-    # flight. Before D.5.3 this stayed at 'queued' until the reconciler
-    # patched terminal, so the catalog never showed a 'running' state.
-    assert body['status'] == 'running', (
-        f'POST must return status=running after a successful spawn (got {body["status"]!r}); see Phase D.5.3.'
-    )
+    assert body['job_name'] == body['id']  # AgentRun name == run_id
+    assert body['status'] == 'running'
 
-    # The catalog state was also updated, not just the response payload.
-    # Future regressions where the response is mutated but the underlying
-    # state isn't would surface here (the GET endpoint calls get_record,
-    # which reads the same in-memory dict the response was built from).
+    # Catalog state updated too, not just the response payload.
     status_resp = _client.get(f'/initiatives/{body["id"]}')
     assert status_resp.status_code == 200, status_resp.text
     assert status_resp.json()['status'] == 'running'
 
-    # spawn_initiative_job was called with the expected fan-out.
-    assert captured['initiative_name'] == initiative_name
-    assert captured['run_id'] == body['id']
-    assert captured['namespace'] == 'jx-staging'
-    assert captured['image'] == 'ghcr.io/foo/agent:test'
-    # env + secret_refs come from the helpers — only assert shape here so
-    # the test isn't tied to a specific env layout.
-    assert isinstance(captured['env'], dict)
-    assert isinstance(captured['secret_refs'], dict)
+    # AgentType ensured with the routed image; AgentRun created with the run id.
+    assert ensured['image'] == 'ghcr.io/foo/agent:test'
+    assert created['run_id'] == body['id']
+    assert created['namespace'] == 'jx-staging'
+    assert created['agent_type'] == 'leartech-agent-py'
+    assert isinstance(created['inputs'], dict)
 
 
 def test_post_requires_pod_namespace(
     initiative_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POD_NAMESPACE must be set — without it the Job spawn has no target
-    namespace. The chart's Deployment injects this via downward-API
-    fieldRef; missing it indicates a misconfiguration that should fail
-    loudly (500) rather than guess a fallback."""
+    """POD_NAMESPACE must be set — the chart injects it via downward-API
+    fieldRef; missing it fails loudly (500) rather than guessing."""
     monkeypatch.delenv('POD_NAMESPACE', raising=False)
 
-    fake_spawn = AsyncMock()
-    with patch('gate.agent.job_runner.spawn_initiative_job', new=fake_spawn):
+    fake_create = AsyncMock()
+    with patch('gate.agent.agentrun_client.create_agent_run', new=fake_create):
         resp = _client.post('/initiatives', json={'initiative': initiative_name})
 
     assert resp.status_code == 500
     assert 'POD_NAMESPACE' in resp.json()['detail']
-    fake_spawn.assert_not_called()
+    fake_create.assert_not_called()
 
 
-def test_post_spawn_failure_surfaces_502(
+def test_post_agentrun_failure_surfaces_502(
     initiative_name: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """If spawn_initiative_job raises (e.g. K8s API timeout, RBAC denial),
-    the handler must surface a 502 rather than letting the exception
-    bubble as a generic 500. Operators reading the API logs need to
-    know a Job spawn failed."""
+    """If AgentRun creation raises (K8s API timeout, RBAC denial), the handler
+    surfaces a 502 rather than a generic 500."""
     monkeypatch.setenv('POD_NAMESPACE', 'jx-staging')
 
-    async def boom(**_kwargs: Any) -> tuple[str, str]:
+    async def ok_ensure(**_kwargs: Any) -> str:
+        return 'leartech-agent-py'
+
+    async def boom(**_kwargs: Any) -> str:
         raise RuntimeError('simulated K8s API failure')
 
-    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=boom):
+    with (
+        patch('gate.agent.agentrun_client.ensure_agent_type', side_effect=ok_ensure),
+        patch('gate.agent.agentrun_client.create_agent_run', side_effect=boom),
+    ):
         resp = _client.post('/initiatives', json={'initiative': initiative_name})
 
     assert resp.status_code == 502
-    assert 'Failed to spawn initiative Job' in resp.json()['detail']
+    assert 'Failed to create AgentRun' in resp.json()['detail']
 
 
 # ---------------------------------------------------------------------------

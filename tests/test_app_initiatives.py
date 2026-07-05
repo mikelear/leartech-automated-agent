@@ -145,7 +145,10 @@ def test_post_valid_initiative_queues_with_mocked_job_spawn(monkeypatch: pytest.
     async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
         return kwargs['run_id'], kwargs['namespace']
 
-    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
+    with (
+        patch('gate.agent.agentrun_client.ensure_agent_type', new_callable=AsyncMock),
+        patch('gate.agent.agentrun_client.create_agent_run', side_effect=fake_spawn),
+    ):
         response = client.post('/initiatives', json={'initiative': target})
 
     assert response.status_code == 202
@@ -199,7 +202,10 @@ def test_post_job_mode_response_includes_branch(monkeypatch: pytest.MonkeyPatch)
     async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
         return kwargs['run_id'], kwargs['namespace']
 
-    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
+    with (
+        patch('gate.agent.agentrun_client.ensure_agent_type', new_callable=AsyncMock),
+        patch('gate.agent.agentrun_client.create_agent_run', side_effect=fake_spawn),
+    ):
         response = client.post('/initiatives', json={'initiative': target})
 
     assert response.status_code == 202
@@ -224,7 +230,10 @@ def test_get_initiative_returns_branch_after_post(monkeypatch: pytest.MonkeyPatc
     async def fake_spawn(**kwargs: Any) -> tuple[str, str]:
         return kwargs['run_id'], kwargs['namespace']
 
-    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
+    with (
+        patch('gate.agent.agentrun_client.ensure_agent_type', new_callable=AsyncMock),
+        patch('gate.agent.agentrun_client.create_agent_run', side_effect=fake_spawn),
+    ):
         post_response = client.post('/initiatives', json={'initiative': target})
     assert post_response.status_code == 202
     run_id = post_response.json()['id']
@@ -373,7 +382,10 @@ def test_start_initiative_with_body_spawns_job(monkeypatch: pytest.MonkeyPatch) 
         captured.update(kwargs)
         return kwargs['run_id'], kwargs['namespace']
 
-    with patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn):
+    with (
+        patch('gate.agent.agentrun_client.ensure_agent_type', new_callable=AsyncMock),
+        patch('gate.agent.agentrun_client.create_agent_run', side_effect=fake_spawn),
+    ):
         response = client.post('/initiatives', json={'initiative_body': _INLINE_YAML})
 
     assert response.status_code == 202, response.text
@@ -384,9 +396,10 @@ def test_start_initiative_with_body_spawns_job(monkeypatch: pytest.MonkeyPatch) 
     assert body['status'] == 'running'
     assert body['runtime'] == 'job'
 
-    # The spawn call received the inline body verbatim.
-    assert captured['yaml_body'] == _INLINE_YAML
-    assert captured['initiative_name'] == 'inline-fired-initiative'
+    # The AgentRun received the inline initiative (parsed) as its inputs.
+    import yaml as _yaml
+
+    assert captured['inputs'] == _yaml.safe_load(_INLINE_YAML)
 
 
 def test_start_initiative_rejects_both_set() -> None:
@@ -419,7 +432,10 @@ def test_start_initiative_with_body_validates_first(monkeypatch: pytest.MonkeyPa
     bad_body = 'name: missing-goal\nrepo: leartech-test\nbranch: agent/bad\n'
 
     fake_spawn = AsyncMock()
-    with patch('gate.agent.job_runner.spawn_initiative_job', new=fake_spawn):
+    with (
+        patch('gate.agent.agentrun_client.ensure_agent_type', new_callable=AsyncMock),
+        patch('gate.agent.agentrun_client.create_agent_run', new=fake_spawn),
+    ):
         response = client.post('/initiatives', json={'initiative_body': bad_body})
 
     assert response.status_code == 422, response.text
