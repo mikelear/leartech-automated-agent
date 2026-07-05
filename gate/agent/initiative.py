@@ -35,6 +35,7 @@ from claude_agent_sdk.types import (
 from app.db import dispose_engine as _dispose_engine
 from app.db import init_engine as _init_engine
 from app.db import is_db_enabled
+from gate.agent.agentrun_status import patch_pr_number
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.commands import (
     CommandSink,
@@ -1102,6 +1103,8 @@ async def run_initiative(
             )
 
     pr_number = _resolve_pr_number(primary.qualified_repo, primary.branch)
+    # C1 report-back: write the PR straight onto the AgentRun CR (best-effort).
+    await patch_pr_number(pr_number)
     # Layer 1 + 2 — classify the orphan-PR case. When the agent reports
     # success but no PR exists on the branch, the operator needs to know.
     # The decision log captures the classification; the error column
