@@ -1,34 +1,26 @@
 {{- if .Values.jobs.enabled }}
-# Role granting the namespace-scoped permissions needed by:
-#  1. The API pod to spawn initiative Jobs (batch/jobs create+get+list+watch+delete).
-#  2. Spawned Job pods to read their own Pod state and logs.
-#  3. Future MCP tools that query Tekton PipelineRuns/TaskRuns directly
-#     instead of going through the GitHub Statuses API (per Mike's 2026-05-28
-#     framing on pulling back GitHub API usage during D-phase).
-#
-# Scope deliberately stays namespace-local — no ClusterRole. Cross-namespace
-# Tekton queries (auth-ui's preview namespace etc.) need a separate
-# cross-namespace strategy not in scope for D.2.
+# Slice B: the API pod no longer spawns Jobs or scrapes pod logs — the Go control
+# plane (leartech-orchestrator-controller) owns that. The API now:
+#  1. creates + manages AgentRun CRs (POST creates, cancel deletes, the reconciler lists);
+#  2. ensures the per-language AgentType (cluster-scoped) create-or-patch;
+#  3. reads/patches Tekton PipelineRuns for the MCP tools (unchanged).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: {{ include "leartech-automated-agent.fullname" . }}-job-runner
+  name: {{ include "leartech-automated-agent.fullname" . }}-agentruns
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "leartech-automated-agent.labels" . | nindent 4 }}
-    leartech.io/component: job-runner
+    leartech.io/component: agentrun-api
 rules:
-- apiGroups: ["batch"]
-  resources: ["jobs"]
+- apiGroups: ["agent.leartech.io"]
+  resources: ["agentruns"]
   verbs: ["create", "get", "list", "watch", "delete"]
-- apiGroups: [""]
-  resources: ["pods", "pods/log"]
-  verbs: ["get", "list", "watch"]
-# Tekton read for MCP tools (B.2-equivalent kubectl-based monitoring).
-# Read across pipelineruns + taskruns; PATCH on pipelineruns only — the
-# Phase B.4 admin cleanup writes `spec.status: PipelineRunCancelled` on
-# superseded runs. TaskRuns are still read-only (Tekton cascades the
-# cancel to them when the parent PipelineRun is patched).
+- apiGroups: ["agent.leartech.io"]
+  resources: ["agentruns/status"]
+  verbs: ["get"]
+# Tekton read for MCP tools; PATCH on pipelineruns only (admin cleanup cancels
+# superseded runs — Tekton cascades to taskruns).
 - apiGroups: ["tekton.dev"]
   resources: ["pipelineruns", "taskruns"]
   verbs: ["get", "list", "watch"]
@@ -39,22 +31,48 @@ rules:
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: {{ include "leartech-automated-agent.fullname" . }}-job-runner
+  name: {{ include "leartech-automated-agent.fullname" . }}-agentruns
   namespace: {{ .Release.Namespace }}
   labels:
     {{- include "leartech-automated-agent.labels" . | nindent 4 }}
-    leartech.io/component: job-runner
+    leartech.io/component: agentrun-api
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: {{ include "leartech-automated-agent.fullname" . }}-job-runner
+  name: {{ include "leartech-automated-agent.fullname" . }}-agentruns
 subjects:
-# Initiative Job pods (when D.3+ spawns Jobs) — used for self-pod / log
-# inspection from inside the running agent.
 - kind: ServiceAccount
-  name: {{ include "leartech-automated-agent.fullname" . }}-job-runner
+  name: {{ include "leartech-automated-agent.fullname" . }}
   namespace: {{ .Release.Namespace }}
-# API pod — needs `batch/jobs create` to spawn initiative Jobs.
+---
+# AgentType is CLUSTER-scoped, so ensuring it needs a ClusterRole. The name is
+# namespace-qualified so staging + every ephemeral PR preview get DISTINCT
+# cluster-scoped names — no cross-install collision (same lesson as the
+# controller's RBAC).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "leartech-automated-agent.fullname" . }}-agenttypes-{{ .Release.Namespace }}
+  labels:
+    {{- include "leartech-automated-agent.labels" . | nindent 4 }}
+    leartech.io/component: agentrun-api
+rules:
+- apiGroups: ["agent.leartech.io"]
+  resources: ["agenttypes"]
+  verbs: ["get", "create", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "leartech-automated-agent.fullname" . }}-agenttypes-{{ .Release.Namespace }}
+  labels:
+    {{- include "leartech-automated-agent.labels" . | nindent 4 }}
+    leartech.io/component: agentrun-api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "leartech-automated-agent.fullname" . }}-agenttypes-{{ .Release.Namespace }}
+subjects:
 - kind: ServiceAccount
   name: {{ include "leartech-automated-agent.fullname" . }}
   namespace: {{ .Release.Namespace }}

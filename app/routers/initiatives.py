@@ -596,48 +596,43 @@ async def start_initiative(request: StartInitiativeRequest, http_request: Reques
     # locally. The Job's lifecycle is owned by K8s; status reconciliation
     # back into the DB is the reconciler's surface (a watcher that
     # observes Job terminal state and patches initiative_runs.status).
-    from gate.agent.job_runner import spawn_initiative_job
+    import yaml as _yaml
+
+    from gate.agent.agentrun_client import create_agent_run, ensure_agent_type
 
     namespace = os.environ.get('POD_NAMESPACE')
     if not namespace:
         raise HTTPException(
             status_code=500,
-            detail='POD_NAMESPACE env var is required to spawn an initiative '
-            'Job; chart deployment must inject it via fieldRef '
-            'metadata.namespace.',
+            detail='POD_NAMESPACE env var is required to create an AgentRun; '
+            'chart deployment must inject it via fieldRef metadata.namespace.',
         )
     try:
-        # Inline the YAML body so the Job pod doesn't need DB access
-        # to resolve the initiative. yaml_path was just loaded above so
-        # the read is essentially free (filesystem cache hot).
-        job_name, _ns = await spawn_initiative_job(
-            initiative_name=initiative_name,
-            run_id=initiative_id,
-            # Phase E.1/E.2/E.3 image routing:
-            #   image: override (E.3) > language: hint (E.2) > repo
-            #   auto-detect (E.1) > LEARTECH_INITIATIVE_DEFAULT_IMAGE.
-            # `qualified_repo` is the primary repo so the picker can
-            # sniff its root manifests when neither `image:` nor
-            # `language:` is set.
-            image=_pick_image_for_initiative(
-                initiative_name,
-                language=loaded.language,
-                image_override=loaded.image,
-                qualified_repo=loaded.primary.qualified_repo,
-            ),
-            namespace=namespace,
-            env=_initiative_env(),
-            secret_refs=_initiative_secret_refs(),
-            yaml_body=yaml_body,
-            # D.7 — propagate qualified repo so the Job's preStop hook
-            # can post a "cancelled" sticky to the PR when an operator
-            # cancels mid-run. The agent itself writes /tmp/run_pr_number
-            # once it resolves the PR; the hook reads from there.
-            pr_repo=loaded.primary.qualified_repo,
+        # Slice B: create an AgentRun; the Go control plane
+        # (leartech-orchestrator-controller) owns the mechanical spawn + tracking
+        # (build the Job, watch it terminal, report the PR onto status). Image
+        # routing (E.1/E.2/E.3 — image override > language hint > repo auto-detect)
+        # picks the per-language runtime, ensured as an AgentType create-or-patch;
+        # the initiative rides in spec.inputs (the controller inlines it as
+        # LEARTECH_INITIATIVE_YAML). run_id == the AgentRun name == LEARTECH_RUN_ID.
+        image = _pick_image_for_initiative(
+            initiative_name,
+            language=loaded.language,
+            image_override=loaded.image,
+            qualified_repo=loaded.primary.qualified_repo,
         )
+        agent_type = await ensure_agent_type(language=loaded.language, image=image, env=_initiative_env())
+        await create_agent_run(
+            run_id=initiative_id,
+            namespace=namespace,
+            agent_type=agent_type,
+            repo=loaded.primary.qualified_repo,
+            inputs=_yaml.safe_load(yaml_body),
+        )
+        job_name = initiative_id
     except Exception as exc:  # noqa: BLE001 — surface spawn failures as 502 so the consumer sees them
-        logger.exception('Job spawn failed for initiative %s', initiative_id)
-        raise HTTPException(status_code=502, detail=f'Failed to spawn initiative Job: {exc}') from exc
+        logger.exception('AgentRun creation failed for initiative %s', initiative_id)
+        raise HTTPException(status_code=502, detail=f'Failed to create AgentRun: {exc}') from exc
     record = InitiativeRecord(
         id=initiative_id,
         initiative=initiative_name,
@@ -823,45 +818,22 @@ async def cancel_initiative(initiative_id: str, http_request: Request) -> Initia
             detail='POD_NAMESPACE env var is required to cancel a run; '
             'chart deployment must inject it via fieldRef metadata.namespace.',
         )
-    if not record.job_name:  # pragma: no cover — invariant: job_name set at register()
-        raise HTTPException(
-            status_code=500,
-            detail=f'Record {initiative_id!r} is missing job_name; cannot delete K8s Job.',
-        )
+    # Slice B: delete the AgentRun (named == initiative_id); the Go controller's
+    # owner-ref cascades to its Job → SIGTERM → the preStop crash-sticky. 404 is
+    # treated as success (already gone) inside delete_agent_run.
+    from gate.agent.agentrun_client import delete_agent_run
 
-    # Late import: kubernetes_asyncio is only needed on this code path; keeps
-    # `from app.routers.initiatives import ...` cheap for in-process tests.
-    from kubernetes_asyncio import client as k8s_client
-    from kubernetes_asyncio import config as k8s_config
-    from kubernetes_asyncio.client.api_client import ApiClient
-    from kubernetes_asyncio.client.exceptions import ApiException
-
-    k8s_config.load_incluster_config()  # synchronous — do NOT await
     try:
-        async with ApiClient() as api:
-            batch = k8s_client.BatchV1Api(api)
-            await batch.delete_namespaced_job(
-                name=record.job_name,
-                namespace=namespace,
-                propagation_policy='Background',
-            )
-    except ApiException as exc:
-        # 404 means the Job is already gone (TTL'd out, or a prior
-        # cancel + delete completed). Treat as success — the operator's
-        # intent ("this run should be cancelled") is already satisfied.
-        if exc.status != 404:
-            logger.exception('Job delete failed for initiative %s', initiative_id)
-            raise HTTPException(status_code=502, detail=f'Failed to delete initiative Job: {exc}') from exc
-        logger.info('initiative %s: Job %s already absent — recording cancelled status', initiative_id, record.job_name)
+        await delete_agent_run(initiative_id, namespace)
     except Exception as exc:  # noqa: BLE001 — surface K8s API failures as 502
-        logger.exception('Job delete failed for initiative %s', initiative_id)
-        raise HTTPException(status_code=502, detail=f'Failed to delete initiative Job: {exc}') from exc
+        logger.exception('AgentRun delete failed for initiative %s', initiative_id)
+        raise HTTPException(status_code=502, detail=f'Failed to cancel AgentRun: {exc}') from exc
 
     # Synchronously write terminal status. The reconciler sees this on its
-    # next pass and skips the run — no race where it sees the Job gone and
+    # next pass and skips the run — no race where it sees the run gone and
     # writes 'failed'.
     await update(initiative_id, status='cancelled', finished_at=now())
-    logger.info('initiative %s cancelled: Job %s/%s deleted', initiative_id, namespace, record.job_name)
+    logger.info('initiative %s cancelled: AgentRun %s/%s deleted', initiative_id, namespace, initiative_id)
 
     # Re-fetch with the same tenant scoping so a state.update race between
     # threads (or a future cross-tenant invariant violation) still returns

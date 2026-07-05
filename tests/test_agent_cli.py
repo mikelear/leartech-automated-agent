@@ -9,7 +9,7 @@ commands (fire, runs cancel, runs status).
 from __future__ import annotations
 
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
@@ -59,7 +59,8 @@ def test_fire_valid_initiative_returns_run_id(monkeypatch: pytest.MonkeyPatch) -
     runner = CliRunner()
     with (
         patch('app.agent_cli.main.httpx.Client', _MockHttpxClient),
-        patch('gate.agent.job_runner.spawn_initiative_job', side_effect=fake_spawn),
+        patch('gate.agent.agentrun_client.ensure_agent_type', new_callable=AsyncMock),
+        patch('gate.agent.agentrun_client.create_agent_run', side_effect=fake_spawn),
     ):
         # `webcoder-ui-add-about-page` was retired in PR #103; switch to a
         # still-shipped catalog entry so the assert pins the success path
