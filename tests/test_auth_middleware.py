@@ -757,8 +757,9 @@ def test_token_scopes_reads_scope_string_and_scp_list() -> None:
     assert _token_scopes({}) == set()
 
 
-def test_multiple_required_scopes_all_must_be_present(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
-    """LEARTECH_AUTH_REQUIRED_SCOPES with >1 scope → token must carry ALL of them."""
+def test_multiple_required_scopes_any_of(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """LEARTECH_AUTH_REQUIRED_SCOPES with >1 scope → any-of: the token needs AT LEAST
+    ONE of them (a caller is one type). None present → 403."""
     private_pem, public_jwk = rsa_keypair
     settings = AuthSettings(
         issuer=ISSUER,
@@ -769,11 +770,11 @@ def test_multiple_required_scopes_all_must_be_present(rsa_keypair: tuple[str, di
     cache = _StubJWKSCache(settings, [public_jwk])
     app, _ = _build_app(settings, cache)
 
-    # only one of the two → 403
-    partial = _mint_token(private_pem, extra_claims={'scope': 'leartechapi.internal_services'})
-    # both → 200
-    full = _mint_token(private_pem, extra_claims={'scope': 'leartechapi.internal_services leartechapi.extra'})
+    # one of the two accepted types → 200 (any-of)
+    one = _mint_token(private_pem, extra_claims={'scope': 'leartechapi.internal_services'})
+    # neither → 403
+    none_ = _mint_token(private_pem, extra_claims={'scope': 'openid'})
 
     with TestClient(app) as client:
-        assert client.get('/initiatives', headers={'Authorization': f'Bearer {partial}'}).status_code == 403
-        assert client.get('/initiatives', headers={'Authorization': f'Bearer {full}'}).status_code == 200
+        assert client.get('/initiatives', headers={'Authorization': f'Bearer {one}'}).status_code == 200
+        assert client.get('/initiatives', headers={'Authorization': f'Bearer {none_}'}).status_code == 403
