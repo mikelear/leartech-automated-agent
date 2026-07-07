@@ -44,6 +44,11 @@ AUTH_AUDIENCE_ENV = 'LEARTECH_AUTH_AUDIENCE'
 AUTH_REQUIRED_ENV = 'LEARTECH_AUTH_REQUIRED'
 AUTH_JWKS_TTL_ENV = 'LEARTECH_AUTH_JWKS_TTL'
 AUTH_TENANT_CLAIM_ENV = 'LEARTECH_AUTH_TENANT_CLAIM'
+# Required scopes for s2s callers — CONFIG-DRIVEN (space/comma-separated), not a
+# hard-coded internal-services check. Empty = no scope gate (back-compat). The token
+# must carry ALL listed scopes. e.g. 'leartechapi.internal_services'. Plural name +
+# semantics match go-common §B so Go + Python callees share one deployment contract.
+AUTH_REQUIRED_SCOPES_ENV = 'LEARTECH_AUTH_REQUIRED_SCOPES'
 # v7-P1 step 5 — service-to-service tenant relay. When the bearer's
 # ``tenant_id`` claim equals this value, the middleware reads the
 # ``X-Tenant-Id`` request header and uses THAT as the effective tenant.
@@ -110,6 +115,7 @@ class AuthSettings:
     issuer: str
     audience: str
     required: bool
+    required_scopes: frozenset[str] = frozenset()
     tenant_claim: str = DEFAULT_TENANT_CLAIM
     jwks_ttl_seconds: int = DEFAULT_JWKS_TTL_SECONDS
     # v7-P1 step 5 — see AUTH_SYSTEM_TENANT_ENV docstring. Empty string
@@ -144,6 +150,7 @@ def load_settings_from_env(env: dict[str, str] | None = None) -> AuthSettings:
     issuer = src.get(AUTH_ISSUER_ENV, '').strip()
     audience = src.get(AUTH_AUDIENCE_ENV, '').strip()
     required = _parse_bool(src.get(AUTH_REQUIRED_ENV))
+    required_scopes = frozenset(src.get(AUTH_REQUIRED_SCOPES_ENV, '').replace(',', ' ').split())
     tenant_claim = src.get(AUTH_TENANT_CLAIM_ENV, DEFAULT_TENANT_CLAIM).strip() or DEFAULT_TENANT_CLAIM
     system_tenant_id = src.get(AUTH_SYSTEM_TENANT_ENV, '').strip()
     raw_ttl = src.get(AUTH_JWKS_TTL_ENV)
@@ -169,6 +176,7 @@ def load_settings_from_env(env: dict[str, str] | None = None) -> AuthSettings:
         issuer=issuer,
         audience=audience,
         required=required,
+        required_scopes=required_scopes,
         tenant_claim=tenant_claim,
         jwks_ttl_seconds=jwks_ttl_seconds,
         system_tenant_id=system_tenant_id,
@@ -410,7 +418,23 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             )
         except JWTError as exc:
             raise HTTPException(status_code=401, detail=f'auth: invalid token ({exc})') from exc
-        return cast(dict[str, Any], claims)
+        validated = cast(dict[str, Any], claims)
+        self._require_scope(validated)
+        return validated
+
+    def _require_scope(self, claims: dict[str, Any]) -> None:
+        """Config-driven scope gate: when LEARTECH_AUTH_REQUIRED_SCOPES is set, the
+        token MUST carry ALL of them (403 otherwise). Empty = no gate. Not a hard-coded
+        internal-services check — future partner/external scopes stay config-not-code."""
+        required = self._settings.required_scopes
+        if not required:
+            return
+        missing = required - _token_scopes(claims)
+        if missing:
+            raise HTTPException(
+                status_code=403,
+                detail=f'auth: token missing required scope(s) {sorted(missing)}',
+            )
 
     def _lookup_key(self, kid: str) -> dict[str, Any]:
         for entry in self._jwks_cache.keys():
@@ -423,6 +447,17 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             if entry.get('kid') == kid:
                 return entry
         raise HTTPException(status_code=401, detail=f'auth: signing key with kid={kid!r} not found in JWKS')
+
+
+def _token_scopes(claims: dict[str, Any]) -> set[str]:
+    """Scopes from a JWT — OAuth 'scope' (space-delimited string) or 'scp' (list)."""
+    raw = claims.get('scope')
+    if isinstance(raw, str):
+        return set(raw.split())
+    scp = claims.get('scp')
+    if isinstance(scp, list):
+        return {str(item) for item in scp}
+    return set()
 
 
 def _unauthorized(detail: str, status_code: int = 401) -> JSONResponse:
