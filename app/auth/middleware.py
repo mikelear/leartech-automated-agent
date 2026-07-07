@@ -46,7 +46,7 @@ AUTH_JWKS_TTL_ENV = 'LEARTECH_AUTH_JWKS_TTL'
 AUTH_TENANT_CLAIM_ENV = 'LEARTECH_AUTH_TENANT_CLAIM'
 # Required scopes for s2s callers — CONFIG-DRIVEN (space/comma-separated), not a
 # hard-coded internal-services check. Empty = no scope gate (back-compat). The token
-# must carry ALL listed scopes. e.g. 'leartechapi.internal_services'. Plural name +
+# must carry AT LEAST ONE listed scope (any-of). e.g. 'leartechapi.internal_services'. Plural name +
 # semantics match go-common §B so Go + Python callees share one deployment contract.
 AUTH_REQUIRED_SCOPES_ENV = 'LEARTECH_AUTH_REQUIRED_SCOPES'
 # v7-P1 step 5 — service-to-service tenant relay. When the bearer's
@@ -424,16 +424,19 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
 
     def _require_scope(self, claims: dict[str, Any]) -> None:
         """Config-driven scope gate: when LEARTECH_AUTH_REQUIRED_SCOPES is set, the
-        token MUST carry ALL of them (403 otherwise). Empty = no gate. Not a hard-coded
+        token must carry AT LEAST ONE of them (any-of; 403 otherwise). Empty = no gate. Not a hard-coded
         internal-services check — future partner/external scopes stay config-not-code."""
         required = self._settings.required_scopes
         if not required:
             return
-        missing = required - _token_scopes(claims)
-        if missing:
+        # any-of: satisfied if the token carries AT LEAST ONE of the required scopes.
+        # Scopes are caller-type/tier markers (internal/external/api) and a caller is
+        # one type, so all-of would make a multi-type route unsatisfiable. Matches
+        # go-common §B RequireScopes (a true all-of would be a separate RequireAllScopes).
+        if required.isdisjoint(_token_scopes(claims)):
             raise HTTPException(
                 status_code=403,
-                detail=f'auth: token missing required scope(s) {sorted(missing)}',
+                detail=f'auth: token has none of the accepted scopes {sorted(required)}',
             )
 
     def _lookup_key(self, kid: str) -> dict[str, Any]:
