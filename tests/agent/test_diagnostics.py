@@ -604,6 +604,16 @@ async def test_terminate_handler_skips_when_natural_terminal_completed(
         uninstall_terminate_handler()
 
 
+async def _drain_pending_tasks(timeout: float = 5.0) -> None:
+    """Await every fire-and-forget task (other than the caller) to completion so
+    scheduled DB writes finish before assertions + fixture teardown — deterministic,
+    unlike ``sleep(0)`` which yields only once and leaves the task to error on teardown.
+    """
+    pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+    if pending:
+        await asyncio.wait(pending, timeout=timeout)
+
+
 async def test_sigterm_handler_only_fires_once(db_enabled: None) -> None:
     """Belt-and-braces: SIGTERM + atexit both call ``_fire_handler_safely``,
     but the ``handler_fired`` flag guards against double-flushing."""
@@ -618,12 +628,16 @@ async def test_sigterm_handler_only_fires_once(db_enabled: None) -> None:
     install_terminate_handler(state)
     try:
         _fire_handler_safely(reason='silent_terminate: SIGTERM received')
-        # Give the scheduled coroutine a tick to land its writes.
-        await asyncio.sleep(0)
+        # Deterministically wait for the fire-and-forget snapshot task to COMPLETE
+        # its DB write. sleep(0) yields only once — under release-env contention the
+        # scheduled coroutine outlived the test and errored on teardown (DB torn down),
+        # surfacing as a flaky ERROR. Draining to completion is the fix
+        # (feedback_async_tests_need_event_not_sleep).
+        await _drain_pending_tasks()
         # Now grow the buffer and fire again — second call must be a no-op.
         state.buffer.append({'role': 'assistant', 'content': 'second call'})
         _fire_handler_safely(reason='silent_terminate: atexit')
-        await asyncio.sleep(0)
+        await _drain_pending_tasks()
 
         async with db_module.session() as sess:
             snap = await get_snapshot(sess, run_id=run_id)
