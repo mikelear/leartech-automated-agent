@@ -36,6 +36,7 @@ from app.auth.middleware import (
     AuthenticationMiddleware,
     AuthSettings,
     JWKSCache,
+    _token_scopes,
     get_current_tenant_id,
     get_current_user,
     load_settings_from_env,
@@ -692,3 +693,65 @@ def test_jwks_fetch_uses_injected_http_client(monkeypatch: pytest.MonkeyPatch) -
     keys = cache.fetch_jwks()
     assert keys == [{'kid': 'test-1'}]
     assert _StubClient.calls == 1
+
+
+# ─── Config-driven required-scope gate (s2s) ─────────────────────────────────
+
+
+def _scoped_settings() -> AuthSettings:
+    """required=True + a required scope (the s2s enforcement config)."""
+    return AuthSettings(
+        issuer=ISSUER,
+        audience=AGENT_AUDIENCE,
+        required=True,
+        required_scope='leartechapi.internal_services',
+    )
+
+
+def test_missing_required_scope_rejected_403(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """Valid signature/issuer/audience but WITHOUT the required scope → 403."""
+    private_pem, public_jwk = rsa_keypair
+    settings = _scoped_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_app(settings, cache)
+    token = _mint_token(private_pem)  # no scope claim
+
+    with TestClient(app) as client:
+        response = client.get('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 403
+    assert 'internal_services' in response.json()['detail']
+
+
+def test_required_scope_present_proceeds(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """Token carrying the required scope (Hydra 'scope' string) → 200."""
+    private_pem, public_jwk = rsa_keypair
+    settings = _scoped_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_app(settings, cache)
+    token = _mint_token(private_pem, extra_claims={'scope': 'openid leartechapi.internal_services'})
+
+    with TestClient(app) as client:
+        response = client.get('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 200
+
+
+def test_no_required_scope_config_allows_any_valid_token(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """Empty required_scope = no gate (back-compat): a valid token without any scope proceeds."""
+    private_pem, public_jwk = rsa_keypair
+    settings = _required_settings()  # required_scope defaults to ''
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_app(settings, cache)
+    token = _mint_token(private_pem)
+
+    with TestClient(app) as client:
+        response = client.get('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 200
+
+
+def test_token_scopes_reads_scope_string_and_scp_list() -> None:
+    assert _token_scopes({'scope': 'a b c'}) == {'a', 'b', 'c'}
+    assert _token_scopes({'scp': ['x', 'y']}) == {'x', 'y'}
+    assert _token_scopes({}) == set()
