@@ -704,7 +704,7 @@ def _scoped_settings() -> AuthSettings:
         issuer=ISSUER,
         audience=AGENT_AUDIENCE,
         required=True,
-        required_scope='leartechapi.internal_services',
+        required_scopes=frozenset({'leartechapi.internal_services'}),
     )
 
 
@@ -755,3 +755,25 @@ def test_token_scopes_reads_scope_string_and_scp_list() -> None:
     assert _token_scopes({'scope': 'a b c'}) == {'a', 'b', 'c'}
     assert _token_scopes({'scp': ['x', 'y']}) == {'x', 'y'}
     assert _token_scopes({}) == set()
+
+
+def test_multiple_required_scopes_all_must_be_present(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """LEARTECH_AUTH_REQUIRED_SCOPES with >1 scope → token must carry ALL of them."""
+    private_pem, public_jwk = rsa_keypair
+    settings = AuthSettings(
+        issuer=ISSUER,
+        audience=AGENT_AUDIENCE,
+        required=True,
+        required_scopes=frozenset({'leartechapi.internal_services', 'leartechapi.extra'}),
+    )
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_app(settings, cache)
+
+    # only one of the two → 403
+    partial = _mint_token(private_pem, extra_claims={'scope': 'leartechapi.internal_services'})
+    # both → 200
+    full = _mint_token(private_pem, extra_claims={'scope': 'leartechapi.internal_services leartechapi.extra'})
+
+    with TestClient(app) as client:
+        assert client.get('/initiatives', headers={'Authorization': f'Bearer {partial}'}).status_code == 403
+        assert client.get('/initiatives', headers={'Authorization': f'Bearer {full}'}).status_code == 200
