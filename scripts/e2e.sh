@@ -786,6 +786,94 @@ else
   failures=$((failures + 1))
 fi
 
+# GET /initiatives/catalog pagination — filesystem-fallback path (no DB
+# configured on the e2e laptop server). Verifies the fix landed in the
+# initiative that added `limit` + `offset` params: the endpoint must
+# honour both so the orchestrator's paginated catalog-walk terminates
+# on a short final page instead of looping to its cap. Because there's
+# no DB here, the response comes from `initiatives/*.yaml` — same
+# request/response shape as the DB path per the initiative's
+# "identical regardless of is_db_enabled()" contract.
+if command -v python3 >/dev/null 2>&1; then
+  if python3 - "${BASE_URL}" <<'PY' > /tmp/e2e-catalog-pagination.txt 2>&1; then
+import json
+import sys
+import urllib.request
+
+base = sys.argv[1]
+
+
+def get(path: str) -> tuple[int, list]:
+    with urllib.request.urlopen(base + path, timeout=5) as resp:
+        return resp.status, json.load(resp)
+
+
+# Full catalog first — establishes the total row count for this repo.
+status, full = get('/initiatives/catalog?limit=1000&offset=0')
+assert status == 200, status
+total = len(full)
+assert total >= 1, f'no filesystem initiatives visible; expected initiatives/*.yaml to seed. got: {full}'
+
+# Small page must return exactly `limit` when limit < total; a partial
+# page when limit >= remaining. Pick a limit small enough to prove
+# truncation but large enough that a small local `initiatives/` still
+# has more rows than fit in one page.
+limit = max(1, min(3, total - 1)) if total > 1 else 1
+status, page = get(f'/initiatives/catalog?limit={limit}&offset=0')
+assert status == 200
+if total > limit:
+    assert len(page) == limit, f'expected {limit} rows, got {len(page)}: {[r["name"] for r in page]}'
+
+# Offset must skip the right rows — the paged view of full[offset:offset+limit]
+# must match the sliced view of the full listing.
+if total > limit:
+    status, offset_page = get(f'/initiatives/catalog?limit={limit}&offset=1')
+    assert status == 200
+    got_names = [r['name'] for r in offset_page]
+    want_names = [r['name'] for r in full[1 : 1 + limit]]
+    assert got_names == want_names, f'offset slice mismatch: got {got_names}, want {want_names}'
+
+# Walk must terminate — this is the anti-regression for the shipped
+# bug. Increasing offsets, up to a safety cap, must eventually see a
+# page shorter than `limit`.
+offset = 0
+seen: list[str] = []
+for _ in range(50):  # cap
+    status, p = get(f'/initiatives/catalog?limit={limit}&offset={offset}')
+    assert status == 200
+    seen.extend(r['name'] for r in p)
+    if len(p) < limit:
+        break
+    offset += limit
+else:
+    raise AssertionError('catalog walk did not terminate — pagination broken')
+
+assert len(seen) == len(set(seen)), f'duplicate names across pages: {seen}'
+
+# Out-of-range params must 422 — validated by FastAPI Query bounds.
+import http.client
+from urllib.parse import urlparse
+
+parsed = urlparse(base)
+conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=5)
+conn.request('GET', '/initiatives/catalog?limit=0&offset=0')
+resp = conn.getresponse()
+assert resp.status == 422, f'limit=0 should 422, got {resp.status}'
+resp.read()
+conn.close()
+
+print('OK: pagination honoured — total=%d, walk terminated with %d unique names' % (total, len(seen)))
+PY
+    echo "✓ GET /initiatives/catalog pagination (limit/offset honoured, walk terminates)"
+  else
+    echo "✗ GET /initiatives/catalog pagination smoke failed" >&2
+    cat /tmp/e2e-catalog-pagination.txt >&2
+    failures=$((failures + 1))
+  fi
+else
+  echo "· python3 not on PATH — skipping catalog pagination smoke"
+fi
+
 # pipx-install smoke — the operator-facing "no clone needed" entry point.
 # We do NOT drive a real pipx install here (it'd pull from PyPI / GitHub
 # every invocation and add ~30s of dep-resolution); instead we verify

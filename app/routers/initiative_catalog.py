@@ -14,9 +14,10 @@ add auth in a later phase once the platform-auth pattern lands.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Request, status
+from fastapi import APIRouter, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy.exc import IntegrityError
 
@@ -34,6 +35,18 @@ from app.db.initiative_catalog import (
 from gate.initiatives.loader import Initiative, load_initiative_from_yaml
 
 router = APIRouter()
+
+# Pagination bounds — the GET /initiatives/catalog handler enforces these
+# so a caller can't blow up the response with a huge slice request. 1000
+# is comfortable well above the current catalog size (~218 rows) but
+# still bounded.
+_CATALOG_DEFAULT_LIMIT = 100
+_CATALOG_MAX_LIMIT = 1000
+
+# Filesystem-fallback source directory. Mirrors the seed path in
+# app/main.py:seed_catalog_from_filesystem — same YAML shape, same
+# `_`-prefixed skip rule.
+_FILESYSTEM_INITIATIVES_DIR = Path('initiatives')
 
 
 # ─── Request / Response models ─────────────────────────────────────────────
@@ -109,22 +122,95 @@ def _validate_yaml(yaml_body: str) -> Initiative:
 # ─── Endpoints ─────────────────────────────────────────────────────────────
 
 
-@router.get('', response_model=list[InitiativeResponse])
-async def list_db_initiatives(request: Request) -> list[InitiativeResponse]:
-    """List DB-stored initiatives visible to the caller.
+def _load_filesystem_records(offset: int, limit: int) -> list[InitiativeRecord]:
+    """Read ``initiatives/*.yaml`` from the pod's baked-in catalog and page it.
 
-    Filesystem-backed initiatives are NOT included — for the merged
-    catalog used by the fire endpoint, see `GET /initiatives` (the
-    existing list-available endpoint).
+    Used when ``is_db_enabled()`` is False so the endpoint still returns a
+    useful catalog in filesystem-only deployments (dev / CI). Applies the
+    same stable ordering (name ascending) + slice as the DB path so
+    pagination behaviour matches regardless of ``is_db_enabled()``.
 
-    v7-P1 step 5 — tenant-scoped: returns the caller's own initiatives
-    plus the global set (rows with ``tenant_id IS NULL``). Unauthenticated
-    / system-tenant callers see every row, mirroring pre-tenancy behaviour.
+    Skips files whose stem starts with ``_`` — same rule as
+    ``seed_catalog_from_filesystem`` in ``app/main.py``. Each file's mtime
+    is surfaced as both ``created_at`` and ``updated_at``; the FS path
+    has no separate creation timestamp.
     """
-    _require_db()
-    tenant_id = get_current_tenant_id(request)
-    async with db_session() as sess:
-        records = await list_initiatives(sess, tenant_id=tenant_id)
+    if not _FILESYSTEM_INITIATIVES_DIR.exists():
+        return []
+
+    yaml_files = sorted(p for p in _FILESYSTEM_INITIATIVES_DIR.glob('*.yaml') if not p.stem.startswith('_'))
+    page = yaml_files[offset : offset + limit]
+    records: list[InitiativeRecord] = []
+    for yaml_path in page:
+        try:
+            body = yaml_path.read_text()
+        except OSError:
+            # Best-effort: skip files we can't read rather than 500 the
+            # whole listing.
+            continue
+        mtime = datetime.fromtimestamp(yaml_path.stat().st_mtime, tz=UTC)
+        records.append(
+            InitiativeRecord(
+                name=yaml_path.stem,
+                yaml_body=body,
+                description=None,
+                created_at=mtime,
+                updated_at=mtime,
+                created_by=None,
+                tenant_id=None,
+            )
+        )
+    return records
+
+
+@router.get('', response_model=list[InitiativeResponse])
+async def list_db_initiatives(
+    request: Request,
+    limit: int = Query(
+        _CATALOG_DEFAULT_LIMIT,
+        ge=1,
+        le=_CATALOG_MAX_LIMIT,
+        description=(
+            f'Maximum rows to return. Defaults to {_CATALOG_DEFAULT_LIMIT}; '
+            f'clamped at {_CATALOG_MAX_LIMIT} to keep payloads bounded.'
+        ),
+    ),
+    offset: int = Query(
+        0,
+        ge=0,
+        description='Rows to skip after the stable name-ascending ordering.',
+    ),
+) -> list[InitiativeResponse]:
+    """List initiatives visible to the caller — DB-first, filesystem fallback.
+
+    Response shape is identical whether ``is_db_enabled()`` is True (rows
+    come from the ``initiative_catalog`` table) or False (rows come from
+    the pod's baked-in ``initiatives/*.yaml`` files). This lets the
+    orchestrator's paginated catalog-walk terminate correctly in both
+    deployment modes — the earlier all-rows-always shape sent the walk
+    to its page cap every reconcile cycle.
+
+    Pagination:
+
+    - ``limit`` defaults to 100, capped at 1000. Larger caps are a
+      separate initiative — the current catalog fits comfortably.
+    - ``offset`` defaults to 0. Applied after ``ORDER BY name`` so the
+      walk is stable across calls without a cursor.
+    - A final partial page returns fewer than ``limit`` records; the
+      walk terminates when it does.
+
+    v7-P1 step 5 — tenant-scoped when DB-backed: returns the caller's
+    own initiatives plus the global set (rows with ``tenant_id IS NULL``).
+    Unauthenticated / system-tenant callers see every row, mirroring
+    pre-tenancy behaviour. The filesystem fallback has no tenancy — all
+    YAMLs baked into the pod are visible to every caller.
+    """
+    if is_db_enabled():
+        tenant_id = get_current_tenant_id(request)
+        async with db_session() as sess:
+            records = await list_initiatives(sess, tenant_id=tenant_id, limit=limit, offset=offset)
+    else:
+        records = _load_filesystem_records(offset=offset, limit=limit)
     return [InitiativeResponse.from_record(r) for r in records]
 
 
