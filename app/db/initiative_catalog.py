@@ -96,6 +96,8 @@ async def list_initiatives(
     session: AsyncSession,
     *,
     tenant_id: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
 ) -> list[InitiativeRecord]:
     """Return DB-stored initiatives visible to ``tenant_id``, ordered by name.
 
@@ -108,10 +110,23 @@ async def list_initiatives(
       ``tenant_id IS NULL OR tenant_id = <caller>``. Global entries (NULL)
       are always visible; tenant-specific entries are visible to their
       owning tenant only.
+
+    Pagination:
+
+    - ``limit`` — max rows to return. ``None`` (default) means no limit
+      is applied — the DB returns every visible row. Callers that page
+      (the GET /initiatives/catalog handler) pass an explicit limit.
+    - ``offset`` — rows to skip from the start of the ordered set.
+      Defaults to 0. Applied after ``ORDER BY name`` so pagination is
+      stable across calls even without a cursor.
     """
     stmt = select(InitiativeRow).order_by(InitiativeRow.name)
     if tenant_id is not None:
         stmt = stmt.where(or_(InitiativeRow.tenant_id.is_(None), InitiativeRow.tenant_id == tenant_id))
+    if offset:
+        stmt = stmt.offset(offset)
+    if limit is not None:
+        stmt = stmt.limit(limit)
     result = await session.execute(stmt)
     return [InitiativeRecord.from_row(row) for row in result.scalars()]
 
