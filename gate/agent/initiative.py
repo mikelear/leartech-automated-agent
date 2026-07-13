@@ -446,6 +446,263 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> tuple[int, str | None]:
     return 0, None
 
 
+# ─── Resume-on-retry (reliability part 3) ────────────────────────────────
+#
+# When the agent Job pod dies (OOM, node preemption, SIGKILL from the
+# cluster) and Kubernetes' backoffLimit spawns a retry pod, the retry
+# pod would otherwise re-enter ``run_initiative`` and restart the
+# initiative from scratch — fresh clone, redo every commit, potentially
+# open a duplicate PR. Empirically motivated by run B1 (2026-07-13)
+# where the first pod died and the retry redid ~all the work before the
+# duplicate-PR path was blocked by GitHub's "PR already exists on branch"
+# check.
+#
+# The durable work-state is the pushed git branch (``agent/<initiative>``)
+# + any open PR on it. The retry pod needs to DETECT that state and
+# RESUME from it rather than starting over. We do this deterministically
+# by asking GitHub two independent questions:
+#
+#   1. Does an open PR exist on ``<qualified_repo> --head <branch>``?
+#      (``gh pr list`` — same shape as ``_resolve_pr_number``.)
+#   2. Does the remote branch itself exist? (``git ls-remote``.)
+#
+# Either signal alone flips us into resume mode. Both use short timeouts
+# and swallow every subprocess/network failure — a detector that raised
+# would break fresh-run behaviour, which is precisely what the initiative
+# forbids.
+#
+# In resume mode the harness:
+#   * ``git fetch``es the remote branch into the local clone,
+#   * ``git checkout``s it (leaving HEAD on the prior attempt's work),
+#   * writes the PR-number hint file so the preStop hook is armed even
+#     before the SDK loop sees the PR URL,
+#   * prepends a "RESUME MODE" preamble to the user prompt telling the
+#     LLM this is a retry — DO NOT restart from scratch, DO NOT open a
+#     duplicate PR, continue from the existing branch state.
+#
+# Safety: if any of detection / fetch / checkout fails, we fall back to
+# the current fresh-start behaviour. The guard is on detection outcomes,
+# not a global flag — a detection blip flips one specific run back to
+# fresh-start without touching the rest. The system-prompt loop's own
+# step 1 ("create from base if missing, checkout+pull if it exists")
+# handles the fresh-start path, so a false-negative on resume-detection
+# is at worst a "did the work over again" outcome (matching the pre-fix
+# baseline behaviour) — never a corruption path.
+
+
+@dataclass(frozen=True)
+class ResumeContext:
+    """Detected resume-mode signals for the current run.
+
+    ``is_resume`` — True iff EITHER the remote branch exists OR an open
+    PR exists on that branch. When False the caller stays on the
+    fresh-start path.
+
+    ``pr_number`` — the resolved open PR number when ``gh pr list``
+    found one; None when only the branch signal fired (branch pushed
+    but PR never opened, e.g. prior pod died between push and
+    ``gh pr create``).
+
+    ``branch_exists_on_remote`` — True iff ``git ls-remote`` reported
+    the branch ref. Used by the caller to decide whether to attempt
+    ``git fetch`` + ``git checkout`` (skipped when only the PR signal
+    fired without a confirmed branch, which shouldn't happen but the
+    guard is cheap).
+    """
+
+    is_resume: bool
+    pr_number: int | None
+    branch_exists_on_remote: bool
+
+
+def _remote_branch_exists(*, qualified_repo: str, branch: str) -> bool:
+    """Return True iff ``git ls-remote`` finds ``refs/heads/<branch>`` on origin.
+
+    Uses HTTPS + GH_TOKEN auth (same shape as ``_clone_repo``) so the
+    check works in cluster pods where the git remote isn't configured
+    yet (we call this BEFORE cloning is guaranteed to have populated
+    ``origin``). Hits no GitHub API — just the git wire protocol —
+    which keeps us out of the 5000pts/h GraphQL bucket that operator
+    ``gh`` usage shares.
+
+    Returns False on ANY failure: missing GH_TOKEN, subprocess timeout,
+    non-zero exit, unexpected empty output. A False result is
+    semantically "we don't know — treat as fresh-start", which is the
+    safe fallback the initiative spec calls for.
+
+    The ``--exit-code`` flag makes git exit 2 when no matching ref is
+    found (distinct from exit 0 with a matching row); we treat both
+    non-zero and empty-stdout cases as "branch absent".
+    """
+    gh_token = os.environ.get('GH_TOKEN')
+    if not gh_token:
+        # Without auth we can only reach public repos; every consumer
+        # repo we run against is private. Treat as "unknown → fresh".
+        return False
+    url = f'https://x-access-token:{gh_token}@github.com/{qualified_repo}.git'
+    try:
+        result = subprocess.run(
+            ['git', 'ls-remote', '--exit-code', '--heads', url, branch],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=15,
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    # exit 0 with non-empty output → branch exists. exit 2 (per git docs)
+    # → no match. Anything else → error; treat as absent.
+    return result.returncode == 0 and bool(result.stdout.strip())
+
+
+def _detect_resume_context(*, qualified_repo: str, branch: str) -> ResumeContext:
+    """Deterministically decide whether this run is a retry that should RESUME.
+
+    Two independent signals; either alone flips us into resume mode:
+
+      1. ``gh pr list --head <branch>`` returns an open PR → a prior
+         attempt already opened the PR.
+      2. ``git ls-remote --heads origin <branch>`` finds the ref → a
+         prior attempt pushed the branch.
+
+    Both are best-effort with short timeouts. Any failure → the signal
+    reads False (unknown), and if BOTH read False the caller stays on
+    the fresh-start path. This is the "safety fallback" the initiative
+    goal spec calls for: guard on detection outcomes, don't break
+    existing runs.
+
+    The two signals are checked independently rather than "PR ⇒ branch
+    exists" because in the empirical B1 shape we've seen both:
+
+      * Prior pod died between push and ``gh pr create`` → branch
+        exists but no PR yet.
+      * Prior pod opened the PR successfully but died before finishing
+        the SDK loop → both signals fire (the common case).
+
+    Returning ``pr_number is not None`` lets the caller tell the LLM
+    the exact PR number to reuse.
+    """
+    pr_number = _resolve_pr_number(qualified_repo, branch)
+    branch_exists = _remote_branch_exists(qualified_repo=qualified_repo, branch=branch)
+    is_resume = pr_number is not None or branch_exists
+    return ResumeContext(
+        is_resume=is_resume,
+        pr_number=pr_number,
+        branch_exists_on_remote=branch_exists,
+    )
+
+
+def _fetch_and_checkout_existing(*, cwd: Path, branch: str) -> bool:
+    """Fetch the existing remote ``branch`` into ``cwd`` and check it out.
+
+    Best-effort. Returns True on success; False on any subprocess
+    failure (git not on PATH, timeout, non-zero exit, missing remote
+    branch). The caller treats a False return as "resume fetch failed
+    — fall back to fresh-start" so a stale-state edge case never
+    wedges the run.
+
+    Order matters: we ``fetch`` first (populates ``FETCH_HEAD`` + the
+    remote-tracking ref) and only then ``checkout`` from the
+    remote-tracking ref (creates a local branch tracking origin/<branch>).
+    Using ``checkout -B`` because the local branch may or may not
+    exist depending on how the clone was set up — ``-B`` handles both.
+    """
+
+    def _run(argv: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=timeout,
+            cwd=str(cwd),
+        )
+
+    try:
+        fetch = _run(['git', 'fetch', 'origin', branch], timeout=60)
+        if fetch.returncode != 0:
+            click.echo(
+                click.style(
+                    f'  resume fetch failed (exit {fetch.returncode}): {fetch.stderr.strip()[:200]}',
+                    fg='yellow',
+                ),
+                err=True,
+            )
+            return False
+        checkout = _run(['git', 'checkout', '-B', branch, f'origin/{branch}'], timeout=30)
+        if checkout.returncode != 0:
+            click.echo(
+                click.style(
+                    f'  resume checkout failed (exit {checkout.returncode}): {checkout.stderr.strip()[:200]}',
+                    fg='yellow',
+                ),
+                err=True,
+            )
+            return False
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        click.echo(click.style(f'  resume fetch/checkout errored: {exc}', fg='yellow'), err=True)
+        return False
+    return True
+
+
+def _build_resume_preamble(*, branch: str, base: str, pr_number: int | None) -> str:
+    """Render the "RESUME MODE" block prepended to the user prompt.
+
+    The preamble tells the LLM three things it needs to know to avoid
+    redoing work:
+
+      1. This is a retry — the earlier pod pushed to ``<branch>``.
+      2. The branch is ALREADY checked out (the harness ran ``git
+         fetch`` + ``git checkout`` before the SDK loop started).
+      3. If a PR is open (``pr_number`` is not None): DO NOT open a
+         duplicate. If none is open yet: proceed to open one if the
+         work is ready.
+
+    The preamble is prescriptive — it tells the LLM what state the
+    working tree is in, then defers to the system prompt's loop for
+    the rest. We keep it short (≤ ~1000 tokens) so it doesn't crowd
+    the context window; the durable behavioural nudges live in the
+    system prompt / calibrations, not here.
+    """
+    pr_line: str
+    if pr_number is not None:
+        pr_line = (
+            f'An open PR already exists on this branch: **#{pr_number}**. '
+            f'DO NOT open a duplicate PR — reuse this one for any '
+            f'commits + comments. `gh pr create` would fail anyway '
+            f'(GitHub rejects a second open PR on the same branch).'
+        )
+    else:
+        pr_line = (
+            'No open PR is on this branch yet — a prior attempt pushed '
+            'the branch but never got as far as `gh pr create`. You '
+            'MAY open the PR yourself when the work is ready; do NOT '
+            'first re-do the pushed commits.'
+        )
+    return (
+        '⚠ **RESUME MODE — this is a retry pod for an initiative whose '
+        f'earlier pod pushed work to remote branch `{branch}`.**\n\n'
+        f'The harness has already run `git fetch origin {branch}` + '
+        f'`git checkout -B {branch} origin/{branch}` before invoking '
+        "you, so your local working tree is on the prior attempt's "
+        'HEAD. Do NOT re-create the branch from `'
+        f'{base}` or attempt a fresh checkout.\n\n'
+        f'{pr_line}\n\n'
+        'Before you make any new changes, inspect the current state:\n'
+        '  * `git log --oneline origin/' + base + '..HEAD` to see what '
+        'commits the prior attempt already pushed.\n'
+        '  * `git status` / `git diff` to confirm no uncommitted work '
+        'is present.\n\n'
+        'Then continue the initiative loop from wherever the prior '
+        'attempt left off — likely at the "watch the gate + iterate '
+        'on failures" step, since the branch + PR (if any) are already '
+        'in place. Only make NEW commits if the existing work is '
+        "incomplete for the initiative's goal. This preamble is a "
+        'one-shot signal from the harness; the standard loop in the '
+        'system prompt otherwise applies unchanged.'
+    )
+
+
 async def run_initiative(
     initiative_path: Path,
     *,
@@ -544,6 +801,69 @@ async def run_initiative(
         add_dirs=[str(cwd)],
     )
 
+    # Reliability part 3 — resume-on-retry. When the agent Job pod dies
+    # and K8s spawns a retry, the retry pod would otherwise restart the
+    # initiative from scratch: fresh clone (done above), fresh branch,
+    # redo every commit, potentially open a duplicate PR. We detect the
+    # "prior attempt already pushed" state by querying GitHub for the
+    # branch + open PR, and if either fires we ``git fetch`` +
+    # ``git checkout`` the existing branch and prepend a "RESUME MODE"
+    # preamble to the user prompt so the LLM knows to continue from the
+    # pushed state instead of redoing the work.
+    #
+    # Safety: any failure — detection error, missing GH_TOKEN, fetch
+    # timeout, checkout non-zero — flips us back to fresh-start (the
+    # pre-fix baseline). We don't hard-fail the run on resume issues
+    # because the system-prompt loop can recover from a fresh-start
+    # against an already-existing remote branch anyway (its step 1
+    # handles "checkout existing branch and pull").
+    resume_context = _detect_resume_context(
+        qualified_repo=primary.qualified_repo,
+        branch=primary.branch,
+    )
+    resume_active = False
+    if resume_context.is_resume:
+        click.echo(
+            click.style(
+                f'→ resume detected: '
+                f'branch_on_remote={resume_context.branch_exists_on_remote}, '
+                f'pr={resume_context.pr_number}',
+                fg='cyan',
+            ),
+            err=True,
+        )
+        if resume_context.branch_exists_on_remote:
+            fetch_ok = _fetch_and_checkout_existing(cwd=cwd, branch=primary.branch)
+            if fetch_ok:
+                resume_active = True
+                # Arm the preStop hook immediately: the PR number hint
+                # file is normally written when ``_maybe_emit_pr_open``
+                # fires mid-loop, but on a resume we already know the
+                # PR number BEFORE the SDK loop starts. A retry pod
+                # cancelled early (before the LLM re-observes the PR)
+                # would otherwise not fire the crash sticky.
+                if resume_context.pr_number is not None:
+                    _write_pr_number_hint(resume_context.pr_number)
+            else:
+                click.echo(
+                    click.style(
+                        '  resume fetch/checkout failed — falling back to fresh-start behaviour',
+                        fg='yellow',
+                    ),
+                    err=True,
+                )
+        else:
+            # Only signal was the PR existing but no branch on remote —
+            # that's a shape we don't expect (an open PR requires a
+            # branch), so treat it as a detection blip and fall back.
+            click.echo(
+                click.style(
+                    '  resume signal fired without branch-on-remote — skipping fetch, falling back to fresh-start',
+                    fg='yellow',
+                ),
+                err=True,
+            )
+
     # v6p0.5 step 2 — when the PR watcher re-spawned this run with prior-
     # attempt feedback, prepend the structured failure context BEFORE the
     # standard "Run this initiative end-to-end..." instruction. The order
@@ -560,10 +880,30 @@ async def run_initiative(
         f'Begin by checking what state the branch is in (`git status`, `git branch --show-current`), '
         f'then proceed through the loop in your system prompt.'
     )
-    if feedback_block:
-        user_prompt = feedback_block + '\n\n---\n\n' + base_prompt
+    # Resume-on-retry — prepend the RESUME MODE block ahead of both the
+    # respawn-feedback block (if any) and the base prompt. Order: resume
+    # signal first (tells the LLM the working tree is on prior HEAD),
+    # then per-attempt feedback (tells it what specifically failed in
+    # the last cycle), then the standard loop kickoff. Empirically the
+    # LLM prioritises the earliest-placed instructions when signals
+    # conflict, so anchoring the physical-state message first prevents
+    # the "start fresh" default from re-emerging.
+    if resume_active:
+        resume_preamble = _build_resume_preamble(
+            branch=primary.branch,
+            base=primary.base,
+            pr_number=resume_context.pr_number,
+        )
     else:
-        user_prompt = base_prompt
+        resume_preamble = ''
+
+    prompt_parts: list[str] = []
+    if resume_preamble:
+        prompt_parts.append(resume_preamble)
+    if feedback_block:
+        prompt_parts.append(feedback_block)
+    prompt_parts.append(base_prompt)
+    user_prompt = '\n\n---\n\n'.join(prompt_parts)
 
     click.echo(click.style(f'→ initiative: {initiative.name}', fg='green', bold=True), err=True)
     click.echo(click.style(f'  repo: {primary.qualified_repo}  branch: {primary.branch}', fg='green'), err=True)
@@ -648,7 +988,26 @@ async def run_initiative(
     # exception mid-loop, etc.). `pr_emitted` guards against re-emitting on
     # later tool calls that also surface the URL.
     pr_url_pattern = _build_pr_url_pattern(primary.qualified_repo)
-    pr_emitted: int | None = None
+    # Reliability part 3 — resume-on-retry seed. When this run is a retry
+    # pod that discovered an already-open PR before the SDK loop started,
+    # seed ``pr_emitted`` with that number so:
+    #   * The exit-code normalisation below (downgrades 1/2 → 0 when a PR
+    #     was opened during this run) also fires on retry pods that
+    #     re-crash — substantive work already shipped on the earlier
+    #     attempt, so a K8s retry is still wasteful.
+    #   * The reconciler's log-parse path sees the same `--- pr_open`
+    #     marker as a fresh run would emit.
+    # The mid-loop watcher's `if pr_emitted is not None` guard makes this
+    # seed safe against double-emission from a later tool result.
+    pr_emitted: int | None = resume_context.pr_number if resume_active else None
+    if pr_emitted is not None:
+        click.echo(
+            click.style(
+                f'\n--- pr_open pr={pr_emitted} repo={primary.qualified_repo} (from resume detection)',
+                fg='yellow',
+            ),
+            err=True,
+        )
 
     def _maybe_emit_pr_open(block: object) -> int | None:
         # The watcher only fires on ToolResultBlock — that's where `gh pr create`
