@@ -142,14 +142,30 @@ def load_settings_from_env(env: dict[str, str] | None = None) -> AuthSettings:
     ``env`` is exposed for tests (so they can construct settings without
     monkeypatching ``os.environ``); defaults to the live process env.
 
-    Missing issuer or audience is tolerated when ``required=false`` (dev /
-    preview) and surfaces empty strings — the middleware uses those to
-    decide whether to attempt validation at all.
+    Auth-hardening C1 (2026-07): the default for ``LEARTECH_AUTH_REQUIRED``
+    is now ``true`` — the agent boots FAIL-CLOSED. Every cluster (including
+    previews) inherits the chart's issuer + audience defaults so the pod
+    starts 1/1 with real bearer validation. Setting
+    ``LEARTECH_AUTH_REQUIRED=false`` explicitly is still supported for
+    local/dev/CI runs (the test suite's ``conftest.py`` does exactly that);
+    but the env var must be an explicit opt-out — a MISSING env var means
+    "auth on".
+
+    Missing issuer or audience is a startup-time RuntimeError whenever
+    ``required=true`` (implicitly or explicitly). This is deliberate —
+    silent unauthenticated boot was the pre-C1 footgun this initiative
+    closes. Even in optional mode, the raise never fires; the middleware
+    just refuses to validate incoming tokens.
     """
     src = env if env is not None else dict(os.environ)
     issuer = src.get(AUTH_ISSUER_ENV, '').strip()
     audience = src.get(AUTH_AUDIENCE_ENV, '').strip()
-    required = _parse_bool(src.get(AUTH_REQUIRED_ENV))
+    # Auth-hardening C1: default to fail-closed (required=true). An absent
+    # env var means "auth on"; an explicit LEARTECH_AUTH_REQUIRED=false is
+    # the ONLY opt-out. This is symmetric with the orch's C1 flip so both
+    # services boot the same way — no more "orch enforces, agent silently
+    # accepts anonymous" asymmetry.
+    required = _parse_bool(src.get(AUTH_REQUIRED_ENV, 'true'))
     required_scopes = frozenset(src.get(AUTH_REQUIRED_SCOPES_ENV, '').replace(',', ' ').split())
     tenant_claim = src.get(AUTH_TENANT_CLAIM_ENV, DEFAULT_TENANT_CLAIM).strip() or DEFAULT_TENANT_CLAIM
     system_tenant_id = src.get(AUTH_SYSTEM_TENANT_ENV, '').strip()
@@ -168,8 +184,12 @@ def load_settings_from_env(env: dict[str, str] | None = None) -> AuthSettings:
 
     if required and (not issuer or not audience):
         raise RuntimeError(
-            f'auth: {AUTH_REQUIRED_ENV}=true but {AUTH_ISSUER_ENV}/{AUTH_AUDIENCE_ENV} are not set. '
-            'Refusing to start; either provide the issuer/audience or flip required to false.'
+            f'auth: {AUTH_REQUIRED_ENV} defaults to true (fail-closed) but '
+            f'{AUTH_ISSUER_ENV}/{AUTH_AUDIENCE_ENV} are not set. Refusing to start. '
+            f'Either (a) set both env vars from the chart (production/staging/preview '
+            f'all inherit chart defaults so this is the fix on real clusters), or '
+            f'(b) opt out explicitly with {AUTH_REQUIRED_ENV}=false (local/dev only — '
+            f'never production).'
         )
 
     return AuthSettings(
@@ -493,3 +513,118 @@ def get_current_tenant_id(request: Request) -> str | None:
 def get_current_user(request: Request) -> AuthenticatedUser | None:
     """Return the :class:`AuthenticatedUser` attached by the middleware, or None."""
     return cast(AuthenticatedUser | None, getattr(request.state, 'user', None))
+
+
+# ─── Per-user vs service-to-service (s2s) route split ────────────────────────
+#
+# Auth-hardening C1 (2026-07). Some endpoints are ONLY ever called by another
+# service holding an s2s bearer (orch → agent's `POST /initiatives`, ring-2/3
+# writers → `POST /lessons`), and some are ONLY ever called by a human
+# operator/dashboard (browsers on `GET /initiatives/…` for the timeline
+# view, `POST /mcps` triggered by a human operator). Marking endpoints
+# explicitly closes the substitution attack surface: a compromised user
+# session can't invoke an s2s-only fire path, and a compromised s2s token
+# can't drive human-only administrative changes.
+#
+# Distinguishing signal — pragmatic + config-driven:
+#
+#   * S2S tokens carry the ``leartechapi.internal_services`` scope by
+#     convention (Hydra client-credentials grant). This is the same signal
+#     the existing config-driven :meth:`_require_scope` gate uses for
+#     ``LEARTECH_AUTH_REQUIRED_SCOPES``. C1 formalises it: any token that
+#     carries this scope is treated as an s2s caller.
+#
+#   * User tokens do NOT carry that scope; they carry per-user identity
+#     (``sub``, ``ext.tenant_id``, sometimes ``email``/``roles``) from
+#     the Hydra authorization-code / login flow.
+#
+# The scope name is a CONFIG value (``AUTH_S2S_SCOPE_ENV``) so a future
+# rename (or a partner-tenant callout with a different scope value)
+# doesn't require a code change. Missing env → the well-known default,
+# same string the orch's C1 defaults to.
+AUTH_S2S_SCOPE_ENV = 'LEARTECH_AUTH_S2S_SCOPE'
+DEFAULT_S2S_SCOPE = 'leartechapi.internal_services'
+
+
+def _resolve_s2s_scope() -> str:
+    """Return the s2s scope value used to classify callers.
+
+    Read once per call (not cached) so tests can adjust the env without
+    monkeypatching a module-level constant. The value is a single string
+    (not a set) — the split is binary at this layer; the ``required_scopes``
+    config (any-of set) is a separate concept.
+    """
+    return os.environ.get(AUTH_S2S_SCOPE_ENV, DEFAULT_S2S_SCOPE).strip() or DEFAULT_S2S_SCOPE
+
+
+def _caller_has_s2s_scope(claims: dict[str, Any]) -> bool:
+    return _resolve_s2s_scope() in _token_scopes(claims)
+
+
+def require_service_caller(request: Request) -> AuthenticatedUser | None:
+    """FastAPI dependency: 403 unless the caller presented an s2s bearer.
+
+    Applied to endpoints that only ever fire from another leartech service
+    (orch → agent, forensic-agent → agent, etc.). A "bare user token"
+    (audience+issuer both valid but WITHOUT the ``leartechapi.internal_services``
+    scope) is rejected with 403.
+
+    Interaction with the middleware's required-mode:
+
+    * required=true (production/staging/preview under C1): the middleware
+      has already 401'd on missing/invalid bearer. If we get here, a valid
+      user is on ``request.state`` and the scope check fires normally.
+    * required=false (local dev, CI/pytest via ``tests/conftest.py``): the
+      middleware lets anonymous requests through with ``request.state.user
+      = None``. We treat that as "no split to enforce" — pass through and
+      let the handler run. This preserves the pre-C1 test-suite shape
+      (TestClient(app) without bearer still hits every endpoint) while
+      making the split fully active in every cluster the chart deploys to.
+
+    Returns the :class:`AuthenticatedUser` for handlers that want the
+    subject / claims after the check, or None when no bearer is present
+    in optional-mode.
+    """
+    user = get_current_user(request)
+    if user is None:
+        # Optional-mode passthrough. In required-mode the middleware has
+        # already 401'd; we never reach here without a user.
+        return None
+    if not _caller_has_s2s_scope(user.claims):
+        scope = _resolve_s2s_scope()
+        raise HTTPException(
+            status_code=403,
+            detail=f'auth: service-to-service endpoint requires scope {scope!r}',
+        )
+    return user
+
+
+def require_user_caller(request: Request) -> AuthenticatedUser | None:
+    """FastAPI dependency: 403 unless the caller presented a user bearer.
+
+    Applied to endpoints that only ever fire from a human operator's
+    session (the dashboard). An s2s bearer with the
+    ``leartechapi.internal_services`` scope is rejected with 403 — a
+    compromised service token can't drive a human-only administrative
+    change.
+
+    Same required-vs-optional interaction as :func:`require_service_caller`:
+    optional-mode + no bearer passes through so the pre-C1 test-suite
+    shape still works; required-mode has the middleware's 401 in front.
+
+    Returns the :class:`AuthenticatedUser` for handlers that want the
+    subject / claims after the check, or None when no bearer is present
+    in optional-mode.
+    """
+    user = get_current_user(request)
+    if user is None:
+        return None
+    if _caller_has_s2s_scope(user.claims):
+        scope = _resolve_s2s_scope()
+        raise HTTPException(
+            status_code=403,
+            detail=(
+                f'auth: user endpoint refuses service-to-service bearer (token carries {scope!r}); use a user session'
+            ),
+        )
+    return user

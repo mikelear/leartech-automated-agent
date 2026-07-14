@@ -59,8 +59,12 @@ async def test_agentrun_body_satisfies_crd_schema(monkeypatch: pytest.MonkeyPatc
     body = await _capture_body(
         monkeypatch,
         lambda: arc.create_agent_run(
-            run_id='r1', namespace='ns', agent_type='leartech-agent-py',
-            repo='mikelear/x', inputs={'name': 'i', 'goal': 'g'}, tenant_id='t1',
+            run_id='r1',
+            namespace='ns',
+            agent_type='leartech-agent-py',
+            repo='mikelear/x',
+            inputs={'name': 'i', 'goal': 'g'},
+            tenant_id='t1',
         ),
     )
     jsonschema.validate(instance=body['spec'], schema=_spec_schema('agent.leartech.io_agentruns.yaml'))

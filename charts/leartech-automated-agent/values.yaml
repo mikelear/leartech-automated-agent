@@ -17,27 +17,48 @@ service:
 # at `gate/agent/main.py::DEFAULT_MODEL`.
 agent:
   model: ""
-  # v7-P1 step 2 — OIDC bearer validation. Off by default so existing dev /
-  # preview clusters continue to accept anonymous traffic. Flip
-  # `auth.enabled: true` AND `auth.required: true` via GitOps per cluster
-  # (configs/leartech-automated-agent.yaml) once the Hydra OAuth client +
-  # audience are provisioned. Issuer is shared with the orchestrator (same
-  # Hydra). Audience MUST be the agent's own ingress URL — using the
-  # orchestrator's audience would let an Orch-issued token reach the agent
-  # and vice-versa. Per-cluster issuer / audience values are set by the
-  # cluster's GitOps overlay; the chart does NOT carry hardcoded cluster
-  # URLs (those belong in env-specific values files outside this repo).
+  # Auth-hardening C1 (2026-07) — OIDC bearer validation is now REQUIRED by
+  # default so every cluster (staging + previews) boots fail-closed. This is
+  # the symmetric counterpart of the orchestrator's C1 flip: both services
+  # now enforce audience + issuer + signature on every non-bypass request,
+  # and refuse to start when issuer/audience are unset. See app/auth/middleware.py
+  # for the load_settings_from_env raise contract.
+  #
+  # Issuer is shared with the orchestrator (same Hydra staging). Audience is
+  # the well-known short name ``automated-agent`` — the orchestrator's C0
+  # already mints s2s tokens with ``aud=automated-agent``, so the audience
+  # value pinned here is the receiving-end match. NEVER change this to the
+  # orchestrator's audience — that would let an orch-issued token be replayed
+  # at the agent (the exact substitution attack the audience field exists
+  # to prevent).
+  #
+  # Preview namespaces (jx-<repo>-pr-<N>) inherit these chart defaults so
+  # their pod starts 1/1 with real auth wired. Previews only serve /healthz
+  # + /readyz (bypass paths) during the smoke phase, so the middleware never
+  # actually reaches Hydra — but LEARTECH_AUTH_REQUIRED=true still fires
+  # the fail-closed guard, which is what proves the chart config is
+  # complete before merge.
   auth:
     # Master toggle — when false, no LEARTECH_AUTH_* env vars are rendered
-    # at all, regardless of the other fields' values. This is the safe
-    # "feature off" switch: the middleware loads with empty settings and
-    # behaves as if required=false even if a stray issuer/audience were
-    # left set in a values overlay. Flip to true on clusters that have
-    # provisioned the Hydra OAuth client.
-    enabled: false
-    required: false
-    issuer: ""
-    audience: ""
+    # at all (the middleware then boots in optional mode via env-defaults).
+    # Kept as an escape hatch for a hypothetical dev cluster that wants
+    # anonymous traffic, BUT: leaving this on (the default) is what
+    # implements C1's fail-closed contract.
+    enabled: true
+    # required=true is the point of C1. The env var LEARTECH_AUTH_REQUIRED
+    # defaults to "true" in load_settings_from_env now, so even a cluster
+    # that omits this field still fails closed. Keeping the field explicit
+    # here documents intent + gives GitOps overlays a clean anchor.
+    required: true
+    # Hydra staging (shared with orchestrator + auth-service). Per-cluster
+    # GitOps overlays MAY override to a per-cluster Hydra once we split;
+    # the chart default targets the shared staging Hydra so previews boot
+    # against a real, resolvable issuer.
+    issuer: "https://hydra-jx-staging.jx.leartech.com"
+    # Well-known short-name audience the orch's C0 already mints for.
+    # DO NOT change to a per-cluster ingress URL — every cluster receiving
+    # a token expects this exact string.
+    audience: "automated-agent"
     # Claim name that carries the tenant_id in tokens minted by Hydra. The
     # leartech umbrella convention is `tenant_id` (top-level); override here
     # if a different Hydra config emits a nested or differently-named claim.

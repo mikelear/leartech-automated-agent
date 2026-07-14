@@ -38,7 +38,10 @@ invalid tokens. Production clusters MUST set ``LEARTECH_AUTH_REQUIRED=true``.
 from __future__ import annotations
 
 from app.auth.middleware import (
+    AUTH_S2S_SCOPE_ENV,
+    DEFAULT_S2S_SCOPE,
     TENANT_RELAY_HEADER,
+    AuthenticatedUser,
     AuthenticationMiddleware,
     AuthSettings,
     JWKSCache,
@@ -46,15 +49,22 @@ from app.auth.middleware import (
     get_current_user,
     install,
     load_settings_from_env,
+    require_service_caller,
+    require_user_caller,
 )
 
 __all__ = [
+    'AUTH_S2S_SCOPE_ENV',
+    'DEFAULT_S2S_SCOPE',
     'TENANT_RELAY_HEADER',
     'AuthSettings',
+    'AuthenticatedUser',
     'AuthenticationMiddleware',
     'JWKSCache',
     'get_current_tenant_id',
     'get_current_user',
     'install',
     'load_settings_from_env',
+    'require_service_caller',
+    'require_user_caller',
 ]

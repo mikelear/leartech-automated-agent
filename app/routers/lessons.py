@@ -19,9 +19,10 @@ from datetime import datetime
 from pathlib import Path
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from app.auth import AuthenticatedUser, require_service_caller
 from gate.agent.lessons.loader import CATALOG_DIR, Lesson, load_all_lessons
 
 router = APIRouter()
@@ -85,7 +86,15 @@ async def get_lesson(lesson_id: str) -> Lesson:
 
 
 @router.post('', response_model=LessonSummary, status_code=201)
-async def capture_lesson(lesson: Lesson) -> LessonSummary:
+async def capture_lesson(
+    lesson: Lesson,
+    # Auth-hardening C1 — `POST /lessons` is the ring-2/ring-3 feeder path
+    # (qa-arch, forensic agent, manual-review webhooks). Every writer is a
+    # service running under a client-credentials token; no dashboard/user
+    # session should be able to inject arbitrary lessons into the catalog
+    # (that would let a compromised session shape future agent behaviour).
+    _caller: AuthenticatedUser | None = Depends(require_service_caller),
+) -> LessonSummary:
     """Capture a new lesson by writing it to the catalog directory.
 
     Used by qa-arch (rings 2 + 3) and manual-review webhooks to post findings
