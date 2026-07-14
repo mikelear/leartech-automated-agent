@@ -25,11 +25,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, Body, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field, model_validator
 
-from app.auth import get_current_tenant_id
+from app.auth import AuthenticatedUser, get_current_tenant_id, require_service_caller
 from app.db import is_db_enabled
 from app.db import session as db_session
 from app.db.agent_run_commands import (
@@ -525,7 +525,18 @@ async def _run_self_retrospect(initiative_id: str) -> None:
 
 
 @router.post('', response_model=InitiativeRecord, status_code=202)
-async def start_initiative(request: StartInitiativeRequest, http_request: Request) -> InitiativeRecord:
+async def start_initiative(
+    request: StartInitiativeRequest,
+    http_request: Request,
+    # Auth-hardening C1 — `POST /initiatives` is the primary s2s path
+    # (orchestrator → agent). A user session must NOT be able to drive
+    # the fire path directly; that would let a compromised dashboard
+    # cookie spawn arbitrary K8s Jobs. `require_service_caller` enforces
+    # the ``leartechapi.internal_services`` scope; a token minted for a
+    # human session (audience-bound + issuer-bound but without the s2s
+    # scope) is rejected with 403 before the handler body runs.
+    _caller: AuthenticatedUser | None = Depends(require_service_caller),
+) -> InitiativeRecord:
     """Validate the initiative YAML and spawn a K8s Job to execute it.
 
     Phase F: runtime is always 'job' — the run lives in its own K8s Job

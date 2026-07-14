@@ -53,22 +53,31 @@ cleanup() {
 trap cleanup EXIT
 
 echo "→ starting uvicorn on :${PORT}"
-uv run uvicorn app.main:app --host 127.0.0.1 --port "${PORT}" --log-level warning &
+# Auth-hardening C1: the app now boots fail-closed by default —
+# LEARTECH_AUTH_REQUIRED defaults to true. Local dev/CI has no Hydra to
+# validate against, so opt out explicitly. The dedicated auth-mode smoke
+# block near the end of this script starts a SECOND uvicorn with
+# required=true to exercise the fail-closed + bypass + 401 contract.
+env LEARTECH_AUTH_REQUIRED=false \
+  uv run uvicorn app.main:app --host 127.0.0.1 --port "${PORT}" --log-level warning &
 server_pid=$!
 
-# Poll /health/live until the server starts answering, up to ~15 s.
+# Poll /health until the server starts answering, up to ~15 s. The router
+# registers /health + /healthz + /readyz (see app/routers/health.py); the
+# legacy /health/live convention some scripts still reference isn't a
+# real route.
 for _ in $(seq 1 30); do
-  if curl -sf "${BASE_URL}/health/live" >/dev/null; then
+  if curl -sf "${BASE_URL}/health" >/dev/null; then
     break
   fi
   sleep 0.5
 done
 
-if ! curl -sf "${BASE_URL}/health/live" >/dev/null; then
-  echo "✗ server never reached /health/live; aborting" >&2
+if ! curl -sf "${BASE_URL}/health" >/dev/null; then
+  echo "✗ server never reached /health; aborting" >&2
   exit 1
 fi
-echo "✓ /health/live ready"
+echo "✓ /health ready"
 
 failures=0
 assert_status() {
@@ -148,7 +157,12 @@ assert_status 'POST /initiatives (malformed body)' 422 "${status}"
 status=$(curl -s -o /tmp/e2e-health-detail.json -w '%{http_code}' \
   "${BASE_URL}/health/detail")
 assert_status 'GET /health/detail' 200 "${status}"
-grep -q '"service": "leartech-automated-agent"' /tmp/e2e-health-detail.json \
+# FastAPI's default JSONResponse encodes without spaces after ':' — the
+# earlier expectation of `"service": "leartech-automated-agent"` (with a
+# space) missed the actual payload. Match the compact form the framework
+# emits; anything with pretty-printing (indent > 0) would still contain
+# this substring too.
+grep -q '"service":"leartech-automated-agent"' /tmp/e2e-health-detail.json \
   || { echo "✗ /health/detail: service field missing" >&2; failures=$((failures + 1)); }
 
 status=$(curl -s -o /tmp/e2e-mcps.json -w '%{http_code}' "${BASE_URL}/mcps")
@@ -900,6 +914,86 @@ if command -v uv >/dev/null 2>&1; then
 else
   echo "· uv not on PATH — skipping wheel-build smoke (CI image only)"
 fi
+
+# ── auth-hardening C1 smoke — fail-closed boot + bypass + enforcement ──
+# The main server above runs in optional-mode (LEARTECH_AUTH_REQUIRED=false)
+# so the endpoint validation tests can drive JSON without minting real
+# bearers. Auth hardening's user-facing invariant is the OPPOSITE default:
+# in required-mode, missing bearer on a non-bypass path → 401, and bypass
+# paths (/health, /healthz, /readyz, /openapi.json, /.well-known/*) still
+# reach the handler. We spawn a second uvicorn briefly to prove both.
+#
+# JWKS isn't fetched at startup — only when a bearer actually arrives — so
+# a placeholder issuer resolves without needing a live Hydra. The audience
+# is the well-known short name ``automated-agent`` that the chart's C1
+# defaults pin (and the orch's C0 already mints for).
+AUTH_PORT="${AUTH_PORT:-18081}"
+AUTH_URL="http://127.0.0.1:${AUTH_PORT}"
+echo
+echo "→ auth-hardening C1 smoke on :${AUTH_PORT}"
+
+auth_server_pid=""
+auth_cleanup() {
+  if [ -n "${auth_server_pid}" ]; then
+    kill "${auth_server_pid}" 2>/dev/null || true
+    wait "${auth_server_pid}" 2>/dev/null || true
+  fi
+}
+
+# Start a second server with required=true. The trap will still call the
+# main cleanup; append our teardown so both servers die on exit.
+env \
+  LEARTECH_AUTH_REQUIRED=true \
+  LEARTECH_AUTH_ISSUER='https://hydra-jx-staging.jx.leartech.com' \
+  LEARTECH_AUTH_AUDIENCE='automated-agent' \
+  uv run uvicorn app.main:app --host 127.0.0.1 --port "${AUTH_PORT}" --log-level warning &
+auth_server_pid=$!
+trap 'cleanup; auth_cleanup' EXIT
+
+# Poll /health (bypass path) instead of /health/live — /health/live is a
+# convention some historical scripts still reference but the actual router
+# registers /health and /healthz.
+auth_ready=0
+for _ in $(seq 1 30); do
+  if curl -sf "${AUTH_URL}/health" >/dev/null; then
+    auth_ready=1
+    break
+  fi
+  sleep 0.5
+done
+
+if [ "${auth_ready}" != "1" ]; then
+  echo "✗ auth-mode server never became ready — did fail-closed boot refuse?" >&2
+  # If load_settings_from_env raised (because issuer/audience were somehow
+  # unset), uvicorn would have exited already. Surface the pid state.
+  kill -0 "${auth_server_pid}" 2>/dev/null || echo "  (auth uvicorn pid ${auth_server_pid} exited)"
+  failures=$((failures + 1))
+else
+  # bypass path — should be 200 regardless of bearer presence
+  status=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH_URL}/health")
+  assert_status 'auth-mode: GET /health (bypass) without bearer' 200 "${status}"
+
+  status=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH_URL}/healthz")
+  assert_status 'auth-mode: GET /healthz (bypass) without bearer' 200 "${status}"
+
+  # non-bypass path — should be 401 without a bearer
+  status=$(curl -s -o /dev/null -w '%{http_code}' -X POST "${AUTH_URL}/initiatives" \
+    -H 'content-type: application/json' --data '{}')
+  assert_status 'auth-mode: POST /initiatives without bearer' 401 "${status}"
+
+  # non-bypass path — should be 401 on garbage bearer (proves the bearer
+  # actually gets validated, not just accepted as "any string")
+  status=$(curl -s -o /dev/null -w '%{http_code}' \
+    "${AUTH_URL}/mcps" -H 'Authorization: Bearer garbage')
+  assert_status 'auth-mode: GET /mcps with garbage bearer' 401 "${status}"
+
+  # non-bypass path — introspection surface must also enforce
+  status=$(curl -s -o /dev/null -w '%{http_code}' "${AUTH_URL}/health/detail")
+  assert_status 'auth-mode: GET /health/detail without bearer' 401 "${status}"
+fi
+
+auth_cleanup
+auth_server_pid=""
 
 if [ "${failures}" -gt 0 ]; then
   echo

@@ -54,6 +54,22 @@ exclude = [".lighthouse", "charts", "preview"]
 select = ["E", "F", "B", "I", "UP", "S", "N"]
 ignore = ["E501"]
 
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI's canonical idiom is ``Depends(...)`` / ``Query(...)`` etc. as
+# argument defaults — the framework interprets the "call" as a dependency
+# marker, not a live invocation. Marking them immutable-in-defaults quiets
+# the B008 false positive without disabling the rule globally (real B008
+# hits — like ``arg: list = []`` — still surface).
+extend-immutable-calls = [
+    "fastapi.Body",
+    "fastapi.Depends",
+    "fastapi.File",
+    "fastapi.Form",
+    "fastapi.Header",
+    "fastapi.Path",
+    "fastapi.Query",
+]
+
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S603", "S607"]
 "gate/criteria/**/*" = ["S101"]

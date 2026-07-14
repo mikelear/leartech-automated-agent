@@ -32,7 +32,9 @@ from app.auth.middleware import (
     AUTH_ISSUER_ENV,
     AUTH_JWKS_TTL_ENV,
     AUTH_REQUIRED_ENV,
+    AUTH_S2S_SCOPE_ENV,
     AUTH_TENANT_CLAIM_ENV,
+    DEFAULT_S2S_SCOPE,
     AuthenticationMiddleware,
     AuthSettings,
     JWKSCache,
@@ -40,6 +42,8 @@ from app.auth.middleware import (
     get_current_tenant_id,
     get_current_user,
     load_settings_from_env,
+    require_service_caller,
+    require_user_caller,
 )
 
 ISSUER = 'https://hydra.staging.leartech.com'
@@ -164,8 +168,24 @@ def _optional_settings() -> AuthSettings:
 # ─── load_settings_from_env ──────────────────────────────────────────────────
 
 
-def test_load_settings_from_env_returns_defaults_when_unset() -> None:
-    settings = load_settings_from_env(env={})
+def test_load_settings_from_env_defaults_to_required_and_raises_without_issuer_audience() -> None:
+    """Auth-hardening C1: empty env → required=true (fail-closed) → raise.
+
+    An operator who deploys the chart without issuer/audience configured
+    gets a startup RuntimeError instead of a silently-unauthenticated pod.
+    """
+    with pytest.raises(RuntimeError, match=AUTH_ISSUER_ENV):
+        load_settings_from_env(env={})
+
+
+def test_load_settings_from_env_explicit_disabled_returns_defaults() -> None:
+    """Explicit opt-out (LEARTECH_AUTH_REQUIRED=false) keeps the pre-C1 shape.
+
+    Local/dev/CI runs still work: middleware boots in optional mode with
+    empty issuer/audience — same behaviour the test suite's conftest.py
+    relies on to keep TestClient(app) constructions passing.
+    """
+    settings = load_settings_from_env(env={AUTH_REQUIRED_ENV: 'false'})
     assert settings.required is False
     assert settings.issuer == ''
     assert settings.audience == ''
@@ -200,13 +220,23 @@ def test_load_settings_from_env_required_without_audience_raises() -> None:
         load_settings_from_env(env={AUTH_REQUIRED_ENV: 'true', AUTH_ISSUER_ENV: ISSUER})
 
 
+def test_load_settings_from_env_default_required_without_issuer_raises() -> None:
+    """Even without an explicit LEARTECH_AUTH_REQUIRED, missing issuer/audience raises.
+
+    Auth-hardening C1 guardrail: the default is fail-closed. Only an explicit
+    opt-out flips it to false.
+    """
+    with pytest.raises(RuntimeError, match=AUTH_ISSUER_ENV):
+        load_settings_from_env(env={AUTH_AUDIENCE_ENV: AGENT_AUDIENCE})
+
+
 def test_load_settings_from_env_jwks_url_uses_issuer_well_known() -> None:
-    settings = load_settings_from_env(env={AUTH_ISSUER_ENV: 'https://hydra/'})
+    settings = load_settings_from_env(env={AUTH_REQUIRED_ENV: 'false', AUTH_ISSUER_ENV: 'https://hydra/'})
     assert settings.jwks_url == 'https://hydra/.well-known/jwks.json'
 
 
 def test_load_settings_from_env_invalid_ttl_falls_back_to_default() -> None:
-    settings = load_settings_from_env(env={AUTH_JWKS_TTL_ENV: 'banana'})
+    settings = load_settings_from_env(env={AUTH_REQUIRED_ENV: 'false', AUTH_JWKS_TTL_ENV: 'banana'})
     assert settings.jwks_ttl_seconds == 300
 
 
@@ -778,3 +808,186 @@ def test_multiple_required_scopes_any_of(rsa_keypair: tuple[str, dict[str, Any]]
     with TestClient(app) as client:
         assert client.get('/initiatives', headers={'Authorization': f'Bearer {one}'}).status_code == 200
         assert client.get('/initiatives', headers={'Authorization': f'Bearer {none_}'}).status_code == 403
+
+
+# ─── Per-user vs s2s route split (auth-hardening C1) ─────────────────────────
+#
+# The middleware validates that ANY caller is authenticated (issuer + audience
+# + signature + optional required-scopes any-of gate). The split adds a
+# per-endpoint check: some routes are s2s-only (reject bare user tokens),
+# some are user-only (reject s2s tokens). Both use the presence of the
+# ``leartechapi.internal_services`` scope as the classification signal.
+
+
+def _build_split_app(settings: AuthSettings, jwks_cache: JWKSCache | None = None) -> tuple[FastAPI, JWKSCache]:
+    """FastAPI app with three routes exercising the C1 split:
+
+    - ``/initiatives``       — s2s-only (orch → agent shape)
+    - ``/lessons``           — s2s-only (ring-2/3 writers)
+    - ``/mcps``              — user-only (dashboard operators)
+    - ``/initiatives/probe`` — unmarked (accepts either — proves opting-in
+                               is required for enforcement)
+    """
+    from fastapi import Depends as _Depends  # local import to keep the top block tidy
+
+    app = FastAPI()
+    cache = jwks_cache if jwks_cache is not None else JWKSCache(settings)
+    app.add_middleware(AuthenticationMiddleware, settings=settings, jwks_cache=cache)
+
+    @app.get('/healthz')
+    async def healthz() -> dict[str, str]:  # bypass path
+        return {'status': 'ok'}
+
+    @app.post('/initiatives')
+    async def fire(user: Any = _Depends(require_service_caller)) -> dict[str, str | None]:
+        # Optional-mode passthrough is signalled by user=None; handler
+        # is defensive so the test app doesn't 500 in that leg.
+        return {'sub': user.subject if user is not None else None}
+
+    @app.post('/lessons')
+    async def lessons(user: Any = _Depends(require_service_caller)) -> dict[str, str | None]:
+        return {'sub': user.subject if user is not None else None}
+
+    @app.post('/mcps')
+    async def register_mcp(user: Any = _Depends(require_user_caller)) -> dict[str, str | None]:
+        return {'sub': user.subject if user is not None else None}
+
+    @app.get('/initiatives/probe')
+    async def probe(request: Request) -> dict[str, Any]:
+        return {'subject': (u.subject if (u := get_current_user(request)) else None)}
+
+    return app, cache
+
+
+def test_s2s_route_accepts_service_token(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """A token carrying the ``leartechapi.internal_services`` scope passes
+    ``require_service_caller``.
+    """
+    private_pem, public_jwk = rsa_keypair
+    settings = _required_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_split_app(settings, cache)
+    token = _mint_token(private_pem, extra_claims={'scope': DEFAULT_S2S_SCOPE})
+
+    with TestClient(app) as client:
+        response = client.post('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 200
+    assert response.json() == {'sub': 'user-123'}
+
+
+def test_s2s_route_rejects_bare_user_token(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """A valid audience+issuer token WITHOUT the s2s scope is rejected 403
+    on s2s-only routes. This is the marquee test for C1's route split —
+    a compromised user session cannot fire the orch-only path.
+    """
+    private_pem, public_jwk = rsa_keypair
+    settings = _required_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_split_app(settings, cache)
+    token = _mint_token(private_pem)  # no scope claim
+
+    with TestClient(app) as client:
+        response = client.post('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 403
+    assert DEFAULT_S2S_SCOPE in response.json()['detail']
+
+
+def test_user_route_accepts_bare_user_token(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """A valid user token (no s2s scope) passes ``require_user_caller``."""
+    private_pem, public_jwk = rsa_keypair
+    settings = _required_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_split_app(settings, cache)
+    token = _mint_token(private_pem)  # user token — no scope
+
+    with TestClient(app) as client:
+        response = client.post('/mcps', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 200
+
+
+def test_user_route_rejects_service_token(rsa_keypair: tuple[str, dict[str, Any]]) -> None:
+    """An s2s token is rejected 403 on user-only routes.
+
+    A compromised service-to-service token cannot drive human-only admin
+    surfaces (MCP catalog edits, dashboard mutations). The split is
+    bidirectional — that's what makes the marking meaningful.
+    """
+    private_pem, public_jwk = rsa_keypair
+    settings = _required_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_split_app(settings, cache)
+    token = _mint_token(private_pem, extra_claims={'scope': DEFAULT_S2S_SCOPE})
+
+    with TestClient(app) as client:
+        response = client.post('/mcps', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 403
+    assert DEFAULT_S2S_SCOPE in response.json()['detail']
+
+
+def test_split_dependency_uses_configured_scope_env(
+    rsa_keypair: tuple[str, dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cluster can rename the s2s scope via env; the split honours it."""
+    private_pem, public_jwk = rsa_keypair
+    settings = _required_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_split_app(settings, cache)
+    monkeypatch.setenv(AUTH_S2S_SCOPE_ENV, 'partner.tenant.services')
+    good = _mint_token(private_pem, extra_claims={'scope': 'partner.tenant.services'})
+    bad = _mint_token(private_pem, extra_claims={'scope': DEFAULT_S2S_SCOPE})
+
+    with TestClient(app) as client:
+        assert client.post('/initiatives', headers={'Authorization': f'Bearer {good}'}).status_code == 200
+        # A token carrying only the OLD scope no longer counts as s2s
+        assert client.post('/initiatives', headers={'Authorization': f'Bearer {bad}'}).status_code == 403
+
+
+def test_split_dependency_passthrough_in_optional_mode() -> None:
+    """In optional-mode + no bearer, the split dependencies are passthroughs.
+
+    This preserves the pre-C1 test-suite shape (``TestClient(app)`` without
+    minting bearers can still exercise every endpoint) while making the
+    split fully enforce in every cluster the chart deploys to (all of
+    which run required=true under C1).
+
+    The alternative — enforcing 401 in optional-mode too — would break
+    every existing ``TestClient(app)`` construction across the suite,
+    which is a much larger surface than the marginal safety of "guards
+    against a misconfigured cluster that runs required=false in prod".
+    Production runs required=true; if that invariant breaks, other
+    problems come first.
+    """
+    settings = _optional_settings()
+    cache = _StubJWKSCache(settings, [])
+    app, _ = _build_split_app(settings, cache)
+
+    with TestClient(app) as client:
+        response = client.post('/initiatives')
+
+    assert response.status_code == 200
+
+
+def test_orch_audience_still_rejected_on_split_routes(
+    rsa_keypair: tuple[str, dict[str, Any]],
+) -> None:
+    """A token minted for the orchestrator (aud=orch), even carrying the s2s
+    scope, MUST NOT pass the fire route: the audience check fires first.
+
+    This is the "audience-bound to automated-agent" invariant — no
+    substitution of a live orch token to reach the agent.
+    """
+    private_pem, public_jwk = rsa_keypair
+    settings = _required_settings()
+    cache = _StubJWKSCache(settings, [public_jwk])
+    app, _ = _build_split_app(settings, cache)
+    token = _mint_token(private_pem, audience=ORCH_AUDIENCE, extra_claims={'scope': DEFAULT_S2S_SCOPE})
+
+    with TestClient(app) as client:
+        response = client.post('/initiatives', headers={'Authorization': f'Bearer {token}'})
+
+    assert response.status_code == 401  # audience rejected before the split dependency runs

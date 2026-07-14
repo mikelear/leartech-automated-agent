@@ -18,9 +18,10 @@ import uuid
 from typing import Any, Literal
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from app.auth import AuthenticatedUser, require_user_caller
 from gate.agent.mcp_catalog import CATALOG_PATH, load_catalog
 from gate.tools.pr_back import open_yaml_change_pr
 
@@ -89,7 +90,15 @@ class McpRegisterRequest(BaseModel):
 
 
 @router.post('/mcps', response_model=McpAdminResponse, status_code=201)
-async def register_mcp(req: McpRegisterRequest) -> McpAdminResponse:
+async def register_mcp(
+    req: McpRegisterRequest,
+    # Auth-hardening C1 — MCP catalog admin is a human-operator action
+    # (opens a GitOps PR against this repo). A service-to-service token
+    # driving this path would be a privilege-escalation shape: any
+    # compromised leartech service could inject a rogue MCP endpoint into
+    # the agent's catalog. Human dashboard callers are expected here.
+    _caller: AuthenticatedUser | None = Depends(require_user_caller),
+) -> McpAdminResponse:
     """Register a new MCP server. Opens a PR with the change; does not mutate runtime state."""
     catalog = load_catalog()
     if req.name in catalog.mcp_servers:
@@ -142,7 +151,12 @@ async def register_mcp(req: McpRegisterRequest) -> McpAdminResponse:
 
 
 @router.delete('/mcps/{name}', response_model=McpAdminResponse)
-async def deregister_mcp(name: str) -> McpAdminResponse:
+async def deregister_mcp(
+    name: str,
+    # Auth-hardening C1 — mirror the reasoning on POST /mcps: MCP catalog
+    # admin is human-only. See register_mcp for the full rationale.
+    _caller: AuthenticatedUser | None = Depends(require_user_caller),
+) -> McpAdminResponse:
     """Remove an MCP server. Rejects if any role still references it — caller must detach first."""
     catalog = load_catalog()
     if name not in catalog.mcp_servers:
@@ -190,7 +204,13 @@ class McpRolesUpdate(BaseModel):
 
 
 @router.put('/mcps/{name}/roles', response_model=McpAdminResponse)
-async def update_mcp_roles(name: str, req: McpRolesUpdate) -> McpAdminResponse:
+async def update_mcp_roles(
+    name: str,
+    req: McpRolesUpdate,
+    # Auth-hardening C1 — mirror the reasoning on POST /mcps: MCP catalog
+    # admin is human-only. See register_mcp for the full rationale.
+    _caller: AuthenticatedUser | None = Depends(require_user_caller),
+) -> McpAdminResponse:
     """Grant or revoke role membership for an MCP. Opens a PR with the resulting YAML diff."""
     catalog = load_catalog()
     if name not in catalog.mcp_servers:
