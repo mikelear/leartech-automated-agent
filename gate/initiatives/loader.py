@@ -131,6 +131,20 @@ class Initiative(BaseModel):
     )
     max_iterations: int = Field(default=5, ge=1, le=20, description='Hard ceiling on agent loop iterations.')
 
+    hold: bool = Field(
+        default=False,
+        description=(
+            'When true, the agent posts `/hold` on the opened PR to require human approval '
+            'before merge; default false lets Tide auto-merge once all gates are green. '
+            'Historically the agent hardcoded an unconditional `/hold` after every `gh pr '
+            'create`, which replicated Tide (JX3 merges on green) and prevented plans from '
+            'self-completing autonomously. The default is now false — the gate suite (incl. '
+            'ai-review) IS the review, and fail-fast fixes red. Set `hold: true` on '
+            'initiatives that legitimately need human sign-off before merge (rare — the '
+            'right default is trust-the-gate).'
+        ),
+    )
+
     # v6p0.5 step 2 — feedback context from a prior failed attempt.
     #
     # The PR watcher (see ``gate/watcher/iteration_loop.py``) re-spawns

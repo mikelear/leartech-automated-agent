@@ -308,6 +308,8 @@ class _FakeInitiative:
     is_multi_repo: bool = False
     repos: list[_FakeRepo] = field(default_factory=lambda: [_FakeRepo()])
     feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
+    # Hold-as-init-option — the agent renders `/hold` posting only when true.
+    hold: bool = False
 
     @property
     def primary(self) -> _FakeRepo:

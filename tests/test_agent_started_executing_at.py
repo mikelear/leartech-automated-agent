@@ -78,6 +78,10 @@ class _FakeInitiative:
     # to inject prior-attempt feedback. Empty default means the no-op
     # branch is taken, mirroring a fresh first-attempt run.
     feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
+    # Hold-as-init-option — the agent's prompt construction reads this
+    # field to decide whether to render the `/hold` posting instruction.
+    # Default False mirrors the "let Tide auto-merge on green" shape.
+    hold: bool = False
 
     @property
     def primary(self) -> _FakeRepo:
