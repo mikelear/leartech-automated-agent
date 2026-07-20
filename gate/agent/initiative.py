@@ -13,7 +13,6 @@ import asyncio
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
 from dataclasses import dataclass, field
@@ -27,9 +26,7 @@ from claude_agent_sdk.types import (
     ResultMessage,
     TextBlock,
     ThinkingBlock,
-    ToolResultBlock,
     ToolUseBlock,
-    UserMessage,
 )
 
 from app.db import dispose_engine as _dispose_engine
@@ -170,52 +167,6 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
         return resolved
     except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
         return None
-
-
-def _build_pr_url_pattern(qualified_repo: str) -> re.Pattern[str]:
-    """Compile a regex matching `https://github.com/<repo>/pull/<N>` for this repo.
-
-    Scoped to the configured ``qualified_repo`` so the early-emit path doesn't
-    pick up unrelated PR URLs the agent might mention in prose (e.g. citing a
-    prior PR for context).
-    """
-    return re.compile(rf'https://github\.com/{re.escape(qualified_repo)}/pull/(\d+)')
-
-
-def _extract_pr_from_tool_result(
-    block_content: str | list[dict[str, Any]] | None,
-    pr_url_pattern: re.Pattern[str],
-) -> int | None:
-    """Return the PR number from a tool-result's content if it contains a matching URL.
-
-    D.5.1.4 — used by the message-loop watcher to detect the moment the agent's
-    ``gh pr create`` (or any subsequent ``gh pr view`` / list) returns the PR URL
-    for this repo, so the harness can emit the ``--- pr_open pr=N`` marker
-    immediately. Two emit points (early marker + final summary) give the
-    reconciler's log-parse path an authoritative pr= field even when the agent
-    exits abnormally (``wait_for_terminal`` blocks past pod termination, SDK
-    exception mid-loop, etc.).
-
-    ``ToolResultBlock.content`` is typed as ``str | list[dict[str, Any]] | None``
-    in the SDK — we flatten both forms to a single text blob before searching.
-    Non-text items in the list shape (e.g. image dicts) are skipped.
-    """
-    if block_content is None:
-        return None
-    if isinstance(block_content, str):
-        text = block_content
-    else:
-        parts: list[str] = []
-        for item in block_content:
-            if isinstance(item, dict):
-                t = item.get('text')
-                if isinstance(t, str):
-                    parts.append(t)
-        text = '\n'.join(parts)
-    match = pr_url_pattern.search(text)
-    if match:
-        return int(match.group(1))
-    return None
 
 
 def _build_crash_sticky_body(
@@ -842,10 +793,10 @@ async def run_initiative(
             if fetch_ok:
                 resume_active = True
                 # Arm the preStop hook immediately: the PR number hint
-                # file is normally written when ``_maybe_emit_pr_open``
-                # fires mid-loop, but on a resume we already know the
-                # PR number BEFORE the SDK loop starts. A retry pod
-                # cancelled early (before the LLM re-observes the PR)
+                # file is normally written by ``_resolve_pr_number`` at
+                # end-of-run, but on a resume we already know the PR
+                # number BEFORE the SDK loop starts. A retry pod
+                # cancelled early (before the run resolves the PR)
                 # would otherwise not fire the crash sticky.
                 if resume_context.pr_number is not None:
                     _write_pr_number_hint(resume_context.pr_number)
@@ -986,56 +937,19 @@ async def run_initiative(
     # wins" rule means later ToolUseBlocks in a single AssistantMessage
     # overwrite earlier ones — operators see the most recent action.
     current_turn_last_tool: str | None = None
-    # D.5.1.4 — emit `--- pr_open pr=N` as soon as we see the PR URL in a tool
-    # result, in addition to the final post-loop summary. Two emit points keeps
-    # the reconciler's log-parse path informed even when the run exits before
-    # the final summary line lands (wait_for_terminal blocks past pod SIGTERM,
-    # exception mid-loop, etc.). `pr_emitted` guards against re-emitting on
-    # later tool calls that also surface the URL.
-    pr_url_pattern = _build_pr_url_pattern(primary.qualified_repo)
-    # Reliability part 3 — resume-on-retry seed. When this run is a retry
-    # pod that discovered an already-open PR before the SDK loop started,
-    # seed ``pr_emitted`` with that number so:
-    #   * The exit-code normalisation below (downgrades 1/2 → 0 when a PR
-    #     was opened during this run) also fires on retry pods that
-    #     re-crash — substantive work already shipped on the earlier
-    #     attempt, so a K8s retry is still wasteful.
-    #   * The reconciler's log-parse path sees the same `--- pr_open`
-    #     marker as a fresh run would emit.
-    # The mid-loop watcher's `if pr_emitted is not None` guard makes this
-    # seed safe against double-emission from a later tool result.
+    # Reliability — resume-on-retry seed for the exit-code normalisation below
+    # (which downgrades a 1/2 exit → 0 when a PR was opened during this run, so
+    # K8s doesn't retry a crashed pod whose substantive work already shipped).
+    # When this run is a retry pod that discovered an already-open PR on THIS
+    # branch before the SDK loop started, seed ``pr_emitted`` with that number.
+    # Source is AUTHORITATIVE + BRANCH-SCOPED ONLY: the resume-detection lookup
+    # here (a branch-scoped ``gh pr list --head``), and a branch-scoped
+    # ``_resolve_pr_number`` re-check at the exit-code path for non-resume runs.
+    # We no longer scrape PR URLs out of tool-result prose — that matched
+    # unrelated PRs the agent merely cited (the wrong-PR / targetPR mis-capture
+    # bug). The authoritative PR number for the CR report-back is resolved
+    # end-of-run via ``_resolve_pr_number`` + ``patch_pr_number``.
     pr_emitted: int | None = resume_context.pr_number if resume_active else None
-    if pr_emitted is not None:
-        click.echo(
-            click.style(
-                f'\n--- pr_open pr={pr_emitted} repo={primary.qualified_repo} (from resume detection)',
-                fg='yellow',
-            ),
-            err=True,
-        )
-
-    def _maybe_emit_pr_open(block: object) -> int | None:
-        # The watcher only fires on ToolResultBlock — that's where `gh pr create`
-        # stdout (or any MCP tool's output) surfaces the PR URL. Per the SDK
-        # protocol ToolResultBlock arrives in UserMessage.content (the role
-        # that returns tool output to the model), NOT AssistantMessage.content.
-        # Inlined here to keep `pr_emitted` and the marker emit in one place.
-        nonlocal pr_emitted
-        if pr_emitted is not None or not isinstance(block, ToolResultBlock):
-            return None
-        candidate = _extract_pr_from_tool_result(block.content, pr_url_pattern)
-        if candidate is None:
-            return None
-        pr_emitted = candidate
-        click.echo(
-            click.style(
-                f'\n--- pr_open pr={pr_emitted} repo={primary.qualified_repo}',
-                fg='yellow',
-            ),
-            err=True,
-        )
-        _write_pr_number_hint(pr_emitted)
-        return pr_emitted
 
     async def _record_first_turn_once() -> None:
         """V5 D2.2 hook — record `started_executing_at` on the first SDK message.
@@ -1166,14 +1080,6 @@ async def run_initiative(
                         )
                     elif isinstance(block, ThinkingBlock):
                         pass
-            elif isinstance(message, UserMessage):
-                # UserMessage.content carries ToolResultBlock entries returning
-                # tool output to the model. The SDK types `content` as
-                # `str | list[ContentBlock]` — string-content user turns
-                # (e.g. the initial user prompt) have no blocks to scan.
-                if isinstance(message.content, list):
-                    for block in message.content:
-                        _maybe_emit_pr_open(block)
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
                 terminate_state.last_turn_count = last_turn_count
@@ -1382,19 +1288,23 @@ async def run_initiative(
     #   2. ``not exit_via_cancel`` — operator-cancel intent is preserved
     #      (the operator deliberately triggered shutdown; surfacing that
     #      to the Job condition layer is correct).
-    #   3. ``pr_emitted is not None`` — a PR URL for THIS repo surfaced
-    #      via a ToolResultBlock during the run. That's the in-process
-    #      signal that substantive PR-opening work landed. Using the
-    #      mid-run ``pr_emitted`` flag (rather than a post-loop
-    #      ``_resolve_pr_number`` lookup) avoids a race where the agent
-    #      could open a PR mid-loop, close it before crashing, and still
-    #      get a downgrade — the GitHub query would return None even
-    #      though the substantive work happened.
+    #   3. ``pr_emitted is not None`` — a PR was opened on THIS branch during
+    #      the run. The signal is AUTHORITATIVE + BRANCH-SCOPED: the resume seed
+    #      (branch-scoped resume detection) or, for non-resume runs, a
+    #      branch-scoped ``_resolve_pr_number`` (gh pr list --head <branch>)
+    #      re-check computed just below. We deliberately no longer scrape PR
+    #      URLs out of tool-result prose — that matched unrelated PRs the agent
+    #      merely cited and mis-set the number (the targetPR wrong-PR bug). The
+    #      only downside vs the old scrape is the rare open-then-close-mid-loop
+    #      race (the --head --state open query returns None), which at worst
+    #      costs one wasteful K8s retry — never an incorrect result.
     #
     # The crash sticky still fires (set by the exception handler above,
     # posted by ``_post_crash_sticky`` further down) and the warn-level
     # logs still emit. Operators retain full visibility into the crash
     # path; only the process exit code changes.
+    if pr_emitted is None and exit_code in (1, 2) and not exit_via_cancel:
+        pr_emitted = _resolve_pr_number(primary.qualified_repo, primary.branch)
     if exit_code in (1, 2) and not exit_via_cancel and pr_emitted is not None:
         click.echo(
             click.style(

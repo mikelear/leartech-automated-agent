@@ -13,8 +13,6 @@ from unittest.mock import patch
 
 from gate.agent.initiative import (
     _build_crash_sticky_body,
-    _build_pr_url_pattern,
-    _extract_pr_from_tool_result,
     _post_crash_sticky,
 )
 
@@ -79,54 +77,3 @@ def test_post_crash_sticky_swallows_subprocess_timeout() -> None:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd='gh', timeout=15)
         # Must not raise.
         _post_crash_sticky(qualified_repo='owner/repo', pr_number=42, body='hello')
-
-
-# ---------------------------------------------------------------------------
-# D.5.1.4 — early-emit `--- pr_open pr=N` helpers
-# ---------------------------------------------------------------------------
-
-
-def test_extract_pr_from_tool_result_finds_url_in_str_content() -> None:
-    """Bash tool result content is a plain string; `gh pr create` prints the
-    URL on stdout. Helper returns the captured number."""
-    pattern = _build_pr_url_pattern('mikelear/example-svc')
-    text = 'remote: ...\nhttps://github.com/mikelear/example-svc/pull/513\n'
-    assert _extract_pr_from_tool_result(text, pattern) == 513
-
-
-def test_extract_pr_from_tool_result_finds_url_in_list_content() -> None:
-    """MCP tool results arrive as a list of content dicts; helper flattens
-    text entries and skips non-text shapes (image dicts etc.)."""
-    pattern = _build_pr_url_pattern('mikelear/example-svc')
-    content: list[dict] = [
-        {'type': 'image', 'source': {'data': 'irrelevant'}},
-        {'type': 'text', 'text': 'PR opened: https://github.com/mikelear/example-svc/pull/77'},
-    ]
-    assert _extract_pr_from_tool_result(content, pattern) == 77
-
-
-def test_extract_pr_from_tool_result_returns_none_when_no_url() -> None:
-    """Tool result with no PR URL → None; loop leaves pr_emitted unset and
-    keeps watching subsequent results."""
-    pattern = _build_pr_url_pattern('mikelear/example-svc')
-    assert _extract_pr_from_tool_result('nothing interesting\n', pattern) is None
-    assert _extract_pr_from_tool_result(None, pattern) is None
-    assert _extract_pr_from_tool_result([], pattern) is None
-
-
-def test_extract_pr_from_tool_result_scopes_to_configured_repo() -> None:
-    """URL belonging to a DIFFERENT repo (e.g. agent's prose citing prior
-    work) must NOT trigger an emit. The pattern is repo-scoped so the marker
-    can only ever carry a PR number for the initiative's own repo."""
-    pattern = _build_pr_url_pattern('mikelear/example-svc')
-    text = 'see also https://github.com/leartech/other-repo/pull/99\n'
-    assert _extract_pr_from_tool_result(text, pattern) is None
-
-
-def test_extract_pr_from_tool_result_returns_first_match() -> None:
-    """If multiple URLs appear (e.g. `gh pr list` output), the first wins —
-    matches the loop's `pr_emitted is None` guard so subsequent results
-    don't re-emit."""
-    pattern = _build_pr_url_pattern('mikelear/example-svc')
-    text = 'https://github.com/mikelear/example-svc/pull/100\nhttps://github.com/mikelear/example-svc/pull/200\n'
-    assert _extract_pr_from_tool_result(text, pattern) == 100
