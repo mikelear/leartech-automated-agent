@@ -44,9 +44,29 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
+from typing import TypedDict
 
 _logger = logging.getLogger(__name__)
+
+
+class _RunPrOpenedPayload(TypedDict):
+    """Wire shape of the ``run.pr_opened`` push payload.
+
+    Kept as a :class:`TypedDict` (not ``dict[str, Any]``) so mypy
+    validates all required fields are present at call sites, and so
+    reviewers reading the field list have one authoritative source.
+    Adding a field to the wire format is a source-compatible edit
+    (add here + populate at the emit call site); removing one is a
+    consumer-contract change (bump the topic name).
+    """
+
+    topic: str
+    run: str | None
+    tenant: str | None
+    repo: str
+    pr_number: int
+    head_branch: str
+
 
 _MAESTRO_URL_ENV = 'LEARTECH_MAESTRO_URL'
 _MAESTRO_TOKEN_ENV = 'LEARTECH_MAESTRO_TOKEN'  # noqa: S105 — env var name, not a secret literal
@@ -104,7 +124,7 @@ async def emit_run_pr_opened(
     if cfg is None:
         return
     url, token = cfg
-    payload: dict[str, Any] = {
+    payload: _RunPrOpenedPayload = {
         'topic': _TOPIC,
         'run': run,
         'tenant': tenant,
