@@ -246,7 +246,9 @@ async def test_sdk_exception_after_pr_opened_exits_zero(
     ]
 
     with ExitStack() as stack:
-        _enter_common_patches(stack, messages, raise_at_end=RuntimeError('simulated SDK transport error'), resolved_pr=513)
+        _enter_common_patches(
+            stack, messages, raise_at_end=RuntimeError('simulated SDK transport error'), resolved_pr=513
+        )
         summary = await run_initiative(
             **_build_run_kwargs(tmp_path),
             max_turns=200,
