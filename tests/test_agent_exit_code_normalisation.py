@@ -461,7 +461,7 @@ async def test_is_error_result_message_after_pr_opened_exits_zero(
     ]
 
     with ExitStack() as stack:
-        _enter_common_patches(stack, messages)
+        _enter_common_patches(stack, messages, resolved_pr=513)
         summary = await run_initiative(
             **_build_run_kwargs(tmp_path),
             max_turns=200,
