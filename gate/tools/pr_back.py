@@ -8,11 +8,15 @@ goes through a human-reviewed PR; in-memory state is never mutated.
 from __future__ import annotations
 
 import asyncio
-import re
 import tempfile
 from pathlib import Path
 
-_PR_NUMBER_RE = re.compile(r'/pull/(\d+)$')
+# Shared source-of-truth for the ``https://github.com/.../pull/N`` URL
+# parse — see :mod:`gate.agent.pr_capture` for the module-level docstring.
+# The historical inline ``_PR_NUMBER_RE`` regex lives there now so both
+# this helper AND the SDK-loop's create-return capture (initiative
+# ``agent-capture-and-publish``) share ONE regex.
+from gate.agent.pr_capture import parse_pr_number_from_gh_output
 
 
 async def _run(*args: str, cwd: str | None = None) -> tuple[int, str, str]:
@@ -109,10 +113,9 @@ async def open_yaml_change_pr(
             raise RuntimeError(f'gh pr create failed: {stderr.strip()}')
 
         pr_url = stdout.strip()
-        match = _PR_NUMBER_RE.search(pr_url)
-        if not match:
+        pr_number = parse_pr_number_from_gh_output(pr_url)
+        if pr_number is None:
             raise RuntimeError(f'Could not parse PR number from gh pr create output: {pr_url!r}')
-        pr_number = int(match.group(1))
 
         return {
             'pr_url': pr_url,
