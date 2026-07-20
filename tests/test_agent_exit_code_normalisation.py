@@ -176,11 +176,12 @@ def _enter_common_patches(
 ) -> None:
     """Push the per-test patch stack so ``run_initiative`` runs hermetically.
 
-    ``_resolve_pr_number`` is patched to ``resolved_pr`` (default None) — the
-    normaliser itself reads the in-process ``pr_emitted`` flag rather than this
-    post-loop GH-side lookup, so the default keeps the test surface tight on the
-    actual contract. Tests that need the orphan-PR / crash-sticky-path semantics
-    override it.
+    ``_resolve_pr_number`` is patched to ``resolved_pr`` (default None). The
+    exit-code normaliser now derives "was a PR opened on this branch?" from this
+    authoritative, branch-scoped lookup for non-resume runs — the loose
+    tool-result prose scrape was removed (it mis-captured cited PRs / the
+    targetPR wrong-PR bug). So the "PR opened → downgrade" cases set
+    ``resolved_pr`` to a real number; the "no PR" cases leave it None.
     """
     stack.enter_context(patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'}, clear=False))
     stack.enter_context(patch('gate.agent.initiative.load_initiative', return_value=_FakeInitiative()))
@@ -211,7 +212,7 @@ async def test_max_turns_hit_after_pr_opened_exits_zero(
     ]
 
     with ExitStack() as stack:
-        _enter_common_patches(stack, messages, raise_at_end=Exception('SDK terminated at max_turns'))
+        _enter_common_patches(stack, messages, raise_at_end=Exception('SDK terminated at max_turns'), resolved_pr=513)
         summary = await run_initiative(
             **_build_run_kwargs(tmp_path),
             max_turns=max_turns,
@@ -245,7 +246,7 @@ async def test_sdk_exception_after_pr_opened_exits_zero(
     ]
 
     with ExitStack() as stack:
-        _enter_common_patches(stack, messages, raise_at_end=RuntimeError('simulated SDK transport error'))
+        _enter_common_patches(stack, messages, raise_at_end=RuntimeError('simulated SDK transport error'), resolved_pr=513)
         summary = await run_initiative(
             **_build_run_kwargs(tmp_path),
             max_turns=200,
@@ -460,7 +461,7 @@ async def test_is_error_result_message_after_pr_opened_exits_zero(
     ]
 
     with ExitStack() as stack:
-        _enter_common_patches(stack, messages)
+        _enter_common_patches(stack, messages, resolved_pr=513)
         summary = await run_initiative(
             **_build_run_kwargs(tmp_path),
             max_turns=200,

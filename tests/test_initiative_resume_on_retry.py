@@ -370,9 +370,9 @@ async def test_run_initiative_resumes_when_branch_and_pr_already_exist(
         branch (proves the harness picked resume mode).
       * The prompt sent to ``query()`` contains "RESUME MODE" AND the
         PR number so the LLM knows not to open a duplicate.
-      * The ``--- pr_open pr=42`` marker emits from the resume-seed
-        path (proves the exit-code normalisation would fire if this
-        pod re-crashed).
+      * The resume seed arms the preStop hint file with the PR number
+        (proves the exit-code normalisation / crash-sticky would fire if
+        this pod re-crashed).
     """
     captured_prompts: list[str] = []
     messages = [
@@ -393,7 +393,7 @@ async def test_run_initiative_resumes_when_branch_and_pr_already_exist(
         ) as mock_fetch,
         patch('gate.agent.initiative.query', _make_query_capturing(messages, captured_prompts)),
         patch('gate.agent.initiative._resolve_pr_number', return_value=42),
-        patch('gate.agent.initiative._write_pr_number_hint'),
+        patch('gate.agent.initiative._write_pr_number_hint') as mock_hint,
     ):
         summary = await run_initiative(**_build_run_kwargs(tmp_path))
 
@@ -412,9 +412,9 @@ async def test_run_initiative_resumes_when_branch_and_pr_already_exist(
     assert 'Run this initiative end-to-end' in captured_prompts[0]
 
     # Resume-seed emits the marker BEFORE the SDK loop runs so the
-    # reconciler's log-parse path can see it even on a same-pod re-crash.
-    err = capsys.readouterr().err
-    assert '--- pr_open pr=42' in err, f'resume-seed did not emit marker; stderr was: {err!r}'
+    # The resume seed arms the preStop hint file with the discovered PR
+    # so a same-pod re-crash posts a crash sticky + the exit-code path fires.
+    mock_hint.assert_any_call(42)
 
 
 @pytest.mark.asyncio
