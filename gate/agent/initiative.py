@@ -53,7 +53,7 @@ from gate.agent.diagnostics import (
     uninstall_terminate_handler,
     write_failure_reason,
 )
-from gate.agent.initiative_prompt import INITIATIVE_SYSTEM_PROMPT
+from gate.agent.initiative_prompt import render_initiative_system_prompt
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
 from gate.agent.run_driver import mark_first_turn, update_run_progress
@@ -777,11 +777,16 @@ async def run_initiative(
     # lesson calibrations (filtered by role) → initiative system prompt.
     # Both calibration sources stack on top of the role prompt; either or
     # both may be empty.
+    #
+    # ``hold`` is threaded through from the initiative YAML (default False) so
+    # the role prompt tells the agent whether to post `/hold` after opening
+    # the PR. Default False = let Tide auto-merge on green; the gate suite
+    # (incl. ai-review) IS the review.
     blocks: list[str] = [load_jx3_calibration()]
     lessons = render_for('initiative_agent')
     if lessons:
         blocks.append(lessons)
-    blocks.append(INITIATIVE_SYSTEM_PROMPT)
+    blocks.append(render_initiative_system_prompt(hold=initiative.hold))
     system_prompt = '\n\n---\n\n'.join(blocks)
 
     options = ClaudeAgentOptions(

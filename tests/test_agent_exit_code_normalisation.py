@@ -66,6 +66,12 @@ class _FakeInitiative:
     # feedback block. The fakes default to an empty list (fresh run, no
     # respawn) so the prompt code path takes its no-op branch.
     feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
+    # Hold-as-init-option — the loader's Initiative now carries an opt-in
+    # `hold: bool` field (default False); the agent's prompt-construction
+    # path reads it to decide whether to render the `/hold` posting
+    # instruction. Fakes default to False so the compose call matches the
+    # historical (no-hold) prompt shape.
+    hold: bool = False
 
     @property
     def primary(self) -> _FakeRepo:

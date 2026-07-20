@@ -339,3 +339,78 @@ def test_language_field_whitespace_only_treated_as_none(tmp_path: Path) -> None:
     )
     init = load_initiative(path)
     assert init.language is None
+
+
+# Optional `hold` field ──────────────────────────────────────────────────────
+
+
+def test_hold_defaults_to_false_when_omitted(tmp_path: Path) -> None:
+    """Absent `hold:` means the agent lets Tide auto-merge on green — the goal
+    of turning `/hold` from unconditional into opt-in was to stop replicating
+    Tide, so the default must be False and reachable without any YAML change.
+    """
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        """,
+    )
+    init = load_initiative(path)
+    assert init.hold is False
+
+
+def test_hold_true_parses(tmp_path: Path) -> None:
+    """`hold: true` opts the initiative into the human-review workflow —
+    ``render_initiative_system_prompt(hold=True)`` will then instruct the
+    agent to post `/hold` after opening the PR."""
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        hold: true
+        """,
+    )
+    init = load_initiative(path)
+    assert init.hold is True
+
+
+def test_hold_false_parses_explicitly(tmp_path: Path) -> None:
+    """Explicit `hold: false` behaves identically to omission — it's the same
+    value, just written down."""
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        hold: false
+        """,
+    )
+    init = load_initiative(path)
+    assert init.hold is False
+
+
+def test_hold_rejects_non_bool(tmp_path: Path) -> None:
+    """`hold:` must be a bool; a string like `"true"` would be coerced by
+    pydantic v2, but arbitrary values must fail — pin the strict-ish shape so
+    a typo like `hold: maybe` surfaces at YAML load rather than turning into
+    a truthy value inside the prompt."""
+    path = _write(
+        tmp_path,
+        """
+        name: x
+        repo: leartech-auth-ui
+        branch: agent/x
+        goal: do a thing
+        hold: maybe
+        """,
+    )
+    with pytest.raises(ValidationError):
+        load_initiative(path)

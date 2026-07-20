@@ -85,6 +85,8 @@ class _FakeInitiative:
     repos: list[_FakeRepo] = field(default_factory=lambda: [_FakeRepo()])
     # v6p0.5 step 2 — fresh-run default (no respawn feedback).
     feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
+    # Hold-as-init-option — the agent renders `/hold` posting only when true.
+    hold: bool = False
 
     @property
     def primary(self) -> _FakeRepo:

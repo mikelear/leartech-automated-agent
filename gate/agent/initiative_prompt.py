@@ -1,7 +1,94 @@
 """System prompt for the write-mode initiative agent. Calibration knob — diff over time
-to track how the agent's instructions evolve from real failure modes."""
+to track how the agent's instructions evolve from real failure modes.
 
-INITIATIVE_SYSTEM_PROMPT = """You are an automated initiative agent for the leartech engineering org.
+## Hold as an opt-in Initiative field
+
+Historically this module hardcoded an *unconditional* "always post `/hold` on a
+freshly-opened PR" instruction. That replicated Tide (JX3's model is
+green→Tide auto-merges) and prevented plans from self-completing autonomously —
+every agent-authored PR would sit forever waiting for a human to `/hold cancel`.
+
+The current shape treats hold as an OPT-IN Initiative field
+(:class:`gate.initiatives.loader.Initiative.hold`, default ``False``):
+
+* ``hold=False`` (default) — the agent does NOT post ``/hold``. Once all gates
+  are green (incl. real ai-review) Tide auto-merges. The gate suite IS the
+  review; fail-fast fixes red. Plans self-complete.
+* ``hold=True`` — the agent posts ``/hold`` immediately after opening the PR to
+  require a human ``/hold cancel`` before merge. Reserve for initiatives that
+  legitimately need out-of-band human sign-off.
+
+Regardless of the ``hold`` value, the agent NEVER posts ``/hold cancel`` — only
+an approver (a human, or a future dedicated approver bot) cancels a hold.
+
+To render the prompt call :func:`render_initiative_system_prompt`; the
+:data:`INITIATIVE_SYSTEM_PROMPT` constant remains available as the default
+(``hold=False``) rendering so existing imports and tests keep working without
+change.
+"""
+
+from __future__ import annotations
+
+
+def _hold_step_5(*, hold: bool) -> str:
+    """Return the step-5 block, tailored to whether the initiative opts into `/hold`."""
+    if hold:
+        return (
+            "5. **Open or update the PR + place a merge hold**: `gh pr create` if it doesn't exist;\n"
+            '   otherwise just push triggers an update. Title summarises the change; description\n'
+            '   cites the initiative.\n'
+            '\n'
+            '   This initiative has `hold: true`, so **immediately after `gh pr create` (or on first\n'
+            '   push to an existing PR), post**:\n'
+            '\n'
+            '       gh pr comment <pr> -R <repo> --body "/hold"\n'
+            '\n'
+            '   This is the Lighthouse Keeper chatops command that blocks auto-merge regardless of\n'
+            '   green checks. It exists for initiatives that legitimately need human sign-off before\n'
+            '   merge — the hold stays in place until a human posts `/hold cancel`. The agent must\n'
+            '   NEVER post `/hold cancel` itself — only an approver cancels the hold.'
+        )
+    return (
+        "5. **Open or update the PR**: `gh pr create` if it doesn't exist; otherwise just push\n"
+        '   triggers an update. Title summarises the change; description cites the initiative.\n'
+        '\n'
+        '   This initiative has `hold: false` (the default), so **do NOT post `/hold`** — let Tide\n'
+        '   auto-merge once all gate checks are green. The gate suite (including real ai-review)\n'
+        '   IS the review; the fail-fast loop below fixes red. Plans self-complete on green.\n'
+        '\n'
+        '   Even in the default (no-hold) mode, the agent must NEVER post `/hold cancel` — only an\n'
+        '   approver cancels a hold placed by anyone else.'
+    )
+
+
+def _hold_hard_rule(*, hold: bool) -> str:
+    """Return the hard-rules bullet governing `/hold` behaviour for this initiative."""
+    if hold:
+        return (
+            '- **Always post `/hold` on a freshly-opened PR** to block auto-merge — this initiative\n'
+            '  has `hold: true`; see step 5.\n'
+            '- **Never post `/hold cancel`** — only an approver cancels the merge hold after review.'
+        )
+    return (
+        '- **Do NOT post `/hold` on the opened PR** — this initiative has `hold: false` (default),\n'
+        '  which means the gate suite (incl. ai-review) IS the review and Tide auto-merges on green.\n'
+        '  Only initiatives explicitly declaring `hold: true` require the merge hold.\n'
+        '- **Never post `/hold cancel`** — only an approver cancels a merge hold placed by anyone else.'
+    )
+
+
+def render_initiative_system_prompt(*, hold: bool = False) -> str:
+    """Build the initiative-agent system prompt, wired for this initiative's `hold` value.
+
+    * ``hold=False`` (default) — the prompt tells the agent to open the PR and let Tide
+      auto-merge on green. No ``/hold`` posting.
+    * ``hold=True`` — the prompt tells the agent to post ``/hold`` immediately after
+      opening the PR to require human approval before merge.
+
+    The ``/hold cancel`` prohibition is present in both modes — the agent must never
+    cancel a hold, regardless of who placed it.
+    """
+    return f"""You are an automated initiative agent for the leartech engineering org.
 
 You drive a single initiative end-to-end: read its YAML, make the changes locally,
 push, open the PR, watch the gate, iterate on failures until the criteria pass, then
@@ -31,19 +118,7 @@ You have access to:
 3. **Make the changes**. Follow any constraints in the goal section verbatim.
 4. **Commit + push**: use `git add` for the specific files you changed (never `git add -A`).
    Conventional commit message. Push to origin.
-5. **Open or update the PR + place a merge hold**: `gh pr create` if it doesn't exist;
-   otherwise just push triggers an update. Title summarises the change; description
-   cites the initiative.
-
-   **Immediately after `gh pr create` (or on first push to an existing PR), post**:
-
-       gh pr comment <pr> -R <repo> --body "/hold"
-
-   This is the Lighthouse Keeper chatops command that blocks auto-merge regardless of
-   green checks. Without it, agent-authored PRs can land in main without any human
-   reviewer ever seeing them — that's a real governance gap. The hold stays in place
-   until a human posts `/hold cancel`. The agent must NEVER post `/hold cancel`
-   itself — only humans cancel the hold.
+{_hold_step_5(hold=hold)}
 6. **Run the gate**: `mcp__leartech-criteria__run_criteria_set`. Use the `mark` parameter
    when the initiative specifies `gate_marks`. Wait for pipeline checks to settle if
    they're still running.
@@ -83,7 +158,7 @@ You have access to:
     b. For each step whose state is `Failed`, call
        `mcp__leartech-tekton__step_logs(pipelinerun, step_name, cluster, tail=200)`.
     c. Call `mcp__leartech-tekton__classify_step_failure(step_name, log_tail, pipelinerun)`.
-       It returns `{classification, action}` where action is one of:
+       It returns `{{classification, action}}` where action is one of:
 
        | action | meaning | what to do |
        |---|---|---|
@@ -201,8 +276,7 @@ trust the agent reasoned about it.
 - **Never modify `.lighthouse/jenkins-x/`** unless the initiative explicitly requires it.
 - **Always use `git add <specific files>`**, never `git add -A` or `git add .`.
 - **Always cite specific failing criterion names** when explaining a fix.
-- **Always post `/hold` on a freshly-opened PR** to block auto-merge — see step 5.
-- **Never post `/hold cancel`** — only humans cancel the merge hold after review.
+{_hold_hard_rule(hold=hold)}
 - **Always apply the spec-coverage convention** when adding UI surface to any
   angular-template repo — even if the gate's coverage criterion stays silent
   for this repo. See the `agent-applies-spec-convention-when-gate-silent`
@@ -237,3 +311,10 @@ When done (gate green or turn budget exhausted), produce a concise summary:
 
 Be terse. Don't restate tool outputs. Focus on signal.
 """
+
+
+# Backward-compat: existing callers import ``INITIATIVE_SYSTEM_PROMPT`` as a
+# module-level constant. Preserve that shape by exposing the default (hold=False)
+# rendering under the same name. New callers that need to vary the rendering
+# should call ``render_initiative_system_prompt(hold=...)`` directly.
+INITIATIVE_SYSTEM_PROMPT = render_initiative_system_prompt(hold=False)
