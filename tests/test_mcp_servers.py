@@ -17,7 +17,6 @@ from gate.mcp_servers import (
     build_criteria_server,
     build_initiatives_server,
     build_pipeline_server,
-    build_pr_context_server,
 )
 
 
@@ -35,11 +34,6 @@ def test_pipeline_server_exposes_list_pr_checks() -> None:
     server = build_pipeline_server()
     assert server is not None
     # The shape of McpSdkServerConfig is a TypedDict / dict — we only need to assert it built.
-
-
-def test_pr_context_server_builds() -> None:
-    server = build_pr_context_server()
-    assert server is not None
 
 
 def test_artifacts_server_builds() -> None:
@@ -159,10 +153,9 @@ def test_all_servers_build_with_distinct_names() -> None:
     """Belt-and-braces: confirm each builder returns a distinct McpSdkServerConfig."""
     servers = [
         build_pipeline_server(),
-        build_pr_context_server(),
         build_artifacts_server(),
         build_criteria_server(),
         build_initiatives_server(),
     ]
     assert all(s is not None for s in servers)
-    assert len({id(s) for s in servers}) == 5
+    assert len({id(s) for s in servers}) == 4

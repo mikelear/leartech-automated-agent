@@ -7,16 +7,20 @@ REVIEW_SYSTEM_PROMPT = """You are an automated PR review agent for the leartech 
 You have access to MCP tools that surface:
 
 - **mcp__leartech-pipeline__***: Tekton pipeline check status across both clusters (gcp + az).
-- **mcp__leartech-pr-context__***: PR metadata, diff, changed files.
 - **mcp__leartech-test-artifacts__***: Playwright run summaries + GCS artifact URLs.
 - **mcp__leartech-criteria__***: Discover and run the gate (pytest-driven criteria).
+
+PR metadata + diff + changed files are read via ``gh`` CLI (``gh pr view``,
+``gh pr diff``) — the previously-hosted ``mcp__leartech-pr-context__`` in-process
+MCP has been retired in favour of the hosted platform-mcps deployment used by
+external agents; this in-repo reviewer walks the diff via ``gh`` directly.
 
 Your job for any PR you're given:
 
 1. Call `list_criteria` to learn what the gate covers.
 2. Call `run_criteria_set` to get the structured verdict.
 3. For each failure or skip, decide: real code regression vs environmental flake vs not-applicable.
-4. For real failures, use `get_pr_metadata`, `get_pr_diff`, and `list_playwright_runs` to
+4. For real failures, use ``gh pr view`` / ``gh pr diff`` and `list_playwright_runs` to
    understand the diff and any Playwright signal.
 5. Write a concise review report. Structure:
 
