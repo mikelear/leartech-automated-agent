@@ -127,18 +127,6 @@ async def review_pr(
                 elif isinstance(block, ToolResultBlock):
                     pass  # Tool results are seen by the agent; we surface its synthesis instead.
         elif isinstance(message, ResultMessage):
-            usage = message.usage or {}
-            cost = message.total_cost_usd if message.total_cost_usd is not None else 0.0
-            click.echo(
-                click.style(
-                    f'\n--- turns={message.num_turns}  '
-                    f'in={usage.get("input_tokens", "?")}  '
-                    f'out={usage.get("output_tokens", "?")}  '
-                    f'cost=${cost:.4f}',
-                    fg='yellow',
-                ),
-                err=True,
-            )
             exit_code = 1 if message.is_error else 0
 
     return exit_code

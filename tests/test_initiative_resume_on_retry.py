@@ -411,7 +411,6 @@ async def test_run_initiative_resumes_when_branch_and_pr_already_exist(
     # is prepended, not a replacement.
     assert 'Run this initiative end-to-end' in captured_prompts[0]
 
-    # Resume-seed emits the marker BEFORE the SDK loop runs so the
     # The resume seed arms the preStop hint file with the discovered PR
     # so a same-pod re-crash posts a crash sticky + the exit-code path fires.
     mock_hint.assert_any_call(42)
@@ -420,7 +419,6 @@ async def test_run_initiative_resumes_when_branch_and_pr_already_exist(
 @pytest.mark.asyncio
 async def test_run_initiative_fresh_start_when_no_resume_signals(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Fresh-run guarantee — no branch, no PR → no RESUME preamble, no
     fetch/checkout call, prompt is identical to the pre-fix baseline."""
@@ -456,21 +454,16 @@ async def test_run_initiative_fresh_start_when_no_resume_signals(
     # And the standard base prompt still fires.
     assert 'Run this initiative end-to-end' in captured_prompts[0]
 
-    # No resume-seed marker.
-    err = capsys.readouterr().err
-    assert '--- pr_open' not in err, f'no PR emitted expected; stderr was: {err!r}'
-
 
 @pytest.mark.asyncio
 async def test_run_initiative_falls_back_to_fresh_when_fetch_fails(
     tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Detection says resume but the fetch fails (network blip, git not
     installed, branch deleted between detection and fetch) → harness
-    falls back to the fresh-start path — no RESUME preamble, no
-    resume-seed marker. This is the "safety fallback" the goal spec
-    calls out: guard on detection, don't break existing runs."""
+    falls back to the fresh-start path — no RESUME preamble. This is
+    the "safety fallback" the goal spec calls out: guard on detection,
+    don't break existing runs."""
     captured_prompts: list[str] = []
     messages = [
         AssistantMessage(content=[TextBlock(text='Fallback path.')], model='claude'),
@@ -501,10 +494,6 @@ async def test_run_initiative_falls_back_to_fresh_when_fetch_fails(
     # when the fetch failed.
     assert len(captured_prompts) == 1
     assert 'RESUME MODE' not in captured_prompts[0]
-
-    # And the resume-seed marker must NOT emit either.
-    err = capsys.readouterr().err
-    assert '--- pr_open pr=42 repo=mikelear/example-svc (from resume detection)' not in err
 
 
 @pytest.mark.asyncio
