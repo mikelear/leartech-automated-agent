@@ -55,7 +55,7 @@ Walking away with red checks unclassified violates two design rules:
 After posting `/hold` + sticky, **before declaring done**:
 
 1. **Wait for all checks to reach terminal** (SUCCESS or FAILURE),
-   using `mcp__leartech-pipeline__wait_for_terminal`. Don't stop
+   using `mcp__leartech-jx3-flow__wait_for_terminal`. Don't stop
    while any check is PENDING.
 
 2. **For each FAILURE, classify**:

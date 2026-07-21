@@ -31,7 +31,7 @@ a stall).
 
 If `timeout` fires (exit 124), the pipeline is wedged. Recovery flow:
 
-1. Confirm the stall is real with `mcp__leartech-pipeline__list_pr_checks`. Pending-with-pod-RUNNING
+1. Confirm the stall is real with `mcp__leartech-jx3-flow__list_pr_checks`. Pending-with-pod-RUNNING
    is normal; pending-no-pod for >15 min usually means the queue is wedged.
 2. Post `/test <check-name>` (or `/retest`) as a PR comment via `gh pr comment` to retrigger:
 

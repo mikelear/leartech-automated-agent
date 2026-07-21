@@ -16,7 +16,6 @@ from gate.mcp_servers import (
     build_artifacts_server,
     build_criteria_server,
     build_initiatives_server,
-    build_pipeline_server,
 )
 
 
@@ -28,12 +27,6 @@ def _tool_names(server: object) -> list[str]:
         # to small structural changes in McpSdkServerConfig across SDK versions.
         return [t.name for t in getattr(server, 'tools', [])]
     return [t.name for t in instance._tool_handlers.values()] if hasattr(instance, '_tool_handlers') else []
-
-
-def test_pipeline_server_exposes_list_pr_checks() -> None:
-    server = build_pipeline_server()
-    assert server is not None
-    # The shape of McpSdkServerConfig is a TypedDict / dict — we only need to assert it built.
 
 
 def test_artifacts_server_builds() -> None:
@@ -150,12 +143,18 @@ _ = AsyncMock  # silence "imported but unused" until a future test needs it
 
 
 def test_all_servers_build_with_distinct_names() -> None:
-    """Belt-and-braces: confirm each builder returns a distinct McpSdkServerConfig."""
+    """Belt-and-braces: confirm each builder returns a distinct McpSdkServerConfig.
+
+    Pipeline-check status (list_pr_checks / wait_for_terminal /
+    wait_for_first_failure_or_all_pass) previously lived in an in-process
+    `build_pipeline_server()` shim; that shim is now retired in favour of the
+    remote `leartech-jx3-flow` MCP wired via `build_remote_mcp_servers` — see
+    `test_all_platform_mcps_present_in_remote_registry` for the wire-up assertion.
+    """
     servers = [
-        build_pipeline_server(),
         build_artifacts_server(),
         build_criteria_server(),
         build_initiatives_server(),
     ]
     assert all(s is not None for s in servers)
-    assert len({id(s) for s in servers}) == 4
+    assert len({id(s) for s in servers}) == 3

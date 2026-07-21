@@ -18,7 +18,10 @@ def test_sdk_mcp_ready_when_builder_importable() -> None:
     mcp = McpServer(
         type='sdk',
         description='reachable sdk',
-        builder='gate.mcp_servers.pipeline_server:build_pipeline_server',
+        # Any live in-process SDK builder works — pipeline_server was ported
+        # to the remote leartech-jx3-flow MCP so criteria_server is now the
+        # anchor for this smoke.
+        builder='gate.mcp_servers.criteria_server:build_criteria_server',
     )
     assert probe_mcp(mcp) == 'ready'
 

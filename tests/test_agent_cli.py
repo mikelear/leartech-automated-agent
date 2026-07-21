@@ -119,9 +119,12 @@ def test_topology_renders_mermaid_to_stdout() -> None:
 def test_probe_returns_status_for_sdk_mcp() -> None:
     runner = CliRunner()
     with patch('app.agent_cli.main.httpx.Client', _MockHttpxClient):
-        result = runner.invoke(cli, ['probe', 'leartech-pipeline'])
+        # leartech-criteria is still an in-process SDK MCP so the probe path
+        # returns `sdk_import`. leartech-pipeline was ported to the remote
+        # leartech-jx3-flow MCP whose probe uses HTTP, not sdk_import.
+        result = runner.invoke(cli, ['probe', 'leartech-criteria'])
     assert result.exit_code == 0
-    assert 'leartech-pipeline' in result.output
+    assert 'leartech-criteria' in result.output
     assert 'sdk_import' in result.output
 
 
