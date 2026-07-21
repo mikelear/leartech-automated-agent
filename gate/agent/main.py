@@ -29,7 +29,6 @@ from gate.mcp_servers import (
     build_artifacts_server,
     build_criteria_server,
     build_pipeline_server,
-    build_pr_context_server,
 )
 
 DEFAULT_MODEL = os.environ.get('LEARTECH_AGENT_MODEL', 'claude-opus-4-7')
@@ -57,8 +56,6 @@ DEFAULT_MAX_TURNS = 20
 MCP_ALLOWED_TOOLS = [
     'mcp__leartech-pipeline__list_pr_checks',
     'mcp__leartech-pipeline__wait_for_terminal',
-    'mcp__leartech-pr-context__get_pr_metadata',
-    'mcp__leartech-pr-context__get_pr_diff',
     'mcp__leartech-test-artifacts__list_playwright_runs',
     'mcp__leartech-test-artifacts__head_artifact',
     'mcp__leartech-criteria__list_criteria',
@@ -87,7 +84,6 @@ def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
         system_prompt=_build_system_prompt(),
         mcp_servers={
             'leartech-pipeline': build_pipeline_server(),
-            'leartech-pr-context': build_pr_context_server(),
             'leartech-test-artifacts': build_artifacts_server(),
             'leartech-criteria': build_criteria_server(),
         },

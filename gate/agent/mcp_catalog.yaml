@@ -36,12 +36,13 @@ mcp_servers:
     type: http_sse
     url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/pr-context/sse
     description: |
-      PR metadata + diff + changed files via platform-mcps. Migrated from the
-      in-process SDK builder (`gate.mcp_servers.pr_context_server`, now
-      deprecated) to a long-running HTTP/SSE server hosted in each cluster's
-      platform-mcps deployment. `LEARTECH_PLATFORM_MCPS_URL` env var lets the
-      chart point at the cluster-local URL; default is the staging URL which
-      both clusters reach via local DNS.
+      PR metadata + diff + changed files via platform-mcps — a long-running
+      HTTP/SSE server hosted in each cluster's platform-mcps deployment.
+      `LEARTECH_PLATFORM_MCPS_URL` env var lets the chart point at the
+      cluster-local URL; default is the staging URL which both clusters reach
+      via local DNS. The previous in-process SDK builder shipped with this
+      repo has been deleted; new features for the pr-context MCP land in
+      the platform-mcps repo.
 
   leartech-test-artifacts:
     type: sdk

@@ -104,7 +104,6 @@ You have access to:
   (git-clone vs ruff vs pytest vs kaniko), per-step logs, classification + dispatch,
   superseded-run cancellation, and rebase-on-base for merge conflicts. Prefer this
   over shelling out to `pr-pipelines.sh` once a Tekton failure occurs.
-- **mcp__leartech-pr-context__***: PR metadata + diff + changed files.
 - **mcp__leartech-test-artifacts__***: Playwright artifacts.
 - **mcp__leartech-criteria__***: discover criteria + run the gate.
 

@@ -65,7 +65,6 @@ from gate.mcp_servers import (
     build_artifacts_server,
     build_criteria_server,
     build_pipeline_server,
-    build_pr_context_server,
     build_tekton_server,
 )
 from gate.watcher.iteration_loop import format_feedback_payloads_for_prompt
@@ -750,7 +749,6 @@ async def run_initiative(
         system_prompt=system_prompt,
         mcp_servers={
             'leartech-pipeline': build_pipeline_server(),
-            'leartech-pr-context': build_pr_context_server(),
             'leartech-test-artifacts': build_artifacts_server(),
             'leartech-criteria': build_criteria_server(),
             'leartech-tekton': build_tekton_server(),
