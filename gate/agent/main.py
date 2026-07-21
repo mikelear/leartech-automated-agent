@@ -29,6 +29,7 @@ from gate.mcp_servers import (
     build_artifacts_server,
     build_criteria_server,
     build_pipeline_server,
+    build_remote_mcp_servers,
 )
 
 DEFAULT_MODEL = os.environ.get('LEARTECH_AGENT_MODEL', 'claude-opus-4-7')
@@ -90,6 +91,9 @@ def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
             'leartech-pipeline': build_pipeline_server(),
             'leartech-test-artifacts': build_artifacts_server(),
             'leartech-criteria': build_criteria_server(),
+            # Authed remote MCPs (e.g. leartech-pr-context). Empty when
+            # unconfigured — see gate/mcp_servers/remote.py.
+            **build_remote_mcp_servers(),
         },
         allowed_tools=MCP_ALLOWED_TOOLS,
         permission_mode='bypassPermissions',

@@ -57,6 +57,7 @@ from gate.mcp_servers import (
     build_artifacts_server,
     build_criteria_server,
     build_pipeline_server,
+    build_remote_mcp_servers,
     build_tekton_server,
 )
 from gate.watcher.iteration_loop import format_feedback_payloads_for_prompt
@@ -744,6 +745,11 @@ async def run_initiative(
             'leartech-test-artifacts': build_artifacts_server(),
             'leartech-criteria': build_criteria_server(),
             'leartech-tekton': build_tekton_server(),
+            # Authed remote MCPs (Streamable-HTTP over the network) — currently
+            # leartech-pr-context for open_pr. Empty dict when unconfigured, so
+            # the agent degrades cleanly rather than crashing. See
+            # gate/mcp_servers/remote.py.
+            **build_remote_mcp_servers(),
         },
         allowed_tools=[*WRITE_MODE_TOOLS, *MCP_ALLOWED_TOOLS, *INITIATIVE_TEKTON_TOOLS],
         permission_mode='bypassPermissions',

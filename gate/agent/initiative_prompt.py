@@ -37,7 +37,7 @@ def _hold_step_5(*, hold: bool) -> str:
     # number + head branch onto this AgentRun's status — so the number is
     # captured authoritatively at the source, never scraped from CLI output.
     open_pr_block = (
-        "5. **Open the PR via the `open_pr` MCP tool** (do NOT run `gh pr create` yourself):\n"
+        '5. **Open the PR via the `open_pr` MCP tool** (do NOT run `gh pr create` yourself):\n'
         '   first `git push` your branch, then call\n'
         '   `mcp__leartech-pr-context__open_pr` with:\n'
         '       run_id=$LEARTECH_RUN_ID, namespace=$LEARTECH_NAMESPACE (or the run namespace),\n'
@@ -49,8 +49,7 @@ def _hold_step_5(*, hold: bool) -> str:
     )
     if hold:
         return (
-            open_pr_block
-            + '\n'
+            open_pr_block + '\n'
             '   This initiative has `hold: true`, so **immediately after open_pr returns, post**:\n'
             '\n'
             '       gh pr comment <pr> -R <repo> --body "/hold"\n'
@@ -60,8 +59,7 @@ def _hold_step_5(*, hold: bool) -> str:
             '   until a human posts `/hold cancel`. The agent must NEVER post `/hold cancel`.'
         )
     return (
-        open_pr_block
-        + '\n'
+        open_pr_block + '\n'
         '   This initiative has `hold: false` (the default), so **do NOT post `/hold`** — let Tide\n'
         '   auto-merge once all gate checks are green. The gate suite (including real ai-review)\n'
         '   IS the review; the fail-fast loop below fixes red. Plans self-complete on green.\n'
