@@ -949,8 +949,9 @@ async def run_initiative(
     # ``_resolve_pr_number`` re-check at the exit-code path for non-resume runs.
     # We no longer scrape PR URLs out of tool-result prose — that matched
     # unrelated PRs the agent merely cited (the wrong-PR / targetPR mis-capture
-    # bug). The authoritative PR number for the CR report-back is resolved
-    # end-of-run via ``_resolve_pr_number`` + ``patch_pr_number``.
+    # bug). The authoritative PR number is recorded onto AgentRun.status by the
+    # ``open_pr`` MCP tool at PR-open; ``_resolve_pr_number`` remains only as a
+    # read-only orphan-PR classifier at end-of-run.
     pr_emitted: int | None = resume_context.pr_number if resume_active else None
 
     async def _record_first_turn_once() -> None:
@@ -1404,10 +1405,10 @@ async def run_initiative(
         )
 
     # Note: we used to emit a trailing `--- turns=... pr=N` stdout marker
-    # here for a pod-log reconciler to grep. That consumer is long gone —
-    # ``job_reconciler`` reads the authoritative ``AgentRun.status.targetPR``
-    # (patched via :func:`patch_pr_number`) and the Maestro announce
-    # (:func:`emit_run_pr_opened`). The RunSummary below is the sole return
+    # here for a pod-log reconciler to grep. That consumer is long gone — the
+    # authoritative ``AgentRun.status.targetPR`` is patched by the ``open_pr``
+    # MCP tool, and the controller's maestro_producer emits ``run.pr_opened``
+    # when it observes that change. The RunSummary below is the sole return
     # channel; there is no stdout-side reporting.
     return RunSummary(
         exit_code=exit_code,
