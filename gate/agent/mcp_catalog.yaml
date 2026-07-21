@@ -30,12 +30,13 @@ mcp_servers:
   # `leartech-tekton` + `leartech-pr-context` entries below/above — the chart
   # sets LEARTECH_PLATFORM_MCPS_URL per-cluster so each cluster's copy
   # resolves to its cluster-local platform-mcps deployment via local DNS.
-  # The literal fallback keeps the introspection surface functional on laptop
-  # / dev environments that haven't set the env var; it is NEVER what cluster
-  # deployments actually route to (the chart always injects the env var).
+  # The fallback is a dev-only `http://localhost:8899` (matches the local
+  # `go run ./cmd/server` port) — NO hardcoded `*.jx.leartech.com` cluster URL
+  # in source (leartech convention); the chart always injects the env var in
+  # every real cluster deployment.
   leartech-jx3-flow:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/jx3_flow/sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/jx3_flow/sse
     description: |
       PR-check status across both clusters — list_pr_checks,
       wait_for_terminal, wait_for_first_failure_or_all_pass. Served
@@ -51,14 +52,14 @@ mcp_servers:
 
   leartech-pr-context:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/pr-context/sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/pr-context/sse
     description: |
       PR metadata + diff + changed files via platform-mcps — a long-running
       HTTP/SSE server hosted in each cluster's platform-mcps deployment.
       `LEARTECH_PLATFORM_MCPS_URL` env var lets the chart point at the
-      cluster-local URL; default is the staging URL which both clusters reach
-      via local DNS. The previous in-process SDK builder shipped with this
-      repo has been deleted; new features for the pr-context MCP land in
+      cluster-local URL; the source fallback is a dev-only localhost (no
+      hardcoded cluster URL). The previous in-process SDK builder shipped with
+      this repo has been deleted; new features for the pr-context MCP land in
       the platform-mcps repo.
 
   leartech-test-artifacts:
@@ -68,7 +69,7 @@ mcp_servers:
 
   leartech-tekton:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/tekton/sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/tekton/sse
     description: |
       Step-aware Tekton PipelineRun inspection served remotely. Surfaces
       WHICH STEP failed (git-clone vs ruff vs pytest), tails per-step logs,
@@ -78,8 +79,8 @@ mcp_servers:
       tools (list_pipelineruns_for_pr, step_status, step_logs,
       cancel_pipelinerun, cancel_superseded_for_pr, wait_first_failure).
       `LEARTECH_PLATFORM_MCPS_URL` env var lets the chart point at the
-      cluster-local URL; default is the staging URL which both clusters reach
-      via local DNS.
+      cluster-local URL; the source fallback is a dev-only localhost (no
+      hardcoded cluster URL).
 
   leartech-agent-local:
     type: sdk
