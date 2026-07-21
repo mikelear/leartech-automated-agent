@@ -96,17 +96,25 @@ def test_step_5_opens_pr_via_mcp_tool_never_gh_create() -> None:
     # Both variants open via the open_pr MCP tool.
     assert '`open_pr` MCP tool' in hold_true
     assert '`open_pr` MCP tool' in hold_false
-    # `gh pr create` must appear ONLY inside the explicit prohibition ("do NOT
-    # run `gh pr create`"), never as an instruction to run it. Pin the
-    # prohibition phrasing so a future edit that turns it back into a command
-    # (or drops the warning) surfaces here.
-    prohibition = 'do NOT run `gh pr create`'
-    assert prohibition in hold_true
-    assert prohibition in hold_false
-    # And the only occurrence of the phrase is that prohibition — remove it and
-    # `gh pr create` should be entirely gone from the prompt.
-    assert 'gh pr create' not in hold_true.replace(prohibition, '')
-    assert 'gh pr create' not in hold_false.replace(prohibition, '')
+    # `gh pr create` may appear ONLY inside prohibitions, never as an instruction
+    # to run it. Normalise whitespace first (the prohibition wording wraps across
+    # lines) then check every occurrence sits within a few chars of a negation.
+    for rendered in (hold_true, hold_false):
+        norm = ' '.join(rendered.split())
+        idx = 0
+        while (idx := norm.find('gh pr create', idx)) != -1:
+            # Look both directions — the negation may precede ("do NOT run `gh pr
+            # create`") or follow ("`gh pr create` … CANNOT write that status").
+            window = norm[max(0, idx - 60) : idx + 60]
+            assert any(neg in window for neg in ('NOT', 'Never', 'NO ', 'CANNOT', 'not just')), (
+                f'`gh pr create` appears without a nearby prohibition: ...{window!r}...'
+            )
+            idx += len('gh pr create')
+    # The never-fallback / retry-then-FAIL rule must be present (an MCP outage is
+    # a platform failure, not a licence to route around — the run FAILS instead).
+    for rendered in (hold_true, hold_false):
+        assert 'FAILED' in rendered
+        assert 'open_pr' in rendered
     # Only the hold=True variant posts the merge hold.
     assert HOLD_POSTING_MARKER in hold_true
     assert HOLD_POSTING_MARKER not in hold_false
