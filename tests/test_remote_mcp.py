@@ -84,6 +84,14 @@ def test_mint_token_non_200_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert remote.mint_mcp_token() is None
 
 
+def test_mint_token_200_without_access_token_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 200 whose body lacks access_token (or is non-str) → None (the `not
+    isinstance(token, str)` guard), not a bogus 'None' Bearer header."""
+    _set_env(monkeypatch, dict(_AUTH_ENV))
+    monkeypatch.setattr(remote.httpx, 'post', lambda *a, **k: _FakeResp(200, {}))
+    assert remote.mint_mcp_token() is None
+
+
 def test_mint_token_transport_error_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_env(monkeypatch, dict(_AUTH_ENV))
 

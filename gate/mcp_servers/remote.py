@@ -37,9 +37,9 @@ from __future__ import annotations
 
 import logging
 import os
-from typing import Any
 
 import httpx
+from claude_agent_sdk.types import McpHttpServerConfig
 
 log = logging.getLogger(__name__)
 
@@ -71,6 +71,12 @@ def mint_mcp_token() -> str | None:
     scope = os.environ.get('LEARTECH_AUTH_SCOPE', DEFAULT_SCOPE)
     if not (token_url and client_id and client_secret):
         return None
+    # Deliberately SYNCHRONOUS: this runs exactly once during agent startup —
+    # inside the synchronous ClaudeAgentOptions construction, BEFORE the async
+    # `query()` message loop begins. No other coroutines are scheduled yet, so
+    # the blocking grant does not stall concurrent work. Making it async would
+    # force the whole options-construction path (sync by SDK contract) to
+    # become async for no runtime benefit.
     try:
         resp = httpx.post(
             token_url,
@@ -99,12 +105,14 @@ def mint_mcp_token() -> str | None:
     return token
 
 
-def build_remote_mcp_servers() -> dict[str, Any]:
+def build_remote_mcp_servers() -> dict[str, McpHttpServerConfig]:
     """Build authed Streamable-HTTP MCP server configs for the SDK.
 
     Returns ``{name: McpHttpServerConfig}`` for each entry in ``REMOTE_MCPS``,
     or ``{}`` (with a single warning) when unconfigured — so callers can splat
     it into ``ClaudeAgentOptions(mcp_servers={...})`` unconditionally.
+    ``McpHttpServerConfig`` is the SDK's own TypedDict, so the shape is
+    statically known (no bare ``Any``).
     """
     base = os.environ.get('LEARTECH_MCP_URL', '').rstrip('/')
     if not base:
@@ -122,9 +130,13 @@ def build_remote_mcp_servers() -> dict[str, Any]:
             MCP_AUDIENCE,
         )
         return {}
-    headers = {'Authorization': f'Bearer {token}'}
-    servers: dict[str, Any] = {
-        name: {'type': 'http', 'url': f'{base}{path}', 'headers': dict(headers)} for name, path in REMOTE_MCPS.items()
+    servers: dict[str, McpHttpServerConfig] = {
+        name: McpHttpServerConfig(
+            type='http',
+            url=f'{base}{path}',
+            headers={'Authorization': f'Bearer {token}'},
+        )
+        for name, path in REMOTE_MCPS.items()
     }
     log.info('wired %d remote MCP(s): %s', len(servers), ', '.join(sorted(servers)))
     return servers
