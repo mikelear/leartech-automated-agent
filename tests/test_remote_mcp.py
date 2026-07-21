@@ -42,15 +42,43 @@ class _FakeResp:
 
 
 def test_no_mcp_url_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No LEARTECH_MCP_URL → no remote MCPs, no crash (splat of {} is a no-op)."""
+    """No LEARTECH_MCP_URL → no remote MCPs, no crash (splat of {} is a no-op).
+
+    Explicit for every registered entry (pr-context, tekton, jx3-flow) so a
+    future addition to REMOTE_MCPS can't silently skip its degrade path.
+    """
     _set_env(monkeypatch, {})
-    assert remote.build_remote_mcp_servers() == {}
+    servers = remote.build_remote_mcp_servers()
+    assert servers == {}
+    for name in ('leartech-pr-context', 'leartech-tekton', 'leartech-jx3-flow'):
+        assert name not in servers, f'{name} must be absent when unconfigured'
 
 
 def test_mcp_url_but_no_creds_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    """URL set but no auth creds → token mint returns None → {} (degrade)."""
+    """URL set but no auth creds → token mint returns None → {} (degrade).
+
+    Explicit for every registered entry (pr-context, tekton, jx3-flow) so
+    the token-mint failure path uniformly drops every remote MCP, not just
+    the first one hit.
+    """
     _set_env(monkeypatch, {'LEARTECH_MCP_URL': _AUTH_ENV['LEARTECH_MCP_URL']})
-    assert remote.build_remote_mcp_servers() == {}
+    servers = remote.build_remote_mcp_servers()
+    assert servers == {}
+    for name in ('leartech-pr-context', 'leartech-tekton', 'leartech-jx3-flow'):
+        assert name not in servers, f'{name} must be absent when auth mint fails'
+
+
+def test_jx3_flow_absent_when_token_mint_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Explicit regression: a 200 without an access_token drops jx3-flow (and every
+    other remote entry) — no partial registration where jx3-flow leaks in without
+    a Bearer header. Sibling coverage exists for the sibling entries via the
+    happy-path test; this pins the failure path specifically for the newly-ported
+    jx3-flow entry (retirement of the in-process pipeline_server shim)."""
+    _set_env(monkeypatch, dict(_AUTH_ENV))
+    monkeypatch.setattr(remote.httpx, 'post', lambda *a, **k: _FakeResp(200, {}))
+    servers = remote.build_remote_mcp_servers()
+    assert servers == {}
+    assert 'leartech-jx3-flow' not in servers
 
 
 def test_mint_token_missing_creds_is_none(monkeypatch: pytest.MonkeyPatch) -> None:

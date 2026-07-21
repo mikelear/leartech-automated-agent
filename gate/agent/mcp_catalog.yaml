@@ -25,9 +25,14 @@ mcp_servers:
   # Exposes the aggregate PR-check surface previously reimplemented in-process
   # by the retired `gate.mcp_servers.pipeline_server` shim
   # (list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass).
-  # Uses the same `LEARTECH_PLATFORM_MCPS_URL` env pattern as the other
-  # platform-mcps entries so each cluster's chart can point at its
-  # cluster-local URL.
+  #
+  # The `${LEARTECH_PLATFORM_MCPS_URL:-<default>}` shape mirrors the sibling
+  # `leartech-tekton` + `leartech-pr-context` entries below/above — the chart
+  # sets LEARTECH_PLATFORM_MCPS_URL per-cluster so each cluster's copy
+  # resolves to its cluster-local platform-mcps deployment via local DNS.
+  # The literal fallback keeps the introspection surface functional on laptop
+  # / dev environments that haven't set the env var; it is NEVER what cluster
+  # deployments actually route to (the chart always injects the env var).
   leartech-jx3-flow:
     type: http_sse
     url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/jx3_flow/sse
