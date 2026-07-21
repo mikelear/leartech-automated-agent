@@ -63,9 +63,12 @@ from typing import Any
 from claude_agent_sdk import create_sdk_mcp_server, tool
 from claude_agent_sdk.types import McpSdkServerConfig
 
-from gate.agent.step_failure_diagnosis import (
-    classify_step_failure as _classify_step_failure,
-)
+# NOTE: `classify_step_failure` (from gate.agent.step_failure_diagnosis) is
+# imported LAZILY inside _classify_step_failure_tool, not at module scope.
+# gate.agent.__init__ eagerly imports initiative -> main -> `gate.mcp_servers`,
+# so a top-level import here creates a circular import (gate.mcp_servers ⇄
+# gate.agent) that fails whenever `gate.mcp_servers` is imported as the first
+# entry point. Keeping it function-local breaks the cycle at module-load time.
 
 # ─── Cluster mapping ──────────────────────────────────────────────────────────
 
@@ -493,6 +496,10 @@ async def _wait_first_failure(args: dict[str, Any]) -> dict[str, Any]:
     {'step_name': str, 'log_tail': str, 'pipelinerun': str},
 )
 async def _classify_step_failure_tool(args: dict[str, Any]) -> dict[str, Any]:
+    # Lazy import — see the note at the top of this module (breaks the
+    # gate.mcp_servers ⇄ gate.agent circular import at module-load time).
+    from gate.agent.step_failure_diagnosis import classify_step_failure as _classify_step_failure
+
     failure = _classify_step_failure(
         step_name=str(args['step_name']),
         log_tail=str(args['log_tail']),
