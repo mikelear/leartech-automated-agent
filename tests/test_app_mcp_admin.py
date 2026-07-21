@@ -68,18 +68,19 @@ def test_post_mcps_http_sse_requires_url() -> None:
 
 
 def test_post_mcps_rejects_duplicate_name() -> None:
-    # leartech-pipeline is already in the committed catalog
+    # leartech-jx3-flow is already in the committed catalog (remote
+    # replacement for the retired in-process leartech-pipeline shim)
     resp = client.post(
         '/mcps',
         json={
-            'name': 'leartech-pipeline',
-            'type': 'sdk',
-            'builder': 'some.module:some_fn',
+            'name': 'leartech-jx3-flow',
+            'type': 'http_sse',
+            'url': 'https://example.com/mcp/jx3_flow/sse',
             'description': 'Duplicate attempt',
         },
     )
     assert resp.status_code == 409
-    assert 'leartech-pipeline' in resp.json()['detail']
+    assert 'leartech-jx3-flow' in resp.json()['detail']
 
 
 def test_post_mcps_opens_pr_on_valid() -> None:
@@ -120,8 +121,9 @@ def test_delete_mcps_404_if_not_found() -> None:
 
 
 def test_delete_mcps_409_if_role_uses_it() -> None:
-    # leartech-pipeline is referenced by initiative_agent, review_agent, forensic_agent
-    resp = client.delete('/mcps/leartech-pipeline')
+    # leartech-jx3-flow is referenced by initiative_agent, review_agent, forensic_agent
+    # (the remote replacement for the retired in-process leartech-pipeline shim).
+    resp = client.delete('/mcps/leartech-jx3-flow')
     assert resp.status_code == 409
     assert 'initiative_agent' in resp.json()['detail']
 
@@ -183,15 +185,16 @@ def test_put_roles_400_if_role_does_not_exist() -> None:
 
 
 def test_put_roles_400_if_already_granted() -> None:
-    # leartech-pipeline is already in initiative_agent.mcps
-    resp = client.put('/mcps/leartech-pipeline/roles', json={'grant': ['initiative_agent']})
+    # leartech-jx3-flow is already in initiative_agent.mcps (remote replacement
+    # for the retired in-process leartech-pipeline shim).
+    resp = client.put('/mcps/leartech-jx3-flow/roles', json={'grant': ['initiative_agent']})
     assert resp.status_code == 400
     assert 'already' in resp.json()['detail']
 
 
 def test_put_roles_400_if_revoking_ungranted() -> None:
-    # leartech-pipeline is NOT in ba_agent.mcps
-    resp = client.put('/mcps/leartech-pipeline/roles', json={'revoke': ['ba_agent']})
+    # leartech-jx3-flow is NOT in ba_agent.mcps
+    resp = client.put('/mcps/leartech-jx3-flow/roles', json={'revoke': ['ba_agent']})
     assert resp.status_code == 400
     assert 'not in role' in resp.json()['detail']
 
@@ -215,18 +218,19 @@ def test_put_roles_opens_pr_on_valid_grant() -> None:
 
 
 def test_put_roles_opens_pr_on_valid_revoke() -> None:
-    # leartech-pipeline IS in review_agent.mcps, so revoking is valid
+    # leartech-jx3-flow IS in review_agent.mcps, so revoking is valid (remote
+    # replacement for the retired in-process leartech-pipeline shim).
     with patch(
         'app.routers.mcp_admin.open_yaml_change_pr',
         new_callable=AsyncMock,
         return_value=_MOCK_PR,
     ) as mock_pr:
-        resp = client.put('/mcps/leartech-pipeline/roles', json={'revoke': ['review_agent']})
+        resp = client.put('/mcps/leartech-jx3-flow/roles', json={'revoke': ['review_agent']})
 
     assert resp.status_code == 200
     body = resp.json()
     assert body['pr_url'] == _MOCK_PR['pr_url']
     assert body['pr_number'] == _MOCK_PR['pr_number']
-    assert 'leartech-pipeline' in body['change_summary']
+    assert 'leartech-jx3-flow' in body['change_summary']
     assert 'revoke' in body['change_summary']
     mock_pr.assert_awaited_once()

@@ -66,6 +66,14 @@ REMOTE_MCPS: dict[str, str] = {
     # workspace) — moved to `gate.mcp_servers.agent_local` under the
     # `leartech-agent-local` MCP name.
     'leartech-tekton': '/mcp/tekton',
+    # PR-check status across both clusters — the Go leartech-mcp-servers
+    # `jx3_flow` server exposes the aggregate PR-check surface previously
+    # reimplemented in-process by `gate.mcp_servers.pipeline_server`
+    # (list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass).
+    # The old in-process shim is gone; the agent now consumes the remote
+    # server via authed Streamable-HTTP, same wire pattern as tekton +
+    # pr_context above.
+    'leartech-jx3-flow': '/mcp/jx3_flow',
 }
 
 

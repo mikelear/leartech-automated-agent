@@ -18,8 +18,9 @@ def test_list_mcps_returns_known_in_process_servers() -> None:
     assert response.status_code == 200
     mcps = response.json()
     names = {m['name'] for m in mcps}
-    # The four sdk-type MCPs we ship in the runtime
-    assert 'leartech-pipeline' in names
+    # Core MCPs — leartech-jx3-flow (remote) replaces the retired in-process
+    # leartech-pipeline shim (list_pr_checks / wait_for_terminal / …).
+    assert 'leartech-jx3-flow' in names
     assert 'leartech-criteria' in names
     assert 'leartech-pr-context' in names
     assert 'leartech-test-artifacts' in names
@@ -33,12 +34,14 @@ def test_list_mcps_status_includes_ready_and_not_built() -> None:
 
 
 def test_get_mcp_detail_includes_spec_and_roles() -> None:
-    response = client.get('/mcps/leartech-pipeline')
+    response = client.get('/mcps/leartech-jx3-flow')
     assert response.status_code == 200
     detail = response.json()
-    assert detail['name'] == 'leartech-pipeline'
-    assert detail['spec']['type'] == 'sdk'
-    # Two roles consume the pipeline MCP
+    assert detail['name'] == 'leartech-jx3-flow'
+    # jx3-flow is a remote http_sse MCP — replacement for the old
+    # in-process pipeline_server shim.
+    assert detail['spec']['type'] == 'http_sse'
+    # Two roles consume the PR-check MCP (initiative_agent + review_agent).
     assert 'initiative_agent' in detail['roles']
     assert 'review_agent' in detail['roles']
 
@@ -108,10 +111,13 @@ def test_health_detail_summarises_state() -> None:
 
 
 def test_mcp_health_probe_for_sdk_returns_ready() -> None:
-    response = client.get('/mcps/leartech-pipeline/health')
+    # leartech-criteria is still an in-process SDK MCP (leartech-pipeline was
+    # ported to the remote leartech-jx3-flow MCP which probes over HTTP, not
+    # via sdk_import). Use criteria to lock the sdk_import happy path.
+    response = client.get('/mcps/leartech-criteria/health')
     assert response.status_code == 200
     body = response.json()
-    assert body['name'] == 'leartech-pipeline'
+    assert body['name'] == 'leartech-criteria'
     assert body['status'] == 'ready'
     assert body['probe'] == 'sdk_import'
 

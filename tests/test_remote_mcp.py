@@ -103,21 +103,28 @@ def test_mint_token_transport_error_is_none(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_fully_configured_wires_pr_context_with_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Happy path: authed http MCP config for pr-context + tekton, no double slash, Bearer header."""
+    """Happy path: authed http MCP config for every REMOTE_MCPS entry (pr-context,
+    tekton, jx3-flow), no double slash, Bearer header."""
     _set_env(monkeypatch, dict(_AUTH_ENV))
     monkeypatch.setattr(remote.httpx, 'post', lambda *a, **k: _FakeResp(200, {'access_token': 'tok-xyz'}))
     servers = remote.build_remote_mcp_servers()
-    assert set(servers) == {'leartech-pr-context', 'leartech-tekton'}
+    assert set(servers) == {'leartech-pr-context', 'leartech-tekton', 'leartech-jx3-flow'}
     pr_ctx = servers['leartech-pr-context']
     assert pr_ctx['type'] == 'http'
     assert pr_ctx['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/pr_context'
     assert pr_ctx['headers']['Authorization'] == 'Bearer tok-xyz'
-    # leartech-tekton is the new remote MCP added in the port-tekton-shim-to-remote-mcp
-    # initiative; it uses the same bearer + base URL and lives at /mcp/tekton.
+    # leartech-tekton was added in the port-tekton-shim-to-remote-mcp initiative;
+    # it uses the same bearer + base URL and lives at /mcp/tekton.
     tekton = servers['leartech-tekton']
     assert tekton['type'] == 'http'
     assert tekton['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/tekton'
     assert tekton['headers']['Authorization'] == 'Bearer tok-xyz'
+    # leartech-jx3-flow is the remote replacement for the retired in-process
+    # `pipeline_server` shim — same bearer + base URL, lives at /mcp/jx3_flow.
+    jx3 = servers['leartech-jx3-flow']
+    assert jx3['type'] == 'http'
+    assert jx3['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/jx3_flow'
+    assert jx3['headers']['Authorization'] == 'Bearer tok-xyz'
 
 
 def test_trailing_slash_on_base_does_not_double(monkeypatch: pytest.MonkeyPatch) -> None:

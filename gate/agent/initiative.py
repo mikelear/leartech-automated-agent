@@ -57,7 +57,6 @@ from gate.mcp_servers import (
     build_agent_local_server,
     build_artifacts_server,
     build_criteria_server,
-    build_pipeline_server,
     build_remote_mcp_servers,
 )
 from gate.watcher.iteration_loop import format_feedback_payloads_for_prompt
@@ -749,17 +748,19 @@ async def run_initiative(
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
         mcp_servers={
-            'leartech-pipeline': build_pipeline_server(),
             'leartech-test-artifacts': build_artifacts_server(),
             'leartech-criteria': build_criteria_server(),
             # Two tools that couldn't move remote (LLM classifier heuristics +
             # git ops on the cloned workspace). See `gate/mcp_servers/agent_local.py`.
             'leartech-agent-local': build_agent_local_server(),
             # Authed remote MCPs (Streamable-HTTP over the network) —
-            # leartech-pr-context for open_pr AND leartech-tekton for the
+            # leartech-pr-context for open_pr, leartech-tekton for the
             # step-aware Tekton inspection surface previously reimplemented
-            # in-process. Empty dict when unconfigured, so the agent
-            # degrades cleanly rather than crashing. See
+            # in-process, AND leartech-jx3-flow for the PR-check status
+            # surface (list_pr_checks / wait_for_terminal /
+            # wait_for_first_failure_or_all_pass) previously served by an
+            # in-process `pipeline_server` shim. Empty dict when unconfigured
+            # so the agent degrades cleanly rather than crashing. See
             # gate/mcp_servers/remote.py for the registry.
             **build_remote_mcp_servers(),
         },

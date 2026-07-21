@@ -28,7 +28,6 @@ from gate.agent.system_prompt import REVIEW_SYSTEM_PROMPT
 from gate.mcp_servers import (
     build_artifacts_server,
     build_criteria_server,
-    build_pipeline_server,
     build_remote_mcp_servers,
 )
 
@@ -55,8 +54,14 @@ DEFAULT_MAX_TURNS = 20
 
 # MCP tool names follow the convention `mcp__<server-name>__<tool-name>`.
 MCP_ALLOWED_TOOLS = [
-    'mcp__leartech-pipeline__list_pr_checks',
-    'mcp__leartech-pipeline__wait_for_terminal',
+    # PR-check status surface — served remotely by the Go
+    # leartech-mcp-servers `jx3_flow` deployment at
+    # ${LEARTECH_MCP_URL}/mcp/jx3_flow. The former in-process shim
+    # (`gate.mcp_servers.pipeline_server` under the `leartech-pipeline`
+    # MCP name) has been removed; the remote is wired via `REMOTE_MCPS`
+    # in `gate.mcp_servers.remote`.
+    'mcp__leartech-jx3-flow__list_pr_checks',
+    'mcp__leartech-jx3-flow__wait_for_terminal',
     'mcp__leartech-test-artifacts__list_playwright_runs',
     'mcp__leartech-test-artifacts__head_artifact',
     'mcp__leartech-criteria__list_criteria',
@@ -88,11 +93,11 @@ def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         system_prompt=_build_system_prompt(),
         mcp_servers={
-            'leartech-pipeline': build_pipeline_server(),
             'leartech-test-artifacts': build_artifacts_server(),
             'leartech-criteria': build_criteria_server(),
-            # Authed remote MCPs (e.g. leartech-pr-context). Empty when
-            # unconfigured — see gate/mcp_servers/remote.py.
+            # Authed remote MCPs — currently leartech-pr-context,
+            # leartech-tekton, and leartech-jx3-flow (PR-check surface).
+            # Empty dict when unconfigured; see gate/mcp_servers/remote.py.
             **build_remote_mcp_servers(),
         },
         allowed_tools=MCP_ALLOWED_TOOLS,

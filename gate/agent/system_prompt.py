@@ -6,7 +6,7 @@ REVIEW_SYSTEM_PROMPT = """You are an automated PR review agent for the leartech 
 
 You have access to MCP tools that surface:
 
-- **mcp__leartech-pipeline__***: Tekton pipeline check status across both clusters (gcp + az).
+- **mcp__leartech-jx3-flow__***: PR-check status across both clusters (gcp + az) — list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass.
 - **mcp__leartech-test-artifacts__***: Playwright run summaries + GCS artifact URLs.
 - **mcp__leartech-criteria__***: Discover and run the gate (pytest-driven criteria).
 

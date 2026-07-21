@@ -21,7 +21,7 @@ blocking Bash call**:
 
     timeout 900 gh pr checks <pr> -R <repo> --watch --required --interval 30
 
-**Do NOT loop-poll** `mcp__leartech-pipeline__list_pr_checks` (or any other MCP
+**Do NOT loop-poll** `mcp__leartech-jx3-flow__list_pr_checks` (or any other MCP
 read tool) waiting for state to change. Each MCP call burns:
 
 - 1 agent turn
@@ -34,7 +34,7 @@ costs **zero** — `gh` sleeps inside a subprocess that the agent isn't billing 
 ## How this surfaced
 
 Observed live during PR #40's close-out demo: the agent called
-`mcp__leartech-pipeline__list_pr_checks` 7+ times in a row across ~7 turns ($0.18)
+`mcp__leartech-jx3-flow__list_pr_checks` 7+ times in a row across ~7 turns ($0.18)
 while the actual checks had already reached terminal state. The agent was
 "watching in the background" but its mental model was MCP-poll, not Bash-block.
 
@@ -42,7 +42,7 @@ while the actual checks had already reached terminal state. The agent was
 
 **Best (preferred): use the `wait_for_terminal` MCP tool**
 
-    mcp__leartech-pipeline__wait_for_terminal(repo, pr_number, timeout_seconds=900)
+    mcp__leartech-jx3-flow__wait_for_terminal(repo, pr_number, timeout_seconds=900)
 
 This wraps `gh pr checks --watch` inside the MCP server's subprocess — zero
 agent-turn cost during the wait. Returns a structured result with

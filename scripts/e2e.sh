@@ -167,8 +167,11 @@ grep -q '"service":"leartech-automated-agent"' /tmp/e2e-health-detail.json \
 
 status=$(curl -s -o /tmp/e2e-mcps.json -w '%{http_code}' "${BASE_URL}/mcps")
 assert_status 'GET /mcps' 200 "${status}"
-grep -q '"leartech-pipeline"' /tmp/e2e-mcps.json \
-  || { echo "✗ /mcps: leartech-pipeline missing" >&2; failures=$((failures + 1)); }
+# leartech-jx3-flow is the remote PR-check MCP (replacement for the retired
+# in-process leartech-pipeline shim). leartech-criteria remains an in-process
+# SDK MCP and anchors the sdk_import probe smoke below.
+grep -q '"leartech-jx3-flow"' /tmp/e2e-mcps.json \
+  || { echo "✗ /mcps: leartech-jx3-flow missing" >&2; failures=$((failures + 1)); }
 
 status=$(curl -s -o /tmp/e2e-roles.json -w '%{http_code}' "${BASE_URL}/roles")
 assert_status 'GET /roles' 200 "${status}"
@@ -181,9 +184,11 @@ grep -q 'Phase 1' /tmp/e2e-topo.json \
   || { echo "✗ /topology: Phase 1 marker missing" >&2; failures=$((failures + 1)); }
 
 # Active probe on an sdk-type MCP — must report 'ready' + sdk_import probe kind.
+# leartech-criteria is still an in-process SDK MCP (leartech-pipeline was
+# ported to remote leartech-jx3-flow whose probe uses HTTP, not sdk_import).
 status=$(curl -s -o /tmp/e2e-mcp-health.json -w '%{http_code}' \
-  "${BASE_URL}/mcps/leartech-pipeline/health")
-assert_status 'GET /mcps/leartech-pipeline/health' 200 "${status}"
+  "${BASE_URL}/mcps/leartech-criteria/health")
+assert_status 'GET /mcps/leartech-criteria/health' 200 "${status}"
 grep -q '"status": *"ready"' /tmp/e2e-mcp-health.json \
   || { echo "✗ /mcps/.../health: status!=ready" >&2; failures=$((failures + 1)); }
 

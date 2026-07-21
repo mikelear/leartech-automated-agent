@@ -21,11 +21,23 @@
 # and reference it in the right role's `mcps` list. No agent code changes.
 
 mcp_servers:
-  # In-process — what ships with the runtime today
-  leartech-pipeline:
-    type: sdk
-    builder: gate.mcp_servers.pipeline_server:build_pipeline_server
-    description: Tekton check status across both clusters; PR pipeline state queries.
+  # Remote — served by the Go `leartech-mcp-servers/jx3_flow` deployment.
+  # Exposes the aggregate PR-check surface previously reimplemented in-process
+  # by the retired `gate.mcp_servers.pipeline_server` shim
+  # (list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass).
+  # Uses the same `LEARTECH_PLATFORM_MCPS_URL` env pattern as the other
+  # platform-mcps entries so each cluster's chart can point at its
+  # cluster-local URL.
+  leartech-jx3-flow:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/jx3_flow/sse
+    description: |
+      PR-check status across both clusters — list_pr_checks,
+      wait_for_terminal, wait_for_first_failure_or_all_pass. Served
+      remotely by the Go `leartech-mcp-servers/jx3_flow` deployment; the
+      former in-process SDK shim (`gate.mcp_servers.pipeline_server`) has
+      been deleted. New features for the pipeline MCP land in the
+      leartech-mcp-servers repo.
 
   leartech-criteria:
     type: sdk
@@ -134,7 +146,7 @@ roles:
       model: claude-opus-4-7
       max_turns: 1000
     mcps:
-      - leartech-pipeline
+      - leartech-jx3-flow
       - leartech-criteria
       - leartech-pr-context
       - leartech-test-artifacts
@@ -153,7 +165,7 @@ roles:
       Read-only verdict agent. Looks at a PR, runs the gate, produces a
       structured review. Cannot write code or push — that's the build agent's job.
     mcps:
-      - leartech-pipeline
+      - leartech-jx3-flow
       - leartech-pr-context
       - leartech-test-artifacts
     tools:
@@ -184,7 +196,7 @@ roles:
       qa-arch ring 2 (staging) and ring 3 (forensic) findings, writes them
       to the catalog via POST /lessons.
     mcps:
-      - leartech-pipeline
+      - leartech-jx3-flow
       - leartech-pr-context
       - github-copilot-mcp
     tools:

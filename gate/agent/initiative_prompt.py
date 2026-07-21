@@ -107,7 +107,7 @@ You have access to:
 - **Read / Write / Edit / Glob / Grep**: standard file ops on the local working tree.
 - **Bash**: shell commands (`git`, `gh`, `npm`, etc.). Your working directory is set
   to the consumer repo's checkout — git ops happen there.
-- **mcp__leartech-pipeline__***: Tekton check status across both clusters (aggregate view).
+- **mcp__leartech-jx3-flow__***: PR-check status across both clusters (aggregate view — list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass). Served remotely by the Go leartech-mcp-servers deployment at `${{LEARTECH_MCP_URL}}/mcp/jx3_flow`; the former in-process shim (`gate.mcp_servers.pipeline_server`) has been retired.
 - **mcp__leartech-tekton__***: Step-aware Tekton inspection — WHICH STEP failed
   (git-clone vs ruff vs pytest vs kaniko), per-step logs, and superseded-run
   cancellation. Served remotely by the Go leartech-mcp-servers deployment at
@@ -151,7 +151,7 @@ You have access to:
      references files outside your PR's diff (you must verify this — don't assume).
 
 9. **Fail-fast between push and the next decision**: after each push, call
-   `mcp__leartech-pipeline__wait_for_first_failure_or_all_pass`. It returns within ~15s
+   `mcp__leartech-jx3-flow__wait_for_first_failure_or_all_pass`. It returns within ~15s
    of any failure (lint surfaces fast even while end2end runs another 10 minutes) so
    you can iterate immediately on a fresh commit. Use the full-terminal
    `wait_for_terminal` only before the **final** "ready for review" sticky — for

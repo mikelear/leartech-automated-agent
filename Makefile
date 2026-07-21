@@ -28,11 +28,6 @@ help:
 	@echo "    initiative  Write-mode initiative (INITIATIVE=…)"
 	@echo "    lessons-list   Browse lessons catalog"
 	@echo ""
-	@echo "  Local mock-MCP testing (no Anthropic, no GitHub, no kubectl):"
-	@echo "    mock-scenarios          List available mock scenarios"
-	@echo "    mock-scenario SCENARIO=…  Run a scenario through the MCP tools (no agent)"
-	@echo "    initiative-mock INITIATIVE=… SCENARIO=…  Full agent run with mock pipeline"
-	@echo ""
 
 setup:
 	@command -v uv >/dev/null 2>&1 || { echo "Installing UV..."; curl -LsSf https://astral.sh/uv/install.sh | sh; }
@@ -125,52 +120,13 @@ initiative:
 lessons-list:
 	uv run lessons list
 
-# ─── Local mock-MCP testing ─────────────────────────────────────────────────
-# Drives the agent's MCP tools against scripted scenarios — no Anthropic,
-# no GitHub, no kubectl. See gate/mcp_servers/pipeline_server_mock.py for
-# scenario format. Demonstrates the agent's fail-fast / wait-for-terminal
-# semantics on synthetic inputs.
+# ─── Local mock-MCP testing (retired) ──────────────────────────────────────
+# The in-process `pipeline_server` shim + its mock counterpart were retired
+# when the PR-check surface (list_pr_checks / wait_for_terminal /
+# wait_for_first_failure_or_all_pass) moved to the remote leartech-jx3-flow
+# MCP. Local mock harnesses (`make mock-scenario`, `make initiative-mock`,
+# `scripts/run_mock_scenario.py`, `gate/mcp_servers/mock_scenarios/*.yaml`)
+# have been deleted; drive integration tests directly against the deployed
+# Go `leartech-mcp-servers/jx3_flow` server via `scripts/mcp_test_client.py`.
 
-mock-scenarios:
-	@echo ""
-	@echo "Available scenarios in gate/mcp_servers/mock_scenarios/:"
-	@echo ""
-	@for f in gate/mcp_servers/mock_scenarios/*.yaml; do \
-		name=$$(basename $$f .yaml); \
-		desc=$$(awk '/^description:/{flag=1; next} /^[a-z]+:/{flag=0} flag' $$f | sed 's/^  //' | head -1); \
-		printf "  %-40s %s\n" "$$name" "$$desc"; \
-	done
-	@echo ""
-	@echo "Run with: make mock-scenario SCENARIO=<name>"
-	@echo ""
-
-mock-scenario:
-	@if [ -z "$(SCENARIO)" ]; then \
-		echo "Usage: make mock-scenario SCENARIO=<name>"; \
-		echo "       (run 'make mock-scenarios' to list available)"; \
-		exit 2; \
-	fi
-	@if [ ! -f "gate/mcp_servers/mock_scenarios/$(SCENARIO).yaml" ]; then \
-		echo "ERROR: scenario not found at gate/mcp_servers/mock_scenarios/$(SCENARIO).yaml"; \
-		echo "Run 'make mock-scenarios' to list available."; \
-		exit 2; \
-	fi
-	uv run python scripts/run_mock_scenario.py gate/mcp_servers/mock_scenarios/$(SCENARIO).yaml
-
-initiative-mock:
-	@if [ -z "$(INITIATIVE)" ] || [ -z "$(SCENARIO)" ]; then \
-		echo "Usage: make initiative-mock INITIATIVE=<name> SCENARIO=<name>"; \
-		echo "       (needs ANTHROPIC_API_KEY in env; uses mock pipeline MCP)"; \
-		exit 2; \
-	fi
-	@if [ ! -f "gate/mcp_servers/mock_scenarios/$(SCENARIO).yaml" ]; then \
-		echo "ERROR: scenario gate/mcp_servers/mock_scenarios/$(SCENARIO).yaml not found"; \
-		exit 2; \
-	fi
-	@mkdir -p logs
-	@LOGFILE="logs/initiative-mock-$(INITIATIVE)-$(SCENARIO)-$$(date +%Y%m%d-%H%M%S).log"; \
-	echo "→ logging to $$LOGFILE"; \
-	LEARTECH_MOCK_PIPELINE_SCENARIO=$$PWD/gate/mcp_servers/mock_scenarios/$(SCENARIO).yaml \
-		uv run initiative initiatives/$(INITIATIVE).yaml 2>&1 | tee "$$LOGFILE"
-
-.PHONY: help setup fmt lint test helm-lint helm-template helm all check serve api-test build docker-run gate agent initiative lessons-list mock-scenarios mock-scenario initiative-mock
+.PHONY: help setup fmt lint test helm-lint helm-template helm all check serve api-test build docker-run gate agent initiative lessons-list

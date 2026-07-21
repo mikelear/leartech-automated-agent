@@ -25,9 +25,11 @@ def test_load_real_catalog_validates() -> None:
     """The committed mcp_catalog.yaml is valid + parses into the schema."""
     load_catalog.cache_clear()
     catalog = load_catalog()
-    # We expect the four in-process MCPs we know about
+    # Core MCPs shipped in the runtime today. leartech-jx3-flow is the
+    # remote replacement for the retired in-process leartech-pipeline shim
+    # (list_pr_checks / wait_for_terminal / wait_for_first_failure_or_all_pass).
     for name in (
-        'leartech-pipeline',
+        'leartech-jx3-flow',
         'leartech-criteria',
         'leartech-pr-context',
         'leartech-test-artifacts',
@@ -50,7 +52,7 @@ def test_role_mcps_resolve_in_real_catalog() -> None:
 def test_get_role_returns_typed_config() -> None:
     role = get_role('initiative_agent')
     assert isinstance(role, Role)
-    assert 'leartech-pipeline' in role.mcps
+    assert 'leartech-jx3-flow' in role.mcps
     assert 'Bash' in role.tools
 
 
@@ -60,16 +62,20 @@ def test_get_role_unknown_raises_keyerror() -> None:
 
 
 def test_get_mcp_returns_typed_config() -> None:
-    mcp = get_mcp('leartech-pipeline')
+    # leartech-criteria is a stable in-process SDK MCP; leartech-jx3-flow (the
+    # remote replacement for the retired pipeline_server shim) is exercised by
+    # test_platform_mcps_entries_load_as_http_sse below.
+    mcp = get_mcp('leartech-criteria')
     assert isinstance(mcp, McpServer)
     assert mcp.type == 'sdk'
-    assert mcp.builder == 'gate.mcp_servers.pipeline_server:build_pipeline_server'
+    assert mcp.builder == 'gate.mcp_servers.criteria_server:build_criteria_server'
 
 
 def test_platform_mcps_entries_load_as_http_sse() -> None:
-    """leartech-tekton + leartech-pr-context are http_sse-hosted via platform-mcps.
+    """leartech-jx3-flow / leartech-tekton / leartech-pr-context are http_sse-hosted
+    via platform-mcps.
 
-    Catches a regression where the catalog reverts the entries to `type: sdk`
+    Catches a regression where the catalog reverts an entry to `type: sdk`
     (e.g. an accidental git revert) — operators reading /mcps would see the
     in-process builder rather than the URL deployment they expect to probe.
     """
@@ -79,6 +85,7 @@ def test_platform_mcps_entries_load_as_http_sse() -> None:
     for name, sse_suffix in (
         ('leartech-tekton', '/mcp/tekton/sse'),
         ('leartech-pr-context', '/mcp/pr-context/sse'),
+        ('leartech-jx3-flow', '/mcp/jx3_flow/sse'),
     ):
         assert name in catalog.mcp_servers, f'{name} missing from catalog'
         mcp = catalog.mcp_servers[name]
@@ -186,7 +193,9 @@ def test_http_sse_mcp_requires_url() -> None:
 
 
 def test_reachable_status_for_sdk_returns_ready_for_real_builder() -> None:
-    mcp = get_mcp('leartech-pipeline')
+    # leartech-criteria still ships as an in-process SDK MCP (leartech-pipeline
+    # was ported to remote leartech-jx3-flow).
+    mcp = get_mcp('leartech-criteria')
     assert reachable_status(mcp) == 'ready'
 
 
