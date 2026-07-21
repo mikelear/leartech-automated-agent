@@ -53,14 +53,27 @@ mcp_servers:
     type: http_sse
     url: ${LEARTECH_PLATFORM_MCPS_URL:-https://leartech-platform-mcps-jx-staging.jx.leartech.com}/mcp/tekton/sse
     description: |
-      Step-aware Tekton PipelineRun inspection via platform-mcps. Surfaces
+      Step-aware Tekton PipelineRun inspection served remotely. Surfaces
       WHICH STEP failed (git-clone vs ruff vs pytest), tails per-step logs,
-      and cancels superseded runs on force-push. Migrated from the in-process
-      SDK builder (`gate.mcp_servers.tekton`, now deprecated) to a long-running
-      HTTP/SSE server hosted in each cluster's platform-mcps deployment.
+      and cancels superseded runs on force-push. The former in-process SDK
+      builder (`gate.mcp_servers.tekton`) has been deleted; the Go
+      `leartech-mcp-servers/tekton` deployment now exposes the same six
+      tools (list_pipelineruns_for_pr, step_status, step_logs,
+      cancel_pipelinerun, cancel_superseded_for_pr, wait_first_failure).
       `LEARTECH_PLATFORM_MCPS_URL` env var lets the chart point at the
       cluster-local URL; default is the staging URL which both clusters reach
       via local DNS.
+
+  leartech-agent-local:
+    type: sdk
+    builder: gate.mcp_servers.agent_local:build_agent_local_server
+    description: |
+      Two step-aware helpers that MUST stay in-process because they depend on
+      state inside the agent pod: `classify_step_failure` (LLM-adjacent
+      heuristic classifier — imports gate.agent.step_failure_diagnosis) and
+      `rebase_branch_on_base` (git ops on the cloned consumer-repo workspace).
+      The rest of the step-aware surface lives in the remote `leartech-tekton`
+      MCP; this catalog entry is the boundary marker.
 
   leartech-initiatives:
     type: sdk
@@ -126,6 +139,7 @@ roles:
       - leartech-pr-context
       - leartech-test-artifacts
       - leartech-tekton
+      - leartech-agent-local
     tools:
       - Read
       - Write

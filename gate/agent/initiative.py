@@ -54,11 +54,11 @@ from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
 from gate.agent.run_driver import mark_first_turn, update_run_progress
 from gate.initiatives import load_initiative
 from gate.mcp_servers import (
+    build_agent_local_server,
     build_artifacts_server,
     build_criteria_server,
     build_pipeline_server,
     build_remote_mcp_servers,
-    build_tekton_server,
 )
 from gate.watcher.iteration_loop import format_feedback_payloads_for_prompt
 
@@ -67,8 +67,16 @@ logger = logging.getLogger(__name__)
 # Phase G.2 — step-aware failure diagnosis tools wired ONLY into the
 # initiative role (the read-only review_agent in `gate/agent/main.py` keeps
 # the slimmer MCP_ALLOWED_TOOLS set). Catalog (`mcp_catalog.yaml`) is the
-# source of truth for role→MCP wiring; this list mirrors the
-# `leartech-tekton` MCP's tool surface (see `gate/mcp_servers/tekton.py`).
+# source of truth for role→MCP wiring; this list mirrors the two MCPs
+# that carry step-aware diagnosis:
+#
+#   * ``leartech-tekton`` — REMOTE (Go leartech-mcp-servers at
+#     ``${LEARTECH_MCP_URL}/mcp/tekton``). Wired via ``REMOTE_MCPS`` in
+#     ``gate.mcp_servers.remote``. Exposes the six kubectl-backed tools.
+#   * ``leartech-agent-local`` — IN-PROCESS SDK
+#     (``gate.mcp_servers.agent_local``). Carries the two tools that
+#     depend on state inside the agent pod (LLM classifier heuristics +
+#     git ops on the cloned workspace) and therefore cannot move remote.
 INITIATIVE_TEKTON_TOOLS = [
     'mcp__leartech-tekton__list_pipelineruns_for_pr',
     'mcp__leartech-tekton__step_status',
@@ -76,8 +84,8 @@ INITIATIVE_TEKTON_TOOLS = [
     'mcp__leartech-tekton__cancel_pipelinerun',
     'mcp__leartech-tekton__cancel_superseded_for_pr',
     'mcp__leartech-tekton__wait_first_failure',
-    'mcp__leartech-tekton__classify_step_failure',
-    'mcp__leartech-tekton__rebase_branch_on_base',
+    'mcp__leartech-agent-local__classify_step_failure',
+    'mcp__leartech-agent-local__rebase_branch_on_base',
 ]
 
 
@@ -744,11 +752,15 @@ async def run_initiative(
             'leartech-pipeline': build_pipeline_server(),
             'leartech-test-artifacts': build_artifacts_server(),
             'leartech-criteria': build_criteria_server(),
-            'leartech-tekton': build_tekton_server(),
-            # Authed remote MCPs (Streamable-HTTP over the network) — currently
-            # leartech-pr-context for open_pr. Empty dict when unconfigured, so
-            # the agent degrades cleanly rather than crashing. See
-            # gate/mcp_servers/remote.py.
+            # Two tools that couldn't move remote (LLM classifier heuristics +
+            # git ops on the cloned workspace). See `gate/mcp_servers/agent_local.py`.
+            'leartech-agent-local': build_agent_local_server(),
+            # Authed remote MCPs (Streamable-HTTP over the network) —
+            # leartech-pr-context for open_pr AND leartech-tekton for the
+            # step-aware Tekton inspection surface previously reimplemented
+            # in-process. Empty dict when unconfigured, so the agent
+            # degrades cleanly rather than crashing. See
+            # gate/mcp_servers/remote.py for the registry.
             **build_remote_mcp_servers(),
         },
         allowed_tools=[*WRITE_MODE_TOOLS, *MCP_ALLOWED_TOOLS, *INITIATIVE_TEKTON_TOOLS],

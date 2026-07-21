@@ -8,18 +8,26 @@ primitives this gate uses internally — same code, two consumption modes.
 `LEARTECH_MOCK_PIPELINE_SCENARIO` is set — the swap is opaque to the agent
 (same tool names, same return shape). See `pipeline_server_mock.py` for
 local-integration-test usage.
+
+The Tekton tool surface (list_pipelineruns_for_pr / step_status / step_logs /
+cancel_pipelinerun / cancel_superseded_for_pr / wait_first_failure) now lives
+in the Go ``leartech-mcp-servers/tekton`` deployment at
+``${LEARTECH_MCP_URL}/mcp/tekton`` and is wired through
+:mod:`gate.mcp_servers.remote`. The two tools that couldn't move remote —
+``classify_step_failure`` and ``rebase_branch_on_base`` — moved to
+:mod:`gate.mcp_servers.agent_local` under the ``leartech-agent-local`` MCP.
 """
 
 import os
 
 from claude_agent_sdk.types import McpSdkServerConfig
 
+from gate.mcp_servers.agent_local import build_agent_local_server
 from gate.mcp_servers.artifacts_server import build_artifacts_server
 from gate.mcp_servers.criteria_server import build_criteria_server
 from gate.mcp_servers.initiatives_server import build_initiatives_server
 from gate.mcp_servers.pipeline_server import build_pipeline_server as _build_real_pipeline_server
 from gate.mcp_servers.remote import build_remote_mcp_servers
-from gate.mcp_servers.tekton import build_tekton_server
 
 
 def build_pipeline_server() -> McpSdkServerConfig:
@@ -38,10 +46,10 @@ def build_pipeline_server() -> McpSdkServerConfig:
 
 
 __all__ = [
-    'build_pipeline_server',
+    'build_agent_local_server',
     'build_artifacts_server',
     'build_criteria_server',
     'build_initiatives_server',
-    'build_tekton_server',
+    'build_pipeline_server',
     'build_remote_mcp_servers',
 ]

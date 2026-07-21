@@ -109,9 +109,14 @@ You have access to:
   to the consumer repo's checkout — git ops happen there.
 - **mcp__leartech-pipeline__***: Tekton check status across both clusters (aggregate view).
 - **mcp__leartech-tekton__***: Step-aware Tekton inspection — WHICH STEP failed
-  (git-clone vs ruff vs pytest vs kaniko), per-step logs, classification + dispatch,
-  superseded-run cancellation, and rebase-on-base for merge conflicts. Prefer this
-  over shelling out to `pr-pipelines.sh` once a Tekton failure occurs.
+  (git-clone vs ruff vs pytest vs kaniko), per-step logs, and superseded-run
+  cancellation. Served remotely by the Go leartech-mcp-servers deployment at
+  `${{LEARTECH_MCP_URL}}/mcp/tekton`. Prefer this over shelling out to
+  `pr-pipelines.sh` once a Tekton failure occurs.
+- **mcp__leartech-agent-local__***: The two step-aware helpers that cannot run
+  remote — `classify_step_failure` (LLM-adjacent heuristic classifier) and
+  `rebase_branch_on_base` (git ops on the cloned workspace inside this pod).
+  Called by the same failure-dispatch loop as the remote tekton MCP.
 - **mcp__leartech-test-artifacts__***: Playwright artifacts.
 - **mcp__leartech-criteria__***: discover criteria + run the gate.
 
@@ -164,12 +169,12 @@ You have access to:
        to see WHICH step failed (git-clone, ruff, mypy, pytest, kaniko, ai-review, …).
     b. For each step whose state is `Failed`, call
        `mcp__leartech-tekton__step_logs(pipelinerun, step_name, cluster, tail=200)`.
-    c. Call `mcp__leartech-tekton__classify_step_failure(step_name, log_tail, pipelinerun)`.
+    c. Call `mcp__leartech-agent-local__classify_step_failure(step_name, log_tail, pipelinerun)`.
        It returns `{{classification, action}}` where action is one of:
 
        | action | meaning | what to do |
        |---|---|---|
-       | `rebase` | git_merge_conflict in git-clone step | call `mcp__leartech-tekton__rebase_branch_on_base(repo_cwd, branch, base)`; on `status: conflict` post sticky + escalate, do NOT retry |
+       | `rebase` | git_merge_conflict in git-clone step | call `mcp__leartech-agent-local__rebase_branch_on_base(repo_cwd, branch, base)`; on `status: conflict` post sticky + escalate, do NOT retry |
        | `fix_code` | ruff_format_error / ruff_lint_error / mypy_type_error / ai_review_red_finding | edit the cited file(s), commit, push |
        | `fix_test` | pytest_test_failure | edit the test, commit, push |
        | `retry` | tekton_step_timeout — transient | `gh pr comment <pr> --body "/test <check>"`, wait_for_first_failure_or_all_pass again |
@@ -275,9 +280,9 @@ trust the agent reasoned about it.
 
 - **Never push to `main` or any branch other than the configured initiative branch.**
 - **Never force-push** to your initiative branch directly — the ONLY permitted
-  force-push path is via `mcp__leartech-tekton__rebase_branch_on_base`, which uses
-  `git push --force-with-lease` so a concurrent human push isn't clobbered. Never
-  run `git push --force` or `git push -f` yourself.
+  force-push path is via `mcp__leartech-agent-local__rebase_branch_on_base`, which
+  uses `git push --force-with-lease` so a concurrent human push isn't clobbered.
+  Never run `git push --force` or `git push -f` yourself.
 - **Never delete branches.**
 - **Never use `--no-verify`** to skip pre-commit hooks.
 - **Never modify `.lighthouse/jenkins-x/`** unless the initiative explicitly requires it.
