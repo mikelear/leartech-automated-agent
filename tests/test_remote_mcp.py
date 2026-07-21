@@ -103,15 +103,21 @@ def test_mint_token_transport_error_is_none(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_fully_configured_wires_pr_context_with_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Happy path: authed http MCP config for pr-context, no double slash, Bearer header."""
+    """Happy path: authed http MCP config for pr-context + tekton, no double slash, Bearer header."""
     _set_env(monkeypatch, dict(_AUTH_ENV))
     monkeypatch.setattr(remote.httpx, 'post', lambda *a, **k: _FakeResp(200, {'access_token': 'tok-xyz'}))
     servers = remote.build_remote_mcp_servers()
-    assert set(servers) == {'leartech-pr-context'}
-    cfg = servers['leartech-pr-context']
-    assert cfg['type'] == 'http'
-    assert cfg['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/pr_context'
-    assert cfg['headers']['Authorization'] == 'Bearer tok-xyz'
+    assert set(servers) == {'leartech-pr-context', 'leartech-tekton'}
+    pr_ctx = servers['leartech-pr-context']
+    assert pr_ctx['type'] == 'http'
+    assert pr_ctx['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/pr_context'
+    assert pr_ctx['headers']['Authorization'] == 'Bearer tok-xyz'
+    # leartech-tekton is the new remote MCP added in the port-tekton-shim-to-remote-mcp
+    # initiative; it uses the same bearer + base URL and lives at /mcp/tekton.
+    tekton = servers['leartech-tekton']
+    assert tekton['type'] == 'http'
+    assert tekton['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/tekton'
+    assert tekton['headers']['Authorization'] == 'Bearer tok-xyz'
 
 
 def test_trailing_slash_on_base_does_not_double(monkeypatch: pytest.MonkeyPatch) -> None:

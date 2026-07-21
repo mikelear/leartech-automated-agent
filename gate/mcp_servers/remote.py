@@ -56,6 +56,16 @@ _TOKEN_TIMEOUT = 15.0
 # wire another remote MCP — no other code changes.
 REMOTE_MCPS: dict[str, str] = {
     'leartech-pr-context': '/mcp/pr_context',
+    # Step-aware Tekton PipelineRun inspection — the Go leartech-mcp-servers
+    # `tekton` server exposes the same 6-tool surface the in-process shim used
+    # to reimplement via kubectl (list_pipelineruns_for_pr, step_status,
+    # step_logs, cancel_pipelinerun, cancel_superseded_for_pr,
+    # wait_first_failure). The former shim (`gate.mcp_servers.tekton`) is
+    # gone; the two tools that must stay in-process — classify_step_failure
+    # (LLM-based diagnosis) and rebase_branch_on_base (git ops on the cloned
+    # workspace) — moved to `gate.mcp_servers.agent_local` under the
+    # `leartech-agent-local` MCP name.
+    'leartech-tekton': '/mcp/tekton',
 }
 
 

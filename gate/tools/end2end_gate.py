@@ -420,9 +420,10 @@ def build_end2end_failure(
     should filter checks with :func:`is_end2end_gate` first; this guard is a
     cheap defensive net so callers don't have to.
 
-    ``log_tail`` is the raw step-log text (what
-    ``leartech-tekton.step_logs`` produces by default). Parsing tolerates
-    surrounding non-JSON content; see :func:`parse_results_json_from_log`.
+    ``log_tail`` is the raw step-log text (what the remote
+    ``mcp__leartech-tekton__step_logs`` tool returns via
+    ``${LEARTECH_MCP_URL}/mcp/tekton``). Parsing tolerates surrounding
+    non-JSON content; see :func:`parse_results_json_from_log`.
 
     ``ui_artifacts`` is optional — when the caller has already parsed the
     parallel end2end-ui Playwright sticky (via
@@ -470,41 +471,36 @@ def fetch_end2end_failure(
     gate: str,
     pipelinerun_name: str,
     cluster: str,
+    step_logs_fn: StepLogsFn,
     step_name: str = 'run-tests',
     tail: int = 500,
-    step_logs_fn: StepLogsFn | None = None,
     ui_artifacts: tuple[Artifact, ...] = (),
 ) -> End2EndFailure | None:
     """Fetch the failing step's log via the tekton MCP path and build a payload.
 
     This is the orchestrator the watcher calls when ``list_pr_checks``
-    surfaces a failed ``end2end`` / ``end2end-ui`` check. It deliberately
-    accepts ``step_logs_fn`` as a parameter (defaulting to the in-process
-    tekton.step_logs helper) so tests can drive the full path without
-    invoking ``kubectl``.
+    surfaces a failed ``end2end`` / ``end2end-ui`` check. ``step_logs_fn``
+    is required — callers inject either the remote MCP-backed
+    ``mcp__leartech-tekton__step_logs`` bridge or (in tests) a stub. There
+    is no in-process default any more: the tekton MCP lives at
+    ``${LEARTECH_MCP_URL}/mcp/tekton`` and callers reach it through the
+    MCP layer, not by importing a local Python function.
 
-    Soft-fail contract: if the step_logs call raises any exception (kubectl
-    timeout, context error, transient API hiccup), this function logs at WARN
-    and returns ``None`` rather than letting the watcher crash. The watcher's
-    next poll will re-attempt — by then the transient should have cleared.
-    Mirrors the resilience pattern in
+    Soft-fail contract: if the ``step_logs_fn`` call raises any exception
+    (transport error, context timeout, kubectl blip on the remote MCP),
+    this function logs at WARN and returns ``None`` rather than letting
+    the watcher crash. The watcher's next poll will re-attempt — by then
+    the transient should have cleared. Mirrors the resilience pattern in
     :func:`gate.tools.playwright_artifacts.read_playwright_runs`.
 
-    ``step_name`` defaults to ``run-tests`` (the canonical final step in the
-    catalog's end2end task). Callers driving the orchestrator from a custom
-    step name should pass it explicitly. Empty log → :func:`build_end2end_failure`
-    handles it (returns a payload with ``results.json not found`` summary).
+    ``step_name`` defaults to ``run-tests`` (the canonical final step in
+    the catalog's end2end task). Callers driving the orchestrator from a
+    custom step name should pass it explicitly. Empty log →
+    :func:`build_end2end_failure` handles it (returns a payload with
+    ``results.json not found`` summary).
     """
     if not is_end2end_gate(gate):
         return None
-
-    if step_logs_fn is None:
-        # Lazy import: production callers use the tekton MCP helper, but the
-        # import is heavyweight (drags kubernetes-asyncio + subprocess), and
-        # most tests inject a stub directly. Keep the cost at the call site.
-        from gate.mcp_servers.tekton import step_logs as _default_step_logs
-
-        step_logs_fn = _default_step_logs
 
     try:
         log_tail = step_logs_fn(pipelinerun_name, step_name, cluster, tail)
