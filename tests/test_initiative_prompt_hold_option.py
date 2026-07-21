@@ -93,11 +93,20 @@ def test_step_5_opens_pr_via_mcp_tool_never_gh_create() -> None:
     re-introduces `gh pr create` or an always-hold surfaces here."""
     hold_true = render_initiative_system_prompt(hold=True)
     hold_false = render_initiative_system_prompt(hold=False)
-    # Both variants open via the open_pr MCP tool — and never `gh pr create`.
+    # Both variants open via the open_pr MCP tool.
     assert '`open_pr` MCP tool' in hold_true
     assert '`open_pr` MCP tool' in hold_false
-    assert 'gh pr create' not in hold_true
-    assert 'gh pr create' not in hold_false
+    # `gh pr create` must appear ONLY inside the explicit prohibition ("do NOT
+    # run `gh pr create`"), never as an instruction to run it. Pin the
+    # prohibition phrasing so a future edit that turns it back into a command
+    # (or drops the warning) surfaces here.
+    prohibition = 'do NOT run `gh pr create`'
+    assert prohibition in hold_true
+    assert prohibition in hold_false
+    # And the only occurrence of the phrase is that prohibition — remove it and
+    # `gh pr create` should be entirely gone from the prompt.
+    assert 'gh pr create' not in hold_true.replace(prohibition, '')
+    assert 'gh pr create' not in hold_false.replace(prohibition, '')
     # Only the hold=True variant posts the merge hold.
     assert HOLD_POSTING_MARKER in hold_true
     assert HOLD_POSTING_MARKER not in hold_false
