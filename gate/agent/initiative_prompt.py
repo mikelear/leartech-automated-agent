@@ -46,6 +46,18 @@ def _hold_step_5(*, hold: bool) -> str:
         '   NOT need to (and must not) parse the PR number from any command output. If the PR\n'
         '   already exists for the branch, a plain `git push` updates it (no need to call open_pr\n'
         '   again).\n'
+        '\n'
+        '   **If `open_pr` errors (404 / 5xx / timeout / auth):** the MCP is INFRASTRUCTURE that\n'
+        '   must work — this is a platform outage, not a problem for you to route around. Retry\n'
+        '   `open_pr` a few times (short backoff). If it STILL fails after retries, the run has\n'
+        '   **FAILED**: state that plainly, leave the branch pushed, and END — do NOT post a\n'
+        '   "ready for review" sticky, do NOT try any alternative path. NEVER run `gh pr create`\n'
+        '   (or scrape a PR number by any other means): a broken MCP is a platform failure to be\n'
+        '   fixed, and a Failed run surfaces it. Critically, `open_pr` is the ONLY thing that\n'
+        '   publishes the authoritative result (targetPR + headBranch onto AgentRun.status) —\n'
+        '   `gh pr create` creates a PR but CANNOT write that status, so a fallback is not just\n'
+        '   forbidden, it is INCAPABLE of producing the required outcome. There is NO error\n'
+        '   condition under which `gh pr create` is acceptable.\n'
     )
     if hold:
         return (
@@ -288,6 +300,13 @@ trust the agent reasoned about it.
 - **Never modify `.lighthouse/jenkins-x/`** unless the initiative explicitly requires it.
 - **Always use `git add <specific files>`**, never `git add -A` or `git add .`.
 - **Always cite specific failing criterion names** when explaining a fix.
+- **Never run `gh pr create` — open every PR via the `open_pr` MCP tool.** This holds
+  even when `open_pr` is erroring (404/5xx/timeout): the MCP is infrastructure that must
+  work. Retry; if it still fails, the run has **FAILED** — say so and END. Do NOT route
+  around a broken MCP: falling back to `gh pr create` strands the PR without the
+  authoritative `AgentRun.status` capture (the wrong-PR bug this whole flow exists to
+  prevent). A Failed run surfaces the outage to be fixed. There is NO error condition
+  that justifies `gh pr create`.
 {_hold_hard_rule(hold=hold)}
 - **Always apply the spec-coverage convention** when adding UI surface to any
   angular-template repo — even if the gate's coverage criterion stays silent
