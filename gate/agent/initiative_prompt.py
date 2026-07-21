@@ -32,26 +32,36 @@ from __future__ import annotations
 
 def _hold_step_5(*, hold: bool) -> str:
     """Return the step-5 block, tailored to whether the initiative opts into `/hold`."""
+    # PR creation goes through the open_pr MCP tool, NOT `gh pr create`. The tool
+    # creates the PR via the GitHub API (structured response) and publishes the
+    # number + head branch onto this AgentRun's status — so the number is
+    # captured authoritatively at the source, never scraped from CLI output.
+    open_pr_block = (
+        "5. **Open the PR via the `open_pr` MCP tool** (do NOT run `gh pr create` yourself):\n"
+        '   first `git push` your branch, then call\n'
+        '   `mcp__leartech-pr-context__open_pr` with:\n'
+        '       run_id=$LEARTECH_RUN_ID, namespace=$LEARTECH_NAMESPACE (or the run namespace),\n'
+        '       repo=<owner/repo>, base=<base branch>, head=<your branch>, title=..., body=...\n'
+        '   The tool creates the PR and records its number + head branch onto this run — you do\n'
+        '   NOT need to (and must not) parse the PR number from any command output. If the PR\n'
+        '   already exists for the branch, a plain `git push` updates it (no need to call open_pr\n'
+        '   again).\n'
+    )
     if hold:
         return (
-            "5. **Open or update the PR + place a merge hold**: `gh pr create` if it doesn't exist;\n"
-            '   otherwise just push triggers an update. Title summarises the change; description\n'
-            '   cites the initiative.\n'
-            '\n'
-            '   This initiative has `hold: true`, so **immediately after `gh pr create` (or on first\n'
-            '   push to an existing PR), post**:\n'
+            open_pr_block
+            + '\n'
+            '   This initiative has `hold: true`, so **immediately after open_pr returns, post**:\n'
             '\n'
             '       gh pr comment <pr> -R <repo> --body "/hold"\n'
             '\n'
-            '   This is the Lighthouse Keeper chatops command that blocks auto-merge regardless of\n'
-            '   green checks. It exists for initiatives that legitimately need human sign-off before\n'
-            '   merge — the hold stays in place until a human posts `/hold cancel`. The agent must\n'
-            '   NEVER post `/hold cancel` itself — only an approver cancels the hold.'
+            '   This Lighthouse Keeper chatops command blocks auto-merge regardless of green\n'
+            '   checks — for initiatives that legitimately need human sign-off. The hold stays\n'
+            '   until a human posts `/hold cancel`. The agent must NEVER post `/hold cancel`.'
         )
     return (
-        "5. **Open or update the PR**: `gh pr create` if it doesn't exist; otherwise just push\n"
-        '   triggers an update. Title summarises the change; description cites the initiative.\n'
-        '\n'
+        open_pr_block
+        + '\n'
         '   This initiative has `hold: false` (the default), so **do NOT post `/hold`** — let Tide\n'
         '   auto-merge once all gate checks are green. The gate suite (including real ai-review)\n'
         '   IS the review; the fail-fast loop below fixes red. Plans self-complete on green.\n'
