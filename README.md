@@ -40,6 +40,38 @@ make lessons-list                   # browse catalog
 
 The CLI commands operate against the existing `gate/` package directly, with no HTTP layer involved. This is the testing/dev surface — same code path as the deployed service, no orchestration overhead.
 
+### Testing the MCP tools locally (no release cycle)
+
+The agent calls the real Go MCP platform (`leartech-mcp-servers` — `pr_context`,
+`tekton`, `k8s`, `platform_state`, …) via an authed remote client
+(`gate/mcp_servers/remote.py`). To exercise those tools **without** waiting for a
+full build/release cycle, run the MCP server locally with auth off and drive it
+with the bundled mini client:
+
+```sh
+# 1. Run the real MCP platform locally (from a leartech-mcp-servers checkout):
+AUTH_REQUIRED=false MCP_DEPLOYMENT_MODE=internal PORT=8899 go run ./cmd/server
+
+# 2. From this repo, list every tool on every mounted server:
+python3 scripts/mcp_test_client.py --base http://localhost:8899 --list
+
+# 3. Invoke a tool (JSON-RPC tools/call round-trip):
+python3 scripts/mcp_test_client.py --base http://localhost:8899 \
+    --call tekton step_status '{"pipelinerun_name":"...","cluster":"gcp"}'
+```
+
+To test against the **deployed** internal MCP instead, port-forward the service
+and pass a bearer token (audience `leartech-mcp`):
+
+```sh
+kubectl -n jx-staging port-forward svc/leartech-mcp-servers 8899:80 &
+python3 scripts/mcp_test_client.py --base http://localhost:8899 --token "$TOKEN" --list
+```
+
+The client speaks raw JSON-RPC over the go-sdk Streamable-HTTP transport
+(stateless — no `initialize` handshake), so it has no dependencies beyond the
+Python stdlib. See `scripts/mcp_test_client.py`.
+
 ## Layout
 
 ```
