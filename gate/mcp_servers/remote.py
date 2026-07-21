@@ -93,8 +93,8 @@ def mint_mcp_token() -> str | None:
         log.warning('remote-MCP token mint failed: HTTP %s', resp.status_code)
         return None
     token = resp.json().get('access_token')
-    if not token:
-        log.warning('remote-MCP token mint returned no access_token')
+    if not isinstance(token, str) or not token:
+        log.warning('remote-MCP token mint returned no usable access_token')
         return None
     return token
 
@@ -124,8 +124,7 @@ def build_remote_mcp_servers() -> dict[str, Any]:
         return {}
     headers = {'Authorization': f'Bearer {token}'}
     servers: dict[str, Any] = {
-        name: {'type': 'http', 'url': f'{base}{path}', 'headers': dict(headers)}
-        for name, path in REMOTE_MCPS.items()
+        name: {'type': 'http', 'url': f'{base}{path}', 'headers': dict(headers)} for name, path in REMOTE_MCPS.items()
     }
     log.info('wired %d remote MCP(s): %s', len(servers), ', '.join(sorted(servers)))
     return servers
