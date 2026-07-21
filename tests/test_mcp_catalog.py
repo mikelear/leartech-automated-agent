@@ -92,9 +92,16 @@ def test_platform_mcps_entries_load_as_http_sse() -> None:
         assert mcp.type == 'http_sse', f'{name}: expected http_sse, got {mcp.type}'
         assert mcp.url is not None, f'{name}: http_sse MCP must declare url'
         assert mcp.url.endswith(sse_suffix), f'{name}: url {mcp.url!r} does not end with {sse_suffix!r}'
-        # platform-mcps default routes via the staging URL — both clusters
-        # resolve via local DNS to their cluster's deployment.
-        assert 'leartech-platform-mcps' in mcp.url, f'{name}: default URL should target leartech-platform-mcps'
+        # The url is env-templated `${LEARTECH_PLATFORM_MCPS_URL:-<dev-fallback>}`
+        # and the loader resolves it. With the env var unset (test/dev), it must
+        # resolve to the dev-only localhost fallback — NO hardcoded
+        # `*.jx.leartech.com` cluster URL in source (leartech convention;
+        # ai-review flagged the old staging default). In cluster the chart sets
+        # the env var so it resolves to the cluster-local platform-mcps URL.
+        assert 'jx.leartech.com' not in mcp.url, (
+            f'{name}: no hardcoded cluster URL in the source fallback — got {mcp.url!r}'
+        )
+        assert 'localhost' in mcp.url, f'{name}: dev fallback should be localhost — got {mcp.url!r}'
 
 
 def test_platform_mcps_url_overridable_via_env_var(
