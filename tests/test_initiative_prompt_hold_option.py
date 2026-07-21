@@ -85,16 +85,31 @@ def test_backward_compat_constant_matches_default_rendering() -> None:
     assert INITIATIVE_SYSTEM_PROMPT == render_initiative_system_prompt(hold=False)
 
 
-def test_step_5_title_reflects_hold_choice() -> None:
-    """Step 5's heading changes shape depending on whether we're adding a
-    merge hold or just opening the PR. Pin both variants so a future edit
-    that accidentally re-hardcodes one shape surfaces here."""
+def test_step_5_opens_pr_via_mcp_tool_never_gh_create() -> None:
+    """Step 5 opens the PR by calling the `open_pr` MCP tool (structured
+    create + authoritative publish), NEVER `gh pr create` (which we used to
+    scrape the number out of — the targetPR mis-capture bug). Only the
+    hold=True variant adds the `/hold` posting. Pin both so a future edit that
+    re-introduces `gh pr create` or an always-hold surfaces here."""
     hold_true = render_initiative_system_prompt(hold=True)
     hold_false = render_initiative_system_prompt(hold=False)
-    assert '5. **Open or update the PR + place a merge hold**' in hold_true
-    assert '5. **Open or update the PR**' in hold_false
-    # And the false variant must NOT carry the "merge hold" title.
-    assert 'Open or update the PR + place a merge hold' not in hold_false
+    # Both variants open via the open_pr MCP tool.
+    assert '`open_pr` MCP tool' in hold_true
+    assert '`open_pr` MCP tool' in hold_false
+    # `gh pr create` must appear ONLY inside the explicit prohibition ("do NOT
+    # run `gh pr create`"), never as an instruction to run it. Pin the
+    # prohibition phrasing so a future edit that turns it back into a command
+    # (or drops the warning) surfaces here.
+    prohibition = 'do NOT run `gh pr create`'
+    assert prohibition in hold_true
+    assert prohibition in hold_false
+    # And the only occurrence of the phrase is that prohibition — remove it and
+    # `gh pr create` should be entirely gone from the prompt.
+    assert 'gh pr create' not in hold_true.replace(prohibition, '')
+    assert 'gh pr create' not in hold_false.replace(prohibition, '')
+    # Only the hold=True variant posts the merge hold.
+    assert HOLD_POSTING_MARKER in hold_true
+    assert HOLD_POSTING_MARKER not in hold_false
 
 
 def test_initiative_default_hold_flows_to_prompt() -> None:

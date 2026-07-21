@@ -60,6 +60,10 @@ MCP_ALLOWED_TOOLS = [
     'mcp__leartech-test-artifacts__head_artifact',
     'mcp__leartech-criteria__list_criteria',
     'mcp__leartech-criteria__run_criteria_set',
+    # open_pr: the agent opens its PR by calling this MCP tool (structured
+    # GitHub create → publishes AgentRun.status{targetPR,headBranch}) instead
+    # of running `gh pr create` + scraping the number. See initiative_prompt.
+    'mcp__leartech-pr-context__open_pr',
 ]
 
 

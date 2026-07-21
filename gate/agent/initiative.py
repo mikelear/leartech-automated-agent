@@ -25,15 +25,12 @@ from claude_agent_sdk.types import (
     ResultMessage,
     TextBlock,
     ThinkingBlock,
-    ToolResultBlock,
     ToolUseBlock,
-    UserMessage,
 )
 
 from app.db import dispose_engine as _dispose_engine
 from app.db import init_engine as _init_engine
 from app.db import is_db_enabled
-from gate.agent.agentrun_status import patch_pr_number
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.commands import (
     CommandSink,
@@ -53,12 +50,7 @@ from gate.agent.diagnostics import (
 )
 from gate.agent.initiative_prompt import render_initiative_system_prompt
 from gate.agent.lessons import render_for
-from gate.agent.maestro import emit_run_pr_opened
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
-from gate.agent.pr_capture import (
-    is_gh_pr_create_command,
-    parse_pr_number_from_gh_output,
-)
 from gate.agent.run_driver import mark_first_turn, update_run_progress
 from gate.initiatives import load_initiative
 from gate.mcp_servers import (
@@ -955,107 +947,6 @@ async def run_initiative(
     # end-of-run via ``_resolve_pr_number`` + ``patch_pr_number``.
     pr_emitted: int | None = resume_context.pr_number if resume_active else None
 
-    # Initiative ``agent-capture-and-publish`` — capture PR at the
-    # source-of-truth moment (``gh pr create`` return) instead of only
-    # at end-of-run via ``_resolve_pr_number``.
-    #
-    # We track the tool_use IDs of Bash invocations we classify as
-    # ``gh pr create`` calls (:func:`is_gh_pr_create_command`). When the
-    # matching ``ToolResultBlock`` arrives in the following
-    # ``UserMessage``, we parse its content for a GitHub PR URL — this
-    # is the AUTHORITATIVE, BRANCH-SCOPED capture the initiative calls
-    # for. The classifier + downstream URL match together prevent the
-    # historical "prose scrape" failure mode (which matched arbitrary
-    # PR URLs the agent cited in narrative text).
-    #
-    # ``pr_publish_done`` is the fan-out gate: it flips True the FIRST
-    # time we publish (patch_pr_number + emit_run_pr_opened). Any
-    # subsequent gh pr create in the same run (should not happen — the
-    # loop expects one PR per run — but be defensive) is a no-op at
-    # the publish layer. The end-of-run fallback also consults this
-    # flag and skips the publish if we already handled it inline.
-    gh_pr_create_tool_use_ids: set[str] = set()
-    pr_publish_done: bool = False
-
-    async def _publish_pr_once(pr_number: int, *, source: str) -> None:
-        """Publish the observed PR number to both surfaces, once per run.
-
-        Called from THREE sites:
-
-          * Inline capture from a ``gh pr create`` tool_result
-            (``source='create_return'``) — the source-of-truth path.
-          * Resume-seed at loop entry (``source='resume'``) — retry
-            pods that discovered the PR before the SDK loop started.
-          * End-of-run fallback (``source='fallback'``) — the
-            ``_resolve_pr_number`` re-check for runs where the inline
-            capture didn't fire (e.g. the agent invoked a shell shape
-            we didn't classify).
-
-        Both surfaces are best-effort:
-
-          * :func:`patch_pr_number` — the CR status write. This is the
-            AUTHORITATIVE surface (controller / reconciler read from
-            here). Best-effort but the one operators rely on.
-          * :func:`emit_run_pr_opened` — the Maestro push. Reactive
-            consumers (Infra Agent, chat) listen for this. Gated on
-            ``LEARTECH_MAESTRO_URL`` being set; a no-op otherwise.
-
-        We flip ``pr_publish_done`` BEFORE awaiting to avoid a race in
-        the fan-out layer — a second ``gh pr create`` firing quickly
-        would then skip the second publish, matching the initiative
-        goal of "Publish ONCE".
-        """
-        nonlocal pr_publish_done
-        if pr_publish_done:
-            return
-        pr_publish_done = True
-        click.echo(
-            click.style(
-                f'  → publishing PR #{pr_number} (source={source}): patch_pr_number + maestro run.pr_opened announce',
-                fg='cyan',
-            ),
-            err=True,
-        )
-        # CR status subresource — authoritative surface. Its own
-        # try/except swallows every failure mode; belt-and-suspenders
-        # here catches the theoretical broken-mock case where the
-        # helper's internal guard is bypassed. The initiative spec:
-        # "NEVER fail the run if the announce fails".
-        try:
-            await patch_pr_number(pr_number)
-        except Exception as exc:  # noqa: BLE001 — best-effort; must never break the run
-            click.echo(
-                click.style(f'  (patch_pr_number failed, non-fatal): {exc}', fg='yellow'),
-                err=True,
-            )
-        # Maestro push — reactive consumers. Same belt-and-suspenders
-        # as above.
-        try:
-            await emit_run_pr_opened(
-                run=run_id_for_first_turn,
-                tenant=os.environ.get('LEARTECH_TENANT'),
-                repo=primary.qualified_repo,
-                pr_number=pr_number,
-                head_branch=primary.branch,
-            )
-        except Exception as exc:  # noqa: BLE001 — best-effort; must never break the run
-            click.echo(
-                click.style(
-                    f'  (maestro run.pr_opened announce failed, non-fatal): {exc}',
-                    fg='yellow',
-                ),
-                err=True,
-            )
-
-    # If this is a resume pod that discovered the PR before the SDK
-    # loop started, publish immediately — reactive consumers may have
-    # missed the original announce (the prior pod died before firing
-    # it), so re-emit here. patch_pr_number is idempotent at the CR
-    # layer; a second maestro emit is downstream-de-dupable by
-    # (repo, pr_number).
-    if pr_emitted is not None:
-        await _publish_pr_once(pr_emitted, source='resume')
-
     async def _record_first_turn_once() -> None:
         """V5 D2.2 hook — record `started_executing_at` on the first SDK message.
 
@@ -1173,18 +1064,6 @@ async def run_initiative(
                         # action even when an AssistantMessage carries
                         # several ToolUseBlocks.
                         current_turn_last_tool = block.name
-                        # Initiative ``agent-capture-and-publish`` —
-                        # arm the create-return capture ONLY for Bash
-                        # invocations we classify as ``gh pr create``
-                        # calls. The classifier is deliberately coarse
-                        # (substring match); the downstream URL parse
-                        # in the ``ToolResultBlock`` handler is the
-                        # second gate. Together they prevent the
-                        # historical prose-scrape failure mode.
-                        if block.name == 'Bash':
-                            command = str(block.input.get('command', '')) if isinstance(block.input, dict) else ''
-                            if is_gh_pr_create_command(command):
-                                gh_pr_create_tool_use_ids.add(block.id)
                         # Layer 2 — one decision row per tool invocation so
                         # the operator can read the agent's turn-by-turn
                         # trajectory from the DB. ``payload`` carries the
@@ -1197,44 +1076,6 @@ async def run_initiative(
                         )
                     elif isinstance(block, ThinkingBlock):
                         pass
-            elif isinstance(message, UserMessage):
-                # Initiative ``agent-capture-and-publish`` — observe
-                # the tool_result of a ``gh pr create`` invocation the
-                # AssistantMessage handler armed. This is the
-                # SOURCE-OF-TRUTH capture moment: gh pr create's stdout
-                # is BRANCH-SCOPED by construction (it targets the
-                # current git branch), so the URL we parse here is the
-                # PR that was JUST opened on the initiative branch —
-                # not an unrelated PR the agent might cite elsewhere.
-                #
-                # Two gates:
-                #   1. tool_use_id must be in ``gh_pr_create_tool_use_ids``
-                #      (armed by the classifier at the AssistantMessage
-                #      handler).
-                #   2. ``parse_pr_number_from_gh_output`` must find a
-                #      recognisable ``github.com/.../pull/N`` URL.
-                # Both must pass. Together they replace the deleted
-                # ``_extract_pr_from_tool_result`` prose scrape which
-                # matched arbitrary URLs the agent cited in narrative.
-                #
-                # We only publish when not already published — the
-                # ``pr_publish_done`` gate in :func:`_publish_pr_once`
-                # enforces the "Publish once" contract.
-                if isinstance(message.content, list) and not pr_publish_done:
-                    for block in message.content:
-                        if not isinstance(block, ToolResultBlock):
-                            continue
-                        if block.tool_use_id not in gh_pr_create_tool_use_ids:
-                            continue
-                        if block.is_error:
-                            # gh pr create failed — no PR number to capture.
-                            continue
-                        content_text = block.content if isinstance(block.content, str) else ''
-                        parsed = parse_pr_number_from_gh_output(content_text)
-                        if parsed is not None:
-                            pr_emitted = parsed
-                            await _publish_pr_once(parsed, source='create_return')
-                            break
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
                 terminate_state.last_turn_count = last_turn_count
@@ -1522,25 +1363,11 @@ async def run_initiative(
             )
 
     pr_number = _resolve_pr_number(primary.qualified_repo, primary.branch)
-    # C1 report-back: write the PR straight onto the AgentRun CR (best-effort).
-    #
-    # Initiative ``agent-capture-and-publish`` — this is the FALLBACK
-    # publish path. The primary path is inline capture-at-create in the
-    # SDK loop (``_publish_pr_once(source='create_return')``). When
-    # ``pr_publish_done`` is True we've already patched targetPR + emitted
-    # the maestro announce for this PR number; re-publishing here would
-    # be redundant. When False the inline capture didn't fire (agent
-    # invoked a shape we didn't classify, or the create-return was
-    # missing) — the resolver's branch-scoped ``gh pr list --head`` is
-    # the safety net.
-    if pr_number is not None and not pr_publish_done:
-        await _publish_pr_once(pr_number, source='fallback')
-    elif pr_number is None:
-        # Preserve historical behaviour: patch_pr_number(None) is a no-op
-        # per its contract but was called unconditionally in the previous
-        # shape. Keep the call so the C1 report-back semantics are
-        # explicit at the fallback site.
-        await patch_pr_number(pr_number)
+    # PR publish is owned by the open_pr MCP tool (it patches AgentRun.status
+    # {targetPR, headBranch} at create time; the controller then emits the
+    # Maestro run.pr_opened). The agent no longer patches/emits here — the
+    # branch-scoped _resolve_pr_number above is only the read-only signal for
+    # the orphan-PR classification below + the exit-code normalisation.
     # Layer 1 + 2 — classify the orphan-PR case. When the agent reports
     # success but no PR exists on the branch, the operator needs to know.
     # The decision log captures the classification; the error column
