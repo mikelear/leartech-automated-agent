@@ -40,7 +40,7 @@ def _hold_step_5(*, hold: bool) -> str:
         '5. **Open the PR via the `open_pr` MCP tool** (do NOT run `gh pr create` yourself):\n'
         '   first `git push` your branch, then call\n'
         '   `mcp__leartech-pr-context__open_pr` with:\n'
-        '       run_id=$LEARTECH_RUN_ID, namespace=$LEARTECH_NAMESPACE (or the run namespace),\n'
+        '       run_id=$LEARTECH_RUN_ID, namespace=$AGENT_RUN_NAMESPACE,\n'
         '       repo=<owner/repo>, base=<base branch>, head=<your branch>, title=..., body=...\n'
         '   The tool creates the PR and records its number + head branch onto this run — you do\n'
         '   NOT need to (and must not) parse the PR number from any command output. If the PR\n'
