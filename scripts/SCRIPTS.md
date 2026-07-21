@@ -39,6 +39,7 @@ So default to kubectl. Use `gh` only when the question is GitHub-side.
 | `validate_initiative.sh <yaml>` | Pydantic-validate an initiative YAML locally before POSTing it. | Local-only (`uv run` against the in-repo validator) |
 | `upload-secrets-automated-agent-db.sh` | Print the gcloud / vault commands needed to upload the workload DSN secret. | Prints commands only — does not call any API itself. |
 | `run_mock_scenario.py <scenario-yaml>` | Drive the mock pipeline MCP scenarios without spawning a real agent. | Local-only (in-process import) |
+| `mcp_test_client.py --base <url> [--token T] --list \| --call <server> <tool> '<json>'` | Mini JSON-RPC client to list/call tools on the real Go MCP platform (`leartech-mcp-servers`) — local (auth off) or deployed (port-forward + bearer). Fast MCP test loop, no release cycle. | HTTP JSON-RPC to a running MCP server (no GitHub call); stdlib-only. See README "Testing the MCP tools locally". |
 
 ## When `gh` is the right tool
 
