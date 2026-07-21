@@ -10,11 +10,15 @@
 # pins to a specific pod.
 #
 # Modes (see below for what each filter):
-#   agent     (default) what the agent is doing: prose + tool calls + iteration summaries
+#   agent     (default) what the agent is doing: prose + tool calls
 #   narrative just the agent's prose between tool calls (cleanest "what is it thinking" view)
 #   tools     only `→ Bash` / `→ Read` / `→ Edit` etc tool-use markers
-#   results   only `--- turns=X cost=$Y` iteration-end summaries
 #   full      everything from kubectl logs, raw (incl. HTTP request log lines)
+#
+# NOTE: the historical `results` mode filtered `^--- turns=` iteration-end
+# summaries from stdout. Those markers no longer emit (see the
+# delete-dead-log-markers cleanup). Per-turn turn/cost snapshots are now
+# read via ``AgentRun.status`` / ``/initiatives/{id}`` instead.
 #
 # Usage:
 #   scripts/tail_agent_log.sh gcp                       # API pod, default mode
@@ -37,7 +41,7 @@ while [ $# -gt 0 ]; do
       RUN_ID="${2:-}"
       shift 2 || shift
       ;;
-    agent|narrative|tools|results|full)
+    agent|narrative|tools|full)
       MODE="$1"
       shift
       ;;
@@ -80,13 +84,9 @@ case "$MODE" in
     # Tool-use markers only — one line per tool call the agent makes.
     kubectl --context=$CTX -n $NS logs -f --tail=500 "$POD" 2>&1 | grep --line-buffered -E "^→ "
     ;;
-  results)
-    # ResultMessage summaries — one line per agent iteration end (turns/cost).
-    kubectl --context=$CTX -n $NS logs -f --tail=500 "$POD" 2>&1 | grep --line-buffered -E "^--- turns="
-    ;;
   narrative)
     # Agent's prose between tool calls — strip tool markers AND HTTP noise.
-    # Leaves the text the agent emits (TextBlock content) + iteration summaries.
+    # Leaves the text the agent emits (TextBlock content).
     kubectl --context=$CTX -n $NS logs -f --tail=500 "$POD" 2>&1 \
       | grep --line-buffered -vE "$NOISE_REGEX" \
       | grep --line-buffered -vE "^→ " \
@@ -97,8 +97,8 @@ case "$MODE" in
     kubectl --context=$CTX -n $NS logs -f --tail=500 "$POD" 2>&1
     ;;
   agent|*)
-    # Default: what the agent is doing. Includes prose + tool markers +
-    # iteration summaries. Strips HTTP request log lines and uvicorn noise.
+    # Default: what the agent is doing. Includes prose + tool markers.
+    # Strips HTTP request log lines and uvicorn noise.
     kubectl --context=$CTX -n $NS logs -f --tail=500 "$POD" 2>&1 \
       | grep --line-buffered -vE "$NOISE_REGEX" \
       | grep --line-buffered -vE "^INFO:     "

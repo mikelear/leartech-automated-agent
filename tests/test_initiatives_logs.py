@@ -57,7 +57,7 @@ async def test_get_logs_happy_path_returns_text_plain(monkeypatch: pytest.Monkey
     record = _make_record(initiative_id='job-run-bbb', runtime='job')
     await register(record)
 
-    log_text = 'agent boot\n--- turns=2  in=10  out=20  cost=$0.01\nPR opened: https://github.com/owner/repo/pull/777\n'
+    log_text = 'agent boot\nrunning turn 2 (cost $0.01)\nPR opened: https://github.com/owner/repo/pull/777\n'
 
     core_mock = MagicMock()
     core_mock.list_namespaced_pod = AsyncMock(
