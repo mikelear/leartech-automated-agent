@@ -71,7 +71,7 @@ extend-immutable-calls = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*" = ["S101", "S105", "S106", "S603", "S607"]  # S105/S106: fake tokens/secrets in test fixtures are not real credentials
+"tests/*" = ["S101", "S105", "S106", "S107", "S603", "S607"]  # S105/S106/S107: fake tokens/secrets in test fixtures/helpers are not real credentials
 "gate/criteria/**/*" = ["S101"]
 "gate/tools/*" = ["S603", "S607"]
 "gate/cli.py" = ["S603", "S607"]

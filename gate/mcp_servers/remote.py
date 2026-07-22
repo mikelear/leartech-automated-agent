@@ -50,31 +50,80 @@ MCP_AUDIENCE = 'leartech-mcp'
 DEFAULT_SCOPE = 'leartechapi.internal_services'
 _TOKEN_TIMEOUT = 15.0
 
-# Registry of remote MCP servers the agent connects to, name -> path on the
-# internal MCP host. Each becomes an authed Streamable-HTTP MCP server the LLM
-# calls natively (tools surface as ``mcp__<name>__<tool>``). Add a line here to
-# wire another remote MCP — no other code changes.
-REMOTE_MCPS: dict[str, str] = {
-    'leartech-pr-context': '/mcp/pr_context',
-    # Step-aware Tekton PipelineRun inspection — the Go leartech-mcp-servers
-    # `tekton` server exposes the same 6-tool surface the in-process shim used
-    # to reimplement via kubectl (list_pipelineruns_for_pr, step_status,
-    # step_logs, cancel_pipelinerun, cancel_superseded_for_pr,
-    # wait_first_failure). The former shim (`gate.mcp_servers.tekton`) is
-    # gone; the two tools that must stay in-process — classify_step_failure
-    # (LLM-based diagnosis) and rebase_branch_on_base (git ops on the cloned
-    # workspace) — moved to `gate.mcp_servers.agent_local` under the
-    # `leartech-agent-local` MCP name.
-    'leartech-tekton': '/mcp/tekton',
-    # PR-check status across both clusters — the Go leartech-mcp-servers
-    # `jx3_flow` server exposes the aggregate PR-check surface previously
-    # reimplemented in-process by `gate.mcp_servers.pipeline_server`
-    # (list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass).
-    # The old in-process shim is gone; the agent now consumes the remote
-    # server via authed Streamable-HTTP, same wire pattern as tekton +
-    # pr_context above.
-    'leartech-jx3-flow': '/mcp/jx3_flow',
-}
+# The remote MCP servers this agent role WANTS, by the SERVER name the host
+# advertises on ``/mcps`` (ground truth, e.g. ``pr_context`` with an underscore).
+# This is role scoping only — it declares intent, NOT paths/URLs. The host is the
+# single source of truth for HOW to reach each server: build_remote_mcp_servers
+# discovers the live ``mounts`` ({name, path}) from ``/mcps`` and wires each
+# wanted server at the host's advertised path VERBATIM. The agent never
+# constructs or guesses a URL, so a path/name drift between this repo and the
+# deployed host can no longer silently 404 the agent (the bug that stranded
+# open_pr). Add a server to this set to consume it; nothing else.
+#
+#   * pr_context  — open_pr (+ get_pr_metadata/diff, list_changed_files).
+#   * tekton      — step-aware PipelineRun inspection (6 tools); the former
+#     in-process shim is gone. classify_step_failure + rebase_branch_on_base
+#     stay in-process under `leartech-agent-local` (LLM diagnosis + workspace git).
+#   * jx3_flow    — aggregate PR-check status (list_pr_checks, wait_for_terminal,
+#     wait_for_first_failure_or_all_pass); replaces the old pipeline_server shim.
+WANTED_MCP_SERVERS: frozenset[str] = frozenset({'pr_context', 'tekton', 'jx3_flow'})
+
+_DISCOVERY_TIMEOUT = 15.0
+
+
+def _agent_mcp_name(server_name: str) -> str:
+    """Agent-facing MCP name for a host server name — ``pr_context`` ->
+    ``leartech-pr-context``. Deterministic (not config), so the LLM tool names
+    (``mcp__leartech-pr-context__open_pr``) + MCP_ALLOWED_TOOLS stay stable."""
+    return 'leartech-' + server_name.replace('_', '-')
+
+
+def discover_mounts(base: str, token: str) -> dict[str, str] | None:
+    """GET ``<base>/mcps`` and return ``{server-name: mount-path}`` from the
+    host's authoritative ``mounts`` array — the paths used VERBATIM (no guessing).
+
+    Payload: ``{"servers":[...], "mounts":[{"name":"pr_context","path":"/mcp/pr_context"},...]}``.
+    Transitional fallback: an older host that only returns ``servers`` (no
+    ``mounts``) yields ``{name: "/mcp/"+name}`` with a warning — removed once
+    every host publishes ``mounts``. Returns ``None`` on any failure so the
+    caller degrades rather than wiring blind.
+    """
+    try:
+        resp = httpx.get(
+            f'{base}/mcps',
+            headers={'Authorization': f'Bearer {token}'},
+            timeout=_DISCOVERY_TIMEOUT,
+        )
+    except httpx.HTTPError as exc:
+        log.warning('remote-MCP discovery (/mcps) failed (transport): %s', exc)
+        return None
+    if resp.status_code != 200:
+        log.warning('remote-MCP discovery (/mcps) failed: HTTP %s', resp.status_code)
+        return None
+    payload = resp.json()
+    mounts = payload.get('mounts')
+    if isinstance(mounts, list) and mounts:
+        out: dict[str, str] = {}
+        for m in mounts:
+            name, path = m.get('name'), m.get('path')
+            if isinstance(name, str) and isinstance(path, str) and path:
+                out[name] = path
+        if out:
+            return out
+    # Transitional: host predates the `mounts` field (only `servers`). Derive
+    # the conventional path so the agent keeps working until every host ships
+    # `mounts`; warn so we notice + can drop this branch.
+    servers = payload.get('servers')
+    if isinstance(servers, list) and servers:
+        log.warning(
+            'remote-MCP host /mcps has no "mounts" (path source of truth) — '
+            'falling back to /mcp/<name> convention for %d server(s). Update the '
+            'host to publish mounts.',
+            len(servers),
+        )
+        return {str(s): f'/mcp/{s}' for s in servers}
+    log.warning('remote-MCP discovery (/mcps) returned neither mounts nor servers')
+    return None
 
 
 def mint_mcp_token() -> str | None:
@@ -124,13 +173,19 @@ def mint_mcp_token() -> str | None:
 
 
 def build_remote_mcp_servers() -> dict[str, McpHttpServerConfig]:
-    """Build authed Streamable-HTTP MCP server configs for the SDK.
+    """Build authed Streamable-HTTP MCP server configs for the SDK — DISCOVERED,
+    not hardcoded.
 
-    Returns ``{name: McpHttpServerConfig}`` for each entry in ``REMOTE_MCPS``,
-    or ``{}`` (with a single warning) when unconfigured — so callers can splat
-    it into ``ClaudeAgentOptions(mcp_servers={...})`` unconditionally.
-    ``McpHttpServerConfig`` is the SDK's own TypedDict, so the shape is
-    statically known (no bare ``Any``).
+    Flow: mint an aud=leartech-mcp token → DISCOVER the live server set from the
+    host's ``/mcps`` → wire each wanted MCP (``REMOTE_MCPS``) at
+    ``<base>/mcp/<server-name>`` using the host's own server name, but ONLY if the
+    host advertises it. A wanted-but-absent MCP is logged LOUDLY and skipped (so
+    e.g. open_pr being unavailable is diagnosed here at wiring, not as a mystery
+    404 at call time — the bug that stranded the PR-capture flow).
+
+    Returns ``{agent-name: McpHttpServerConfig}``; ``{}`` (with a warning) when
+    unconfigured, so callers can splat it into ``ClaudeAgentOptions`` uncondition-
+    ally. ``McpHttpServerConfig`` is the SDK's own TypedDict (no bare ``Any``).
     """
     base = os.environ.get('LEARTECH_MCP_URL', '').rstrip('/')
     if not base:
@@ -148,13 +203,45 @@ def build_remote_mcp_servers() -> dict[str, McpHttpServerConfig]:
             MCP_AUDIENCE,
         )
         return {}
-    servers: dict[str, McpHttpServerConfig] = {
-        name: McpHttpServerConfig(
+
+    mounts = discover_mounts(base, token)
+    if mounts is None:
+        # Discovery itself failed (host unreachable / auth). Rather than wire
+        # blind against an unverified host, degrade to no remote MCPs — the
+        # agent halts cleanly at PR-open instead of racking up 404s.
+        log.warning(
+            'remote-MCP discovery failed against %s — wiring NO remote MCPs '
+            '(cannot obtain server paths; agent will halt at open_pr).',
+            base,
+        )
+        return {}
+
+    servers: dict[str, McpHttpServerConfig] = {}
+    missing: list[str] = []
+    for server_name in sorted(WANTED_MCP_SERVERS):
+        path = mounts.get(server_name)
+        if not path:
+            missing.append(server_name)
+            continue
+        # Host path VERBATIM — the agent never constructs the URL beyond joining
+        # its configured base with the host-advertised path.
+        servers[_agent_mcp_name(server_name)] = McpHttpServerConfig(
             type='http',
             url=f'{base}{path}',
             headers={'Authorization': f'Bearer {token}'},
         )
-        for name, path in REMOTE_MCPS.items()
-    }
-    log.info('wired %d remote MCP(s): %s', len(servers), ', '.join(sorted(servers)))
+    if missing:
+        log.warning(
+            'wanted remote MCP(s) NOT advertised by %s/mcps: %s — skipped. '
+            'Host advertises: %s',
+            base,
+            ', '.join(missing),
+            ', '.join(sorted(mounts)),
+        )
+    log.info(
+        'wired %d/%d remote MCP(s) from /mcps discovery: %s',
+        len(servers),
+        len(WANTED_MCP_SERVERS),
+        ', '.join(sorted(servers)) or '(none)',
+    )
     return servers
