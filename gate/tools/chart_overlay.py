@@ -26,9 +26,17 @@ import base64
 import re
 import subprocess
 from dataclasses import dataclass
-from typing import Any
 
 import yaml
+
+# Structural type alias for a YAML-loaded mapping. ``object`` (not ``Any``) keeps
+# type-checking strict at the leaves while still admitting the arbitrary shape
+# of a Helm values.yaml. Consumers ``_dig`` into it and downcast at the callsite.
+YamlDict = dict[str, object]
+
+# Bounded ``gh`` invocation ceiling. A stalled ``gh api`` call must not wedge
+# the gate pipeline — 30s is generous for a single ``repos/../contents`` fetch.
+_GH_TIMEOUT_SECONDS = 30
 
 # Known per-cluster GitOps overlay repositories. Each pair is
 # (cluster_key, owner/repo). The overlay YAML path convention is
@@ -71,7 +79,7 @@ class ChartFlipSignal:
     default_value: bool  # what the added line sets (True/False)
     hint_snippet: str  # the comment fragment that matched an overlay-hint pattern
 
-    def matches_overlay_value(self, overlay_dict: dict[str, Any]) -> bool:
+    def matches_overlay_value(self, overlay_dict: YamlDict) -> bool:
         """True iff `overlay_dict` (loaded from an overlay YAML) sets the dotted key
         to a value that differs from `default_value` (i.e. actually overrides it).
         """
@@ -84,7 +92,7 @@ class ChartFlipSignal:
         return bool(got) != self.default_value
 
 
-def _dig(container: Any, parts: list[str]) -> Any:
+def _dig(container: object, parts: list[str]) -> object | None:
     for p in parts:
         if not isinstance(container, dict):
             return None
@@ -316,15 +324,22 @@ def parse_chart_flip_signals(diff: str) -> list[ChartFlipSignal]:
 # ---------------------------------------------------------------------------
 
 
-# Match any of the overlay repos by explicit `owner/repo#N` reference, or by
-# raw URL to a PR on that repo.
-def _overlay_pr_ref_patterns() -> list[re.Pattern[str]]:
+def _build_overlay_pr_ref_patterns() -> tuple[re.Pattern[str], ...]:
+    """Compile the overlay-repo PR-reference patterns once at module load.
+
+    Matches either explicit ``owner/repo#N`` refs against the known cluster
+    GitOps repos, or full ``https://github.com/owner/repo/pull/N`` URLs.
+    """
     escaped_repos = [re.escape(r) for r in CLUSTER_OVERLAY_REPOS.values()]
     repo_alt = '|'.join(escaped_repos)
-    return [
+    return (
         re.compile(rf'\b(?:{repo_alt})#(?P<n>\d+)\b'),
         re.compile(rf'https?://github\.com/(?:{repo_alt})/pull/(?P<n>\d+)\b'),
-    ]
+    )
+
+
+# Compiled once at module load — same pattern as _OVERLAY_HINT_PATTERNS.
+_OVERLAY_PR_REF_PATTERNS: tuple[re.Pattern[str], ...] = _build_overlay_pr_ref_patterns()
 
 
 def find_overlay_pr_refs(*texts: str) -> list[str]:
@@ -334,11 +349,10 @@ def find_overlay_pr_refs(*texts: str) -> list[str]:
     ``mikelear/jx-build-cluster-gsm#42`` refs and full GitHub PR URLs are matched.
     """
     found: list[str] = []
-    patterns = _overlay_pr_ref_patterns()
     for text in texts:
         if not text:
             continue
-        for pat in patterns:
+        for pat in _OVERLAY_PR_REF_PATTERNS:
             for m in pat.finditer(text):
                 whole = m.group(0)
                 # Normalise URLs to `owner/repo#N`.
@@ -360,17 +374,39 @@ def find_overlay_pr_refs(*texts: str) -> list[str]:
 
 
 def _gh(args: list[str]) -> str:
-    result = subprocess.run(['gh', *args], capture_output=True, text=True, check=False)
+    """Invoke ``gh`` with a hard wall-clock ceiling so a stalled call can't wedge the gate.
+
+    Raises ``RuntimeError`` on non-zero exit AND on timeout — callers translate
+    both into the empty-overlay fallback (a stalled overlay lookup and a
+    missing overlay file are indistinguishable to the criterion's verdict).
+    """
+    try:
+        result = subprocess.run(
+            ['gh', *args],
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=_GH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f'gh {" ".join(args)} timed out after {_GH_TIMEOUT_SECONDS}s') from e
     if result.returncode != 0:
         raise RuntimeError(f'gh {" ".join(args)} failed: {result.stderr.strip()}')
     return result.stdout
 
 
-def fetch_overlay_yaml(cluster_repo: str, path: str, ref: str = 'main') -> dict[str, Any]:
+def fetch_overlay_yaml(cluster_repo: str, path: str, ref: str = 'main') -> YamlDict:
     """Fetch + parse an overlay YAML from a per-cluster GitOps repo.
 
     Returns an empty dict if the file is absent, unreadable, or empty.
     Does NOT raise — a missing overlay file is a first-class "no override" state.
+    All five failure modes fold into ``{}``:
+
+      1. ``gh api`` non-zero exit / timeout → caught as ``RuntimeError``.
+      2. Empty response body from ``gh api``.
+      3. Invalid base64 payload (``ValueError``/``binascii.Error``).
+      4. Malformed YAML (``yaml.YAMLError``).
+      5. YAML that parses to a non-mapping (list / scalar / null).
     """
     try:
         raw = _gh(

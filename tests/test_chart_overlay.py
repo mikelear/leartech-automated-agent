@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import base64
+import subprocess
 import textwrap
-from typing import Any
 
 import pytest
 
@@ -11,8 +12,10 @@ from gate.tools import chart_overlay
 from gate.tools.chart_overlay import (
     CLUSTER_OVERLAY_REPOS,
     ChartFlipSignal,
+    YamlDict,
     any_cluster_overlay_sets_flip,
     evidence_for_flip,
+    fetch_overlay_yaml,
     find_overlay_pr_refs,
     parse_chart_flip_signals,
 )
@@ -256,7 +259,7 @@ def test_any_cluster_overlay_sets_flip_hits_first_cluster(monkeypatch: pytest.Mo
 
     calls: list[tuple[str, str]] = []
 
-    def fake_fetch(cluster_repo: str, path: str, ref: str = 'main') -> dict[str, Any]:
+    def fake_fetch(cluster_repo: str, path: str, ref: str = 'main') -> YamlDict:
         calls.append((cluster_repo, path))
         if cluster_repo == CLUSTER_OVERLAY_REPOS['gcp']:
             return {'postgresql': {'enabled': True}}
@@ -313,3 +316,97 @@ def test_evidence_for_flip_fails_when_no_evidence(monkeypatch: pytest.MonkeyPatc
     assert 'no overlay YAML' in reason
     assert 'postgresql.enabled' in reason
     assert 'set true on AZ' in reason  # hint_snippet surfaced in the failure text
+
+
+# ---------------------------------------------------------------------------
+# fetch_overlay_yaml — every error branch must fold into {} (no exceptions)
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_overlay_yaml_returns_empty_when_gh_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-zero ``gh`` exit (RuntimeError from ``_gh``) → empty dict, no raise."""
+
+    def raising_gh(args: list[str]) -> str:
+        raise RuntimeError('gh api ...: 404 Not Found')
+
+    monkeypatch.setattr(chart_overlay, '_gh', raising_gh)
+    assert fetch_overlay_yaml('mikelear/foo', 'helmfiles/jx-staging/configs/bar.yaml') == {}
+
+
+def test_fetch_overlay_yaml_returns_empty_when_gh_times_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A subprocess timeout inside ``_gh`` bubbles up as RuntimeError → empty dict."""
+
+    def timing_out(args: list[str]) -> str:
+        raise RuntimeError('gh api ... timed out after 30s')
+
+    monkeypatch.setattr(chart_overlay, '_gh', timing_out)
+    assert fetch_overlay_yaml('mikelear/foo', 'path') == {}
+
+
+def test_fetch_overlay_yaml_returns_empty_on_blank_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``gh`` succeeds but returns whitespace-only content → empty dict."""
+    monkeypatch.setattr(chart_overlay, '_gh', lambda args: '   \n')
+    assert fetch_overlay_yaml('mikelear/foo', 'path') == {}
+
+
+def test_fetch_overlay_yaml_returns_empty_on_invalid_base64(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Payload isn't valid base64 → ValueError/binascii.Error caught → empty dict."""
+    # A non-base64 character sequence (``!`` isn't in the base64 alphabet under strict mode;
+    # for safety we pick a length not a multiple of 4).
+    monkeypatch.setattr(chart_overlay, '_gh', lambda args: '!!!not-base64!!!')
+    assert fetch_overlay_yaml('mikelear/foo', 'path') == {}
+
+
+def test_fetch_overlay_yaml_returns_empty_on_malformed_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Base64 decodes fine but content isn't valid YAML → YAMLError caught → empty dict."""
+    payload = base64.b64encode(b'foo: [unclosed').decode()
+    monkeypatch.setattr(chart_overlay, '_gh', lambda args: payload)
+    assert fetch_overlay_yaml('mikelear/foo', 'path') == {}
+
+
+def test_fetch_overlay_yaml_returns_empty_on_non_mapping_yaml(monkeypatch: pytest.MonkeyPatch) -> None:
+    """YAML parses to a list / scalar / null instead of a mapping → empty dict."""
+    for body in (b'- item1\n- item2\n', b'"just a scalar"\n', b'null\n'):
+        payload = base64.b64encode(body).decode()
+        monkeypatch.setattr(chart_overlay, '_gh', lambda args, _p=payload: _p)
+        assert fetch_overlay_yaml('mikelear/foo', 'path') == {}
+
+
+def test_fetch_overlay_yaml_happy_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The one successful path — valid base64 → valid YAML mapping → parsed dict."""
+    payload = base64.b64encode(b'postgresql:\n  enabled: true\n').decode()
+    monkeypatch.setattr(chart_overlay, '_gh', lambda args: payload)
+    assert fetch_overlay_yaml('mikelear/foo', 'path') == {'postgresql': {'enabled': True}}
+
+
+# ---------------------------------------------------------------------------
+# _gh — subprocess wrapper's error paths
+# ---------------------------------------------------------------------------
+
+
+def test_gh_raises_runtime_error_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Non-zero exit → RuntimeError with the stderr trailer."""
+
+    class FakeCompleted:
+        returncode = 1
+        stdout = ''
+        stderr = '404 Not Found\n'
+
+    def fake_run(cmd: list[str], **kwargs: object) -> FakeCompleted:
+        return FakeCompleted()
+
+    monkeypatch.setattr(chart_overlay.subprocess, 'run', fake_run)
+    with pytest.raises(RuntimeError, match='404 Not Found'):
+        chart_overlay._gh(['api', 'anything'])
+
+
+def test_gh_raises_runtime_error_on_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A ``subprocess.TimeoutExpired`` is translated to RuntimeError so callers
+    can fold both errors into the empty-overlay fallback uniformly."""
+
+    def fake_run(cmd: list[str], **kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=30)
+
+    monkeypatch.setattr(chart_overlay.subprocess, 'run', fake_run)
+    with pytest.raises(RuntimeError, match='timed out'):
+        chart_overlay._gh(['api', 'anything'])
