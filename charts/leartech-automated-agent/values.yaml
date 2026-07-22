@@ -17,6 +17,17 @@ service:
 # at `gate/agent/main.py::DEFAULT_MODEL`.
 agent:
   model: ""
+  # Gateway repoint (Phase 1). Empty = call Anthropic directly (current
+  # behaviour, unchanged). Set per-cluster in GitOps to the in-cluster gateway
+  # to route every LLM call (agent loop + spec_suggester + video_review +
+  # self_retrospect) through leartech-ai-gateway — metered, budgeted,
+  # allowlisted. When set, `secrets.aiGatewayKey` must resolve to a gateway
+  # VIRTUAL key (sk-lt-…), and the same base URL is forwarded to spawned Jobs
+  # via _JOB_FORWARDED_ENV_KEYS. Proven pattern: ai-review-worker (ai-bus S13).
+  #   aiGateway:
+  #     baseUrl: http://leartech-ai-gateway.ai-gateway.svc:8080
+  aiGateway:
+    baseUrl: ""
   # Auth-hardening C1 (2026-07) — OIDC bearer validation is now REQUIRED by
   # default so every cluster (staging + previews) boots fail-closed. This is
   # the symmetric counterpart of the orchestrator's C1 flip: both services
@@ -141,9 +152,15 @@ ingress:
 # both backends represented, cluster's GitOps configs/<chart>.yaml flips
 # the right toggle on).
 secrets:
-  anthropicApiKey:
-    secretName: ai-review-api-keys
-    secretKey: CLAUDE_API_KEY
+  # Credential the agent presents on every LLM call. When agent.aiGateway.baseUrl
+  # is set this is a gateway VIRTUAL key (sk-lt-…), NOT a raw Anthropic key. The
+  # deployment injects it into the env var ANTHROPIC_API_KEY — that env NAME is
+  # fixed by the Anthropic / Claude Agent SDK contract (renameable only in Phase 3
+  # when we own the runtime); the secret name/key below are ours and are now
+  # provider-neutral. See docs/AI-GATEWAY-MIGRATION-PLAN.md ("Naming").
+  aiGatewayKey:
+    secretName: leartech-ai-gateway-key
+    secretKey: AI_GATEWAY_API_KEY
   ghToken:
     secretName: tekton-git
     secretKey: password
@@ -197,9 +214,14 @@ externalSecrets:
     enabled: false  # set true on GCP via configs/leartech-automated-agent.yaml
     projectId: product-first
     secrets:
-      - name: ai-review-api-keys
+      - name: leartech-ai-gateway-key
         data:
-          - name: CLAUDE_API_KEY
+          # Materialised k8s secret key = AI_GATEWAY_API_KEY (provider-neutral).
+          # The GSM SOURCE (key: claude-api-key) is unchanged for now so the
+          # agent keeps working on direct Anthropic; the GitOps cutover repoints
+          # this to the gateway virtual-key source when agent.aiGateway.baseUrl
+          # is flipped on. See docs/AI-GATEWAY-MIGRATION-PLAN.md ("Naming").
+          - name: AI_GATEWAY_API_KEY
             key: claude-api-key
 
   azure:
@@ -207,9 +229,11 @@ externalSecrets:
     vaultMountPoint: kubernetes
     vaultRole: jx-vault
     secrets:
-      - name: ai-review-api-keys
+      - name: leartech-ai-gateway-key
         data:
-          - name: CLAUDE_API_KEY
+          # See the gcp note: neutral k8s key; Vault SOURCE unchanged until the
+          # GitOps cutover repoints it at the gateway virtual key.
+          - name: AI_GATEWAY_API_KEY
             key: secret/data/ai/claude
             property: apiKey
 

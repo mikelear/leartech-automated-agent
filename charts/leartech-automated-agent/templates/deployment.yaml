@@ -150,11 +150,34 @@ spec:
         # `.Values.jobs.languageImageTag` in GitOps when reproducibility matters.
         - name: LEARTECH_JOB_IMAGE_TAG
           value: {{ default "latest" .Values.jobs.languageImageTag | quote }}
+        {{- if .Values.agent.aiGateway.baseUrl }}
+        # Gateway repoint (Phase 1). When set, the Claude Agent SDK + raw
+        # `anthropic` SDK helpers send /v1/messages to leartech-ai-gateway
+        # instead of api.anthropic.com — metered, budgeted, allowlisted,
+        # centrally routed (same pattern the ai-review-worker already uses).
+        # The `ANTHROPIC_API_KEY` secretKeyRef below then carries a gateway
+        # VIRTUAL key (sk-lt-…), not a raw Anthropic key. Left unset →
+        # direct-Anthropic (unchanged), so this is safe to merge before the
+        # per-cluster GitOps overlay + ESO virtual-key secret land.
+        # See AI-GATEWAY-AND-PORTABILITY.md + docs/AI-GATEWAY-MIGRATION-PLAN.md.
+        - name: ANTHROPIC_BASE_URL
+          value: {{ .Values.agent.aiGateway.baseUrl | quote }}
+        {{- end }}
+        # Env NAME is ANTHROPIC_API_KEY — fixed by the Anthropic / Claude Agent
+        # SDK contract (the SDK reads exactly this name; renameable only in
+        # Phase 3 when we own the runtime). Its VALUE is a gateway virtual key
+        # once agent.aiGateway.baseUrl is set. The SOURCE secret is now
+        # provider-neutral: leartech-ai-gateway-key / AI_GATEWAY_API_KEY.
+        # `optional: true` so an ESO overlay-lag or a preview namespace without
+        # the secret degrades to the code-level "ANTHROPIC_API_KEY not set"
+        # guard rather than crashlooping the pod in CreateContainerConfigError
+        # (memory: feedback_chart_secretref_must_be_optional_for_previews).
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:
-              name: {{ .Values.secrets.anthropicApiKey.secretName }}
-              key: {{ .Values.secrets.anthropicApiKey.secretKey }}
+              name: {{ .Values.secrets.aiGatewayKey.secretName }}
+              key: {{ .Values.secrets.aiGatewayKey.secretKey }}
+              optional: true
         - name: GH_TOKEN
           valueFrom:
             secretKeyRef:

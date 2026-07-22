@@ -220,12 +220,27 @@ def test_initiative_env_only_forwards_known_keys(monkeypatch: pytest.MonkeyPatch
     assert 'SOMETHING_UNRELATED' not in env
 
 
+def test_initiative_env_forwards_gateway_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gateway repoint (Phase 1): a spawned Job MUST inherit ANTHROPIC_BASE_URL
+    from the API pod. If this drops off the forward list, Jobs silently call
+    Anthropic directly — unmetered, unbudgeted, bypassing the gateway. This
+    guard makes that regression a red test, not a silent billing leak."""
+    from app.routers.initiatives import _JOB_FORWARDED_ENV_KEYS, _initiative_env
+
+    assert 'ANTHROPIC_BASE_URL' in _JOB_FORWARDED_ENV_KEYS
+    monkeypatch.setenv('ANTHROPIC_BASE_URL', 'http://leartech-ai-gateway.ai-gateway.svc:8080')
+    env = _initiative_env()
+    assert env['ANTHROPIC_BASE_URL'] == 'http://leartech-ai-gateway.ai-gateway.svc:8080'
+
+
 def test_initiative_secret_refs_uses_chart_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without env overrides the secret refs must match the chart's
-    `secrets.*` defaults (ai-review-api-keys + tekton-git)."""
+    `secrets.*` defaults (leartech-ai-gateway-key + tekton-git)."""
     from app.routers.initiatives import _initiative_secret_refs
 
     for key in (
+        'LEARTECH_JOB_LLM_SECRET_NAME',
+        'LEARTECH_JOB_LLM_SECRET_KEY',
         'LEARTECH_JOB_ANTHROPIC_SECRET_NAME',
         'LEARTECH_JOB_ANTHROPIC_SECRET_KEY',
         'LEARTECH_JOB_GH_TOKEN_SECRET_NAME',
@@ -236,11 +251,33 @@ def test_initiative_secret_refs_uses_chart_defaults(monkeypatch: pytest.MonkeyPa
         monkeypatch.delenv(key, raising=False)
 
     refs = _initiative_secret_refs()
-    assert refs['ANTHROPIC_API_KEY'] == {'secret': 'ai-review-api-keys', 'key': 'CLAUDE_API_KEY'}
+    # Provider-neutral defaults (renamed off ai-review-api-keys/CLAUDE_API_KEY as
+    # part of the ai-gateway migration). The injected env-var name stays
+    # ANTHROPIC_API_KEY (SDK contract); only the secret NAME/KEY are neutral.
+    assert refs['ANTHROPIC_API_KEY'] == {'secret': 'leartech-ai-gateway-key', 'key': 'AI_GATEWAY_API_KEY'}
     assert refs['GH_TOKEN'] == {'secret': 'tekton-git', 'key': 'password'}
     # DSN is only forwarded when both env vars are set (gated on
     # chart's postgresql.enabled).
     assert 'LEARTECH_INITIATIVE_DB_DSN' not in refs
+
+
+def test_initiative_secret_refs_neutral_env_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The neutral LEARTECH_JOB_LLM_SECRET_* wins; the legacy
+    LEARTECH_JOB_ANTHROPIC_SECRET_* is honoured only as a back-compat fallback
+    (clusters mid-migration) so a rename can roll out without a flag-day."""
+    from app.routers.initiatives import _initiative_secret_refs
+
+    # Legacy set, neutral unset → fallback used.
+    monkeypatch.delenv('LEARTECH_JOB_LLM_SECRET_NAME', raising=False)
+    monkeypatch.delenv('LEARTECH_JOB_LLM_SECRET_KEY', raising=False)
+    monkeypatch.setenv('LEARTECH_JOB_ANTHROPIC_SECRET_NAME', 'legacy-secret')
+    monkeypatch.setenv('LEARTECH_JOB_ANTHROPIC_SECRET_KEY', 'LEGACY_KEY')
+    assert _initiative_secret_refs()['ANTHROPIC_API_KEY'] == {'secret': 'legacy-secret', 'key': 'LEGACY_KEY'}
+
+    # Neutral set → wins over legacy.
+    monkeypatch.setenv('LEARTECH_JOB_LLM_SECRET_NAME', 'neutral-secret')
+    monkeypatch.setenv('LEARTECH_JOB_LLM_SECRET_KEY', 'NEUTRAL_KEY')
+    assert _initiative_secret_refs()['ANTHROPIC_API_KEY'] == {'secret': 'neutral-secret', 'key': 'NEUTRAL_KEY'}
 
 
 def test_initiative_secret_refs_includes_db_dsn_when_configured(

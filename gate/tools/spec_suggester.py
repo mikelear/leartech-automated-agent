@@ -20,7 +20,11 @@ from typing import Any, cast
 
 from gate.tools.ui_surface_diff import UISurfaceDelta
 
-DEFAULT_MODEL = 'claude-sonnet-4-6'
+# Gateway-portability: model id is env-configurable, never hardcoded, so a
+# cluster can point this at the gateway's logical model name (or a non-Anthropic
+# model) without a code change. Default keeps the prior Sonnet behaviour.
+# See AI-GATEWAY-AND-PORTABILITY.md ("Don't hardcode model ids").
+DEFAULT_MODEL = os.environ.get('LEARTECH_SPEC_SUGGESTER_MODEL', 'claude-sonnet-4-6')
 
 SPEC_SUGGESTER_SYSTEM_PROMPT = """You are a Playwright spec author for the leartech engineering org.
 

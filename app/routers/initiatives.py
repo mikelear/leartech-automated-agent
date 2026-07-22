@@ -322,6 +322,19 @@ _JOB_FORWARDED_ENV_KEYS = (
     'CLUSTER',
     'LEARTECH_INITIATIVES_DIR',
     'LEARTECH_AGENT_SELF_RETROSPECT',
+    # Gateway repoint (Phase 1): when the API pod is pointed at leartech-ai-gateway
+    # via ANTHROPIC_BASE_URL, spawned plan-runner Jobs MUST inherit it too — else
+    # the Job's Claude Agent SDK / anthropic client calls Anthropic directly,
+    # unmetered and ungoverned. The virtual-key VALUE flows as a secret_ref
+    # (ANTHROPIC_API_KEY, see _initiative_secret_refs); this forwards only the
+    # non-secret base-URL. Absent (direct-Anthropic clusters) → nothing forwarded,
+    # Job behaves exactly as before. See AI-GATEWAY-AND-PORTABILITY.md.
+    'ANTHROPIC_BASE_URL',
+    # Tool-model overrides (spec_suggester / video_review) so a repointed Job
+    # runs those raw-anthropic helpers through the gateway on the same logical
+    # models as the API pod. Harmless when unset.
+    'LEARTECH_SPEC_SUGGESTER_MODEL',
+    'LEARTECH_VIDEO_REVIEW_MODEL',
 )
 
 
@@ -345,9 +358,20 @@ def _initiative_secret_refs() -> dict[str, dict[str, str]]:
     ``ENV_VAR -> {secret, key}`` consumed verbatim by D.3's job_runner.
     """
     refs: dict[str, dict[str, str]] = {
+        # The injected env-var name is ANTHROPIC_API_KEY — FIXED by the Anthropic /
+        # Claude Agent SDK contract (the SDK reads exactly this name); it becomes
+        # renameable only in Phase 3 when we own the runtime. Its VALUE is a gateway
+        # virtual key (sk-lt-…) once the repoint is active — NOT a raw Anthropic key.
+        # The secret NAME/KEY are ours and provider-neutral: read LEARTECH_JOB_LLM_*
+        # first, fall back to the legacy LEARTECH_JOB_ANTHROPIC_* (clusters mid-
+        # migration), then the chart default. Target neutral secret at the GitOps
+        # cutover: leartech-ai-gateway-key / AI_GATEWAY_API_KEY.
+        # See docs/AI-GATEWAY-MIGRATION-PLAN.md ("Naming").
         'ANTHROPIC_API_KEY': {
-            'secret': os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_NAME', 'ai-review-api-keys'),
-            'key': os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_KEY', 'CLAUDE_API_KEY'),
+            'secret': os.environ.get('LEARTECH_JOB_LLM_SECRET_NAME')
+            or os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_NAME', 'leartech-ai-gateway-key'),
+            'key': os.environ.get('LEARTECH_JOB_LLM_SECRET_KEY')
+            or os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_KEY', 'AI_GATEWAY_API_KEY'),
         },
         'GH_TOKEN': {
             'secret': os.environ.get('LEARTECH_JOB_GH_TOKEN_SECRET_NAME', 'tekton-git'),

@@ -32,7 +32,11 @@ from typing import Any, cast
 
 DEFAULT_FRAME_COUNT = 8
 DEFAULT_MAX_WIDTH = 800
-DEFAULT_MODEL = 'claude-sonnet-4-6'
+# Gateway-portability: model id is env-configurable, never hardcoded, so a
+# cluster can point this at the gateway's logical model name (or a non-Anthropic
+# model) without a code change. Default keeps the prior Sonnet behaviour.
+# See AI-GATEWAY-AND-PORTABILITY.md ("Don't hardcode model ids").
+DEFAULT_MODEL = os.environ.get('LEARTECH_VIDEO_REVIEW_MODEL', 'claude-sonnet-4-6')
 
 VIDEO_REVIEW_SYSTEM_PROMPT = (
     'You are a visual reviewer for Playwright end-to-end browser test videos. '
