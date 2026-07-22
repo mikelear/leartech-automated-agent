@@ -18,8 +18,9 @@ import subprocess
 import sys
 
 import mcp.types as t
+import pytest
 
-from gate.mcp_servers.stdio_bridge import build_bridge_server
+from gate.mcp_servers.stdio_bridge import _flatten, _mint_token, build_bridge_server
 
 
 def _tool(name: str) -> t.Tool:
@@ -77,6 +78,25 @@ async def test_bridge_preserves_downstream_error() -> None:
 
     assert result.root.isError is True
     assert result.root.content[0].text == 'boom'
+
+
+def test_mint_token_none_when_auth_env_absent(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No auth creds → mint returns None (bridge then surfaces a clean tool error
+    rather than sending a bogus/empty bearer)."""
+    for k in ('LEARTECH_AUTH_TOKEN_URL', 'LEARTECH_AUTH_CLIENT_ID', 'LEARTECH_AUTH_CLIENT_SECRET'):
+        monkeypatch.delenv(k, raising=False)
+    assert _mint_token() is None
+
+
+def test_flatten_unwraps_exception_group() -> None:
+    """The opaque 'unhandled errors in a TaskGroup' must be flattened to the real
+    inner error so failures are diagnosable (the open_pr expired-token error was
+    hidden inside an ExceptionGroup)."""
+    eg = ExceptionGroup('unhandled errors in a TaskGroup', [ValueError('token is expired')])
+    out = _flatten(eg)
+    assert 'token is expired' in out
+    assert 'ValueError' in out
+    assert _flatten(RuntimeError('boom')) == 'RuntimeError: boom'
 
 
 def test_bridge_module_is_runnable_and_requires_url() -> None:
