@@ -41,6 +41,28 @@ class _FakeResp:
         return self._payload
 
 
+# Live `/mcps` payload shape (host = source of truth): `mounts` carries the
+# authoritative {name, path}; `servers` (name list) kept for backward-compat.
+def _mounts(*names: str) -> list[dict[str, str]]:
+    return [{'name': n, 'path': f'/mcp/{n}'} for n in names]
+
+
+_ALL_ADVERTISED = {
+    'servers': ['pr_context', 'tekton', 'jx3_flow', 'k8s', 'agent_api'],
+    'mounts': _mounts('pr_context', 'tekton', 'jx3_flow', 'k8s', 'agent_api'),
+}
+
+
+def _mock_token(monkeypatch: pytest.MonkeyPatch, token: str = 'tok-xyz') -> None:
+    """Mock the client_credentials token POST."""
+    monkeypatch.setattr(remote.httpx, 'post', lambda *a, **k: _FakeResp(200, {'access_token': token}))
+
+
+def _mock_discovery(monkeypatch: pytest.MonkeyPatch, payload: dict[str, Any], status: int = 200) -> None:
+    """Mock the GET /mcps discovery call."""
+    monkeypatch.setattr(remote.httpx, 'get', lambda *a, **k: _FakeResp(status, payload))
+
+
 def test_no_mcp_url_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     """No LEARTECH_MCP_URL → no remote MCPs, no crash (splat of {} is a no-op).
 
@@ -130,34 +152,90 @@ def test_mint_token_transport_error_is_none(monkeypatch: pytest.MonkeyPatch) -> 
     assert remote.mint_mcp_token() is None
 
 
-def test_fully_configured_wires_pr_context_with_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Happy path: authed http MCP config for every REMOTE_MCPS entry (pr-context,
-    tekton, jx3-flow), no double slash, Bearer header."""
+def test_fully_configured_wires_from_discovery_with_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Happy path: every wanted MCP the host advertises on /mcps is wired at
+    /mcp/<server-name> (the host's ground-truth name) with the Bearer header.
+    The path is DISCOVERED, not hardcoded — this is the fix for the open_pr 404
+    (agent hitting a guessed path the host didn't mount)."""
     _set_env(monkeypatch, dict(_AUTH_ENV))
-    monkeypatch.setattr(remote.httpx, 'post', lambda *a, **k: _FakeResp(200, {'access_token': 'tok-xyz'}))
+    _mock_token(monkeypatch)
+    _mock_discovery(monkeypatch, _ALL_ADVERTISED)
     servers = remote.build_remote_mcp_servers()
     assert set(servers) == {'leartech-pr-context', 'leartech-tekton', 'leartech-jx3-flow'}
-    pr_ctx = servers['leartech-pr-context']
-    assert pr_ctx['type'] == 'http'
-    assert pr_ctx['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/pr_context'
-    assert pr_ctx['headers']['Authorization'] == 'Bearer tok-xyz'
-    # leartech-tekton was added in the port-tekton-shim-to-remote-mcp initiative;
-    # it uses the same bearer + base URL and lives at /mcp/tekton.
-    tekton = servers['leartech-tekton']
-    assert tekton['type'] == 'http'
-    assert tekton['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/tekton'
-    assert tekton['headers']['Authorization'] == 'Bearer tok-xyz'
-    # leartech-jx3-flow is the remote replacement for the retired in-process
-    # `pipeline_server` shim — same bearer + base URL, lives at /mcp/jx3_flow.
-    jx3 = servers['leartech-jx3-flow']
-    assert jx3['type'] == 'http'
-    assert jx3['url'] == 'http://leartech-mcp-servers.jx-staging.svc.cluster.local/mcp/jx3_flow'
-    assert jx3['headers']['Authorization'] == 'Bearer tok-xyz'
+    base = 'http://leartech-mcp-servers.jx-staging.svc.cluster.local'
+    # server name comes from /mcps (underscore), path = base + /mcp/<name>.
+    assert servers['leartech-pr-context']['url'] == f'{base}/mcp/pr_context'
+    assert servers['leartech-tekton']['url'] == f'{base}/mcp/tekton'
+    assert servers['leartech-jx3-flow']['url'] == f'{base}/mcp/jx3_flow'
+    for cfg in servers.values():
+        assert cfg['type'] == 'http'
+        assert cfg['headers']['Authorization'] == 'Bearer tok-xyz'
+
+
+def test_wanted_mcp_absent_from_mcps_is_skipped_not_guessed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the host does NOT advertise a wanted server, it is SKIPPED (loudly),
+    never wired at a guessed path. This is the core drift-proofing: the agent
+    only wires what the host actually mounts, so it can't 404 on a stale path."""
+    _set_env(monkeypatch, dict(_AUTH_ENV))
+    _mock_token(monkeypatch)
+    # Host mounts pr_context + tekton but NOT jx3_flow.
+    _mock_discovery(monkeypatch, {'mounts': _mounts('pr_context', 'tekton')})
+    servers = remote.build_remote_mcp_servers()
+    assert set(servers) == {'leartech-pr-context', 'leartech-tekton'}
+    assert 'leartech-jx3-flow' not in servers, 'absent server must be skipped, not guessed'
+
+
+def test_uses_host_advertised_path_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent wires the host's advertised path VERBATIM — even a non-conventional
+    path — proving it does NOT construct /mcp/<name> itself (the drift fix)."""
+    _set_env(monkeypatch, dict(_AUTH_ENV))
+    _mock_token(monkeypatch)
+    _mock_discovery(monkeypatch, {'mounts': [{'name': 'pr_context', 'path': '/custom/route/pr'}]})
+    servers = remote.build_remote_mcp_servers()
+    assert servers['leartech-pr-context']['url'] == (
+        'http://leartech-mcp-servers.jx-staging.svc.cluster.local/custom/route/pr'
+    )
+
+
+def test_discovery_failure_degrades_to_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If /mcps itself fails (host unreachable / non-200), wire NO remote MCPs
+    rather than blind-guess against an unverified host — the agent halts cleanly
+    at open_pr instead of racking up 404s."""
+    _set_env(monkeypatch, dict(_AUTH_ENV))
+    _mock_token(monkeypatch)
+    _mock_discovery(monkeypatch, {}, status=503)
+    assert remote.build_remote_mcp_servers() == {}
 
 
 def test_trailing_slash_on_base_does_not_double(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_env(monkeypatch, {**_AUTH_ENV, 'LEARTECH_MCP_URL': _AUTH_ENV['LEARTECH_MCP_URL'] + '/'})
-    monkeypatch.setattr(remote.httpx, 'post', lambda *a, **k: _FakeResp(200, {'access_token': 't'}))
+    _mock_token(monkeypatch, token='t')
+    _mock_discovery(monkeypatch, _ALL_ADVERTISED)
     servers = remote.build_remote_mcp_servers()
     assert servers['leartech-pr-context']['url'].endswith('.local/mcp/pr_context')
     assert '//mcp/pr_context' not in servers['leartech-pr-context']['url']
+
+
+def test_discover_mounts_parses_name_path_map(monkeypatch: pytest.MonkeyPatch) -> None:
+    """discover_mounts returns {server-name: host-path} from the /mcps mounts."""
+    _mock_discovery(monkeypatch, _ALL_ADVERTISED)
+    got = remote.discover_mounts('http://host', 'tok')
+    assert got == {
+        'pr_context': '/mcp/pr_context',
+        'tekton': '/mcp/tekton',
+        'jx3_flow': '/mcp/jx3_flow',
+        'k8s': '/mcp/k8s',
+        'agent_api': '/mcp/agent_api',
+    }
+
+
+def test_discover_mounts_transitional_servers_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Older host without `mounts` → derive /mcp/<name> from `servers` (transitional)."""
+    _mock_discovery(monkeypatch, {'servers': ['pr_context', 'tekton']})
+    got = remote.discover_mounts('http://host', 'tok')
+    assert got == {'pr_context': '/mcp/pr_context', 'tekton': '/mcp/tekton'}
+
+
+def test_discover_mounts_bad_payload_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
+    _mock_discovery(monkeypatch, {'unexpected': []})
+    assert remote.discover_mounts('http://host', 'tok') is None
