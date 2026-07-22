@@ -59,6 +59,14 @@ from gate.tools.playwright_artifacts import (
 from gate.tools.playwright_specs import SpecCoverage, inventory_specs, parse_spec
 from gate.tools.pr_context import PRContext, load_pr_context
 from gate.tools.pr_diff import added_files, added_lines, fetch_pr_diff
+from gate.tools.security_claim import (
+    SecurityClaim,
+    evidence_for_claim,
+    find_manifest_refs,
+    has_in_diff_evidence,
+    manifest_exists_at_ref,
+    parse_security_claims,
+)
 from gate.tools.spec_suggester import (
     SpecSuggestion,
     is_anthropic_key_present,
@@ -147,6 +155,12 @@ __all__ = [
     'SpecSuggestion',
     'suggest_spec',
     'is_anthropic_key_present',
+    'SecurityClaim',
+    'evidence_for_claim',
+    'find_manifest_refs',
+    'has_in_diff_evidence',
+    'manifest_exists_at_ref',
+    'parse_security_claims',
     # v6p0.6 step 1 — structured artefact parsers + dispatcher
     'ARTEFACT_PARSERS',
     'Finding',
