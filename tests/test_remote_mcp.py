@@ -172,7 +172,12 @@ def test_fully_configured_wires_from_discovery_with_bearer(monkeypatch: pytest.M
     for cfg in servers.values():
         assert cfg['type'] == 'stdio'
         assert cfg['args'] == ['-m', 'gate.mcp_servers.stdio_bridge']
-        assert cfg['env']['LEARTECH_MCP_BRIDGE_TOKEN'] == 'tok-xyz'
+        # The bridge mints a FRESH token per call (tokens are ~300s), so it gets
+        # the auth CONFIG, NOT a static token that would expire mid-run.
+        assert 'LEARTECH_MCP_BRIDGE_TOKEN' not in cfg['env']
+        assert cfg['env']['LEARTECH_AUTH_TOKEN_URL'] == _AUTH_ENV['LEARTECH_AUTH_TOKEN_URL']
+        assert cfg['env']['LEARTECH_AUTH_CLIENT_ID'] == _AUTH_ENV['LEARTECH_AUTH_CLIENT_ID']
+        assert cfg['env']['LEARTECH_AUTH_CLIENT_SECRET'] == _AUTH_ENV['LEARTECH_AUTH_CLIENT_SECRET']
 
 
 def test_wanted_mcp_absent_from_mcps_is_skipped_not_guessed(monkeypatch: pytest.MonkeyPatch) -> None:

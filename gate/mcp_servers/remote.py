@@ -243,7 +243,15 @@ def build_remote_mcp_servers() -> dict[str, McpStdioServerConfig]:
             args=['-m', 'gate.mcp_servers.stdio_bridge'],
             env={
                 'LEARTECH_MCP_BRIDGE_URL': f'{base}{path}',
-                'LEARTECH_MCP_BRIDGE_TOKEN': token,
+                # Pass the auth CONFIG, NOT a static token: the aud=leartech-mcp
+                # token is short-lived (~300s), so a token minted here at agent
+                # startup expires long before a multi-minute run reaches open_pr.
+                # The bridge mints a FRESH token per call from these. (The token
+                # minted above is only for the one-shot /mcps discovery.)
+                'LEARTECH_AUTH_TOKEN_URL': os.environ.get('LEARTECH_AUTH_TOKEN_URL', ''),
+                'LEARTECH_AUTH_CLIENT_ID': os.environ.get('LEARTECH_AUTH_CLIENT_ID', ''),
+                'LEARTECH_AUTH_CLIENT_SECRET': os.environ.get('LEARTECH_AUTH_CLIENT_SECRET', ''),
+                'LEARTECH_AUTH_SCOPE': os.environ.get('LEARTECH_AUTH_SCOPE', DEFAULT_SCOPE),
             },
         )
     if missing:
