@@ -147,6 +147,16 @@ ingress:
   labels: {}
   pathType: ImplementationSpecific
 
+# Grafana dashboards shipped with the chart (templates/grafana-dashboards.yaml +
+# dashboards/*.json). Each JSON → a ConfigMap the cluster Grafana sidecar
+# auto-imports (label jenkins-x.io/grafana-dashboard, searchNamespace ALL). Same
+# pattern as leartech-evm-network. v1 = Agent Runs (Loki-backed run logs +
+# open_pr/MCP activity + errors). Harmless in previews (just extra ConfigMaps with
+# the same dashboard uid — Grafana dedups by uid); flip off there if noisy.
+grafanaDashboards:
+  enabled: true
+  folder: "Leartech Agents"
+
 # Secrets — deployment references existing K8s Secret names; ExternalSecrets
 # materialise them per-cluster using the auth-service pattern (same chart,
 # both backends represented, cluster's GitOps configs/<chart>.yaml flips

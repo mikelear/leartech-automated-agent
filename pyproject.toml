@@ -133,6 +133,9 @@ ignore_missing_imports = true
 module = ["gate.mcp_servers.stdio_bridge"]
 disallow_untyped_decorators = false
 disallow_untyped_calls = false
+# The generic downstream helper (_with_downstream runs an untyped op(session))
+# returns Any; the typed call sites are correct by construction.
+warn_return_any = false
 
 [tool.pytest.ini_options]
 testpaths = ["gate/criteria", "tests"]
