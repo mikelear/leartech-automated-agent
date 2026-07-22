@@ -11,6 +11,11 @@ dependencies = [
     "click>=8.1.0",
     "fastapi>=0.115.0",
     "httpx>=0.27.0",
+    # Standard MCP client/server library — the agent's stdio↔http MCP bridge
+    # (gate/mcp_servers/stdio_bridge.py) imports it directly. Already resolved
+    # transitively via claude-agent-sdk; pinned explicitly now that we own an
+    # MCP client (Phase 2, provider-portability direction).
+    "mcp>=1.20",
     "kubernetes-asyncio~=32.0",
     "prompt-toolkit>=3.0.0",
     "pydantic>=2.0",
@@ -118,6 +123,16 @@ ignore_missing_imports = true
 [[tool.mypy.overrides]]
 module = ["jose", "jose.*"]
 ignore_missing_imports = true
+
+# The stdio MCP bridge uses the low-level `mcp` Server decorators
+# (@server.list_tools / @server.call_tool). Those decorators aren't typed to
+# mypy-strict's satisfaction (untyped decorator + untyped call), which would
+# otherwise force noisy per-line ignores. Scope the relaxation to that one
+# module; the rest of the file stays strict.
+[[tool.mypy.overrides]]
+module = ["gate.mcp_servers.stdio_bridge"]
+disallow_untyped_decorators = false
+disallow_untyped_calls = false
 
 [tool.pytest.ini_options]
 testpaths = ["gate/criteria", "tests"]
