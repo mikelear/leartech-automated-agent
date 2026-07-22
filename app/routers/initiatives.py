@@ -358,9 +358,20 @@ def _initiative_secret_refs() -> dict[str, dict[str, str]]:
     ``ENV_VAR -> {secret, key}`` consumed verbatim by D.3's job_runner.
     """
     refs: dict[str, dict[str, str]] = {
+        # The injected env-var name is ANTHROPIC_API_KEY — FIXED by the Anthropic /
+        # Claude Agent SDK contract (the SDK reads exactly this name); it becomes
+        # renameable only in Phase 3 when we own the runtime. Its VALUE is a gateway
+        # virtual key (sk-lt-…) once the repoint is active — NOT a raw Anthropic key.
+        # The secret NAME/KEY are ours and provider-neutral: read LEARTECH_JOB_LLM_*
+        # first, fall back to the legacy LEARTECH_JOB_ANTHROPIC_* (clusters mid-
+        # migration), then the chart default. Target neutral secret at the GitOps
+        # cutover: leartech-ai-gateway-key / AI_GATEWAY_API_KEY.
+        # See docs/AI-GATEWAY-MIGRATION-PLAN.md ("Naming").
         'ANTHROPIC_API_KEY': {
-            'secret': os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_NAME', 'ai-review-api-keys'),
-            'key': os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_KEY', 'CLAUDE_API_KEY'),
+            'secret': os.environ.get('LEARTECH_JOB_LLM_SECRET_NAME')
+            or os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_NAME', 'leartech-ai-gateway-key'),
+            'key': os.environ.get('LEARTECH_JOB_LLM_SECRET_KEY')
+            or os.environ.get('LEARTECH_JOB_ANTHROPIC_SECRET_KEY', 'AI_GATEWAY_API_KEY'),
         },
         'GH_TOKEN': {
             'secret': os.environ.get('LEARTECH_JOB_GH_TOKEN_SECRET_NAME', 'tekton-git'),

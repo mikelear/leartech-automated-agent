@@ -62,9 +62,34 @@ Entirely mechanical; proven by ai-review-worker. aa-side changes (this PR):
 
 Gateway/GitOps side (runbook, needs control-plane access — not in this repo):
 1. Mint an **agent virtual key** with a `model_allowlist` (e.g. `["claude-opus","claude-sonnet"]`), `budget_micros`, `rate_limit_rpm`.
-2. Provision it via **ESO** into the agent namespace (exact pattern as S13's `ai-review-api-keys`): GCP GSM / Azure Vault → K8s Secret. Point `secrets.anthropicApiKey` at it (and `LEARTECH_JOB_ANTHROPIC_SECRET_NAME/KEY` for Jobs).
+2. Provision it via **ESO** into the agent namespace as the provider-neutral secret
+   **`leartech-ai-gateway-key`** / key **`AI_GATEWAY_API_KEY`** (the chart already
+   materialises this name; see "Naming" below). Concretely: point the cloud SOURCE
+   — `externalSecrets.gcp.secrets[].key` (GSM) / `externalSecrets.azure.secrets[].key`
+   (Vault) — at the virtual key instead of the current raw-Anthropic key. The chart
+   default k8s name/key are already neutral, so nothing else moves.
 3. Per-cluster GitOps overlay: set `agent.aiGateway.baseUrl: http://leartech-ai-gateway.ai-gateway.svc:8080`.
+   ⚠️ If a cluster's `configs/leartech-automated-agent.yaml` overrides
+   `externalSecrets.*.secrets` or `secrets.aiGatewayKey` with the OLD name, update
+   it in lockstep — otherwise the deployment's secretKeyRef (now
+   `leartech-ai-gateway-key`) won't resolve. `optional: true` on the ref means the
+   pod still boots (LLM calls fail loudly) rather than crashlooping if it lags.
 4. Verify: run one initiative → a `usage_event` row appears, cost priced, agent behaviour unchanged. Roll back = unset `baseUrl`.
+
+### Naming — what's neutral, what's SDK-fixed (read this before renaming anything)
+| Name | Owner | Renameable? |
+|---|---|---|
+| `ANTHROPIC_BASE_URL` (env) | Anthropic/Claude SDK | ❌ SDK reads this exact name. Value = the gateway URL. Free to rename only in **Phase 3** (own runtime). |
+| `ANTHROPIC_API_KEY` (env) | Anthropic/Claude SDK | ❌ SDK reads this exact name. Value = a gateway **virtual key** (sk-lt-…), not a raw Anthropic key. Phase 3 only. |
+| `leartech-ai-gateway-key` / `AI_GATEWAY_API_KEY` (k8s secret + key) | Ours | ✅ Provider-neutral. Renamed off `ai-review-api-keys` / `CLAUDE_API_KEY` so the agent stops piggybacking ai-review's secret. |
+| `secrets.aiGatewayKey` (chart value) | Ours | ✅ Was `secrets.anthropicApiKey`. |
+| `agent.aiGateway.baseUrl` (chart value) | Ours | ✅ Neutral from the start. |
+| `LEARTECH_JOB_LLM_SECRET_NAME/KEY` (env) | Ours | ✅ Was `LEARTECH_JOB_ANTHROPIC_SECRET_*`; the old names still work as a back-compat fallback. |
+| `LEARTECH_VIDEO_REVIEW_MODEL` / `LEARTECH_SPEC_SUGGESTER_MODEL` / `LEARTECH_AGENT_MODEL` (env) | Ours | ✅ Model ids are config, never hardcoded. |
+
+**Rule for future sessions:** the two `ANTHROPIC_*` env names are load-bearing SDK
+contract — do not rename them until Phase 3. Everything else is ours and is now
+provider-neutral; keep it that way.
 
 ### Phase 2 — the tool/MCP seam (fixes `open_pr` + portability down-payment)
 Own the MCP client via the **standard `mcp` library** (proven in-cluster to honour
