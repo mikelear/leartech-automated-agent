@@ -7,6 +7,17 @@ from gate.tools.ai_review import (
     parse_ai_review_findings,
     read_ai_review_verdicts,
 )
+from gate.tools.chart_overlay import (
+    CLUSTER_OVERLAY_REPOS,
+    DEFAULT_OVERLAY_ENVS,
+    ChartFlipSignal,
+    YamlDict,
+    any_cluster_overlay_sets_flip,
+    evidence_for_flip,
+    fetch_overlay_yaml,
+    find_overlay_pr_refs,
+    parse_chart_flip_signals,
+)
 from gate.tools.coverage import CoverageReport, read_coverage_from_pr_comments, read_coverage_threshold
 from gate.tools.end2end_gate import (
     End2EndFailure,
@@ -88,6 +99,15 @@ __all__ = [
     'parse_ai_review_comment',
     'parse_ai_review_findings',
     'read_ai_review_verdicts',
+    'CLUSTER_OVERLAY_REPOS',
+    'DEFAULT_OVERLAY_ENVS',
+    'ChartFlipSignal',
+    'YamlDict',
+    'any_cluster_overlay_sets_flip',
+    'evidence_for_flip',
+    'fetch_overlay_yaml',
+    'find_overlay_pr_refs',
+    'parse_chart_flip_signals',
     'End2EndFailure',
     'End2EndTest',
     'build_end2end_failure',
