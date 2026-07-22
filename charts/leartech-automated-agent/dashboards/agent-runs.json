@@ -29,6 +29,7 @@
         "refresh": 2,
         "includeAll": true,
         "multi": true,
+        "allValue": ".*",
         "current": { "text": "All", "value": "$__all" }
       }
     ]
@@ -80,7 +81,7 @@
       "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } } }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
       "targets": [
-        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum by (pod) (count_over_time({namespace=\"$ns\", pod=~\"$run\"}[$__auto]))", "legendFormat": "{{pod}}" }
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum by (pod) (count_over_time({namespace=\"$ns\", pod=~\"$run\"}[$__interval]))", "legendFormat": "{{pod}}" }
       ]
     },
     {
