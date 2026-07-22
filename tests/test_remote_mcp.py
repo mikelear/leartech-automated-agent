@@ -163,13 +163,16 @@ def test_fully_configured_wires_from_discovery_with_bearer(monkeypatch: pytest.M
     servers = remote.build_remote_mcp_servers()
     assert set(servers) == {'leartech-pr-context', 'leartech-tekton', 'leartech-jx3-flow'}
     base = 'http://leartech-mcp-servers.jx-staging.svc.cluster.local'
-    # server name comes from /mcps (underscore), path = base + /mcp/<name>.
-    assert servers['leartech-pr-context']['url'] == f'{base}/mcp/pr_context'
-    assert servers['leartech-tekton']['url'] == f'{base}/mcp/tekton'
-    assert servers['leartech-jx3-flow']['url'] == f'{base}/mcp/jx3_flow'
+    # Phase 2: each server is wired as a stdio bridge. The discovered downstream
+    # URL (base + host-advertised path) + bearer are passed to the bridge via env;
+    # the bridge (not the CLI) makes the authed streamable-HTTP call.
+    assert servers['leartech-pr-context']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/pr_context'
+    assert servers['leartech-tekton']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/tekton'
+    assert servers['leartech-jx3-flow']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/jx3_flow'
     for cfg in servers.values():
-        assert cfg['type'] == 'http'
-        assert cfg['headers']['Authorization'] == 'Bearer tok-xyz'
+        assert cfg['type'] == 'stdio'
+        assert cfg['args'] == ['-m', 'gate.mcp_servers.stdio_bridge']
+        assert cfg['env']['LEARTECH_MCP_BRIDGE_TOKEN'] == 'tok-xyz'
 
 
 def test_wanted_mcp_absent_from_mcps_is_skipped_not_guessed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -192,7 +195,7 @@ def test_uses_host_advertised_path_verbatim(monkeypatch: pytest.MonkeyPatch) -> 
     _mock_token(monkeypatch)
     _mock_discovery(monkeypatch, {'mounts': [{'name': 'pr_context', 'path': '/custom/route/pr'}]})
     servers = remote.build_remote_mcp_servers()
-    assert servers['leartech-pr-context']['url'] == (
+    assert servers['leartech-pr-context']['env']['LEARTECH_MCP_BRIDGE_URL'] == (
         'http://leartech-mcp-servers.jx-staging.svc.cluster.local/custom/route/pr'
     )
 
@@ -212,8 +215,9 @@ def test_trailing_slash_on_base_does_not_double(monkeypatch: pytest.MonkeyPatch)
     _mock_token(monkeypatch, token='t')
     _mock_discovery(monkeypatch, _ALL_ADVERTISED)
     servers = remote.build_remote_mcp_servers()
-    assert servers['leartech-pr-context']['url'].endswith('.local/mcp/pr_context')
-    assert '//mcp/pr_context' not in servers['leartech-pr-context']['url']
+    dl_url = servers['leartech-pr-context']['env']['LEARTECH_MCP_BRIDGE_URL']
+    assert dl_url.endswith('.local/mcp/pr_context')
+    assert '//mcp/pr_context' not in dl_url
 
 
 def test_discover_mounts_parses_name_path_map(monkeypatch: pytest.MonkeyPatch) -> None:

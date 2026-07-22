@@ -37,9 +37,10 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 
 import httpx
-from claude_agent_sdk.types import McpHttpServerConfig
+from claude_agent_sdk.types import McpStdioServerConfig
 
 log = logging.getLogger(__name__)
 
@@ -172,9 +173,18 @@ def mint_mcp_token() -> str | None:
     return token
 
 
-def build_remote_mcp_servers() -> dict[str, McpHttpServerConfig]:
-    """Build authed Streamable-HTTP MCP server configs for the SDK — DISCOVERED,
-    not hardcoded.
+def build_remote_mcp_servers() -> dict[str, McpStdioServerConfig]:
+    """Build authed MCP server configs for the SDK — DISCOVERED, not hardcoded.
+
+    Phase 2: each wanted remote MCP is wired as a ``McpStdioServerConfig`` that
+    spawns the in-repo ``gate.mcp_servers.stdio_bridge`` — a stdio↔authed-HTTP
+    proxy that WE own. The Claude Code CLI (spawned by claude-agent-sdk) does not
+    forward a static ``Authorization`` header for ``type: http`` MCPs, so we no
+    longer hand it the http URL; instead it speaks plain stdio to the bridge,
+    which holds the authenticated streamable-HTTP connection to the deployed
+    server. Fixes the open_pr 401→OAuth-404 failure and decouples tools from the
+    Anthropic runtime (portability). The bearer + downstream URL are passed to
+    the bridge via env (not argv, so they don't show in ``ps``).
 
     Flow: mint an aud=leartech-mcp token → DISCOVER the live server set from the
     host's ``/mcps`` → wire each wanted MCP (``REMOTE_MCPS``) at
@@ -183,9 +193,9 @@ def build_remote_mcp_servers() -> dict[str, McpHttpServerConfig]:
     e.g. open_pr being unavailable is diagnosed here at wiring, not as a mystery
     404 at call time — the bug that stranded the PR-capture flow).
 
-    Returns ``{agent-name: McpHttpServerConfig}``; ``{}`` (with a warning) when
+    Returns ``{agent-name: McpStdioServerConfig}``; ``{}`` (with a warning) when
     unconfigured, so callers can splat it into ``ClaudeAgentOptions`` uncondition-
-    ally. ``McpHttpServerConfig`` is the SDK's own TypedDict (no bare ``Any``).
+    ally. ``McpStdioServerConfig`` is the SDK's own TypedDict (no bare ``Any``).
     """
     base = os.environ.get('LEARTECH_MCP_URL', '').rstrip('/')
     if not base:
@@ -216,7 +226,7 @@ def build_remote_mcp_servers() -> dict[str, McpHttpServerConfig]:
         )
         return {}
 
-    servers: dict[str, McpHttpServerConfig] = {}
+    servers: dict[str, McpStdioServerConfig] = {}
     missing: list[str] = []
     for server_name in sorted(WANTED_MCP_SERVERS):
         path = mounts.get(server_name)
@@ -224,11 +234,17 @@ def build_remote_mcp_servers() -> dict[str, McpHttpServerConfig]:
             missing.append(server_name)
             continue
         # Host path VERBATIM — the agent never constructs the URL beyond joining
-        # its configured base with the host-advertised path.
-        servers[_agent_mcp_name(server_name)] = McpHttpServerConfig(
-            type='http',
-            url=f'{base}{path}',
-            headers={'Authorization': f'Bearer {token}'},
+        # its configured base with the host-advertised path. The URL + bearer go
+        # to the stdio bridge via env; the bridge (not the CLI) makes the authed
+        # streamable-HTTP call, so the header is actually sent.
+        servers[_agent_mcp_name(server_name)] = McpStdioServerConfig(
+            type='stdio',
+            command=sys.executable,
+            args=['-m', 'gate.mcp_servers.stdio_bridge'],
+            env={
+                'LEARTECH_MCP_BRIDGE_URL': f'{base}{path}',
+                'LEARTECH_MCP_BRIDGE_TOKEN': token,
+            },
         )
     if missing:
         log.warning(
