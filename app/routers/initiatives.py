@@ -322,6 +322,19 @@ _JOB_FORWARDED_ENV_KEYS = (
     'CLUSTER',
     'LEARTECH_INITIATIVES_DIR',
     'LEARTECH_AGENT_SELF_RETROSPECT',
+    # Gateway repoint (Phase 1): when the API pod is pointed at leartech-ai-gateway
+    # via ANTHROPIC_BASE_URL, spawned plan-runner Jobs MUST inherit it too — else
+    # the Job's Claude Agent SDK / anthropic client calls Anthropic directly,
+    # unmetered and ungoverned. The virtual-key VALUE flows as a secret_ref
+    # (ANTHROPIC_API_KEY, see _initiative_secret_refs); this forwards only the
+    # non-secret base-URL. Absent (direct-Anthropic clusters) → nothing forwarded,
+    # Job behaves exactly as before. See AI-GATEWAY-AND-PORTABILITY.md.
+    'ANTHROPIC_BASE_URL',
+    # Tool-model overrides (spec_suggester / video_review) so a repointed Job
+    # runs those raw-anthropic helpers through the gateway on the same logical
+    # models as the API pod. Harmless when unset.
+    'LEARTECH_SPEC_SUGGESTER_MODEL',
+    'LEARTECH_VIDEO_REVIEW_MODEL',
 )
 
 

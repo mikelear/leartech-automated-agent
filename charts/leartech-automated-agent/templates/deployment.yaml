@@ -150,6 +150,19 @@ spec:
         # `.Values.jobs.languageImageTag` in GitOps when reproducibility matters.
         - name: LEARTECH_JOB_IMAGE_TAG
           value: {{ default "latest" .Values.jobs.languageImageTag | quote }}
+        {{- if .Values.agent.aiGateway.baseUrl }}
+        # Gateway repoint (Phase 1). When set, the Claude Agent SDK + raw
+        # `anthropic` SDK helpers send /v1/messages to leartech-ai-gateway
+        # instead of api.anthropic.com — metered, budgeted, allowlisted,
+        # centrally routed (same pattern the ai-review-worker already uses).
+        # The `ANTHROPIC_API_KEY` secretKeyRef below then carries a gateway
+        # VIRTUAL key (sk-lt-…), not a raw Anthropic key. Left unset →
+        # direct-Anthropic (unchanged), so this is safe to merge before the
+        # per-cluster GitOps overlay + ESO virtual-key secret land.
+        # See AI-GATEWAY-AND-PORTABILITY.md + docs/AI-GATEWAY-MIGRATION-PLAN.md.
+        - name: ANTHROPIC_BASE_URL
+          value: {{ .Values.agent.aiGateway.baseUrl | quote }}
+        {{- end }}
         - name: ANTHROPIC_API_KEY
           valueFrom:
             secretKeyRef:

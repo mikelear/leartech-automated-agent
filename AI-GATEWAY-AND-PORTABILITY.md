@@ -9,6 +9,11 @@ the gateway first.
 This is not a "someday maybe." Treat provider-portability as a **standing design
 constraint**, the same way you'd treat "must run in K8s."
 
+> **The executable plan** (phases, capability matrix, what's proven-live, the
+> Phase-1 runbook) lives in [`docs/AI-GATEWAY-MIGRATION-PLAN.md`](docs/AI-GATEWAY-MIGRATION-PLAN.md).
+> Key point it makes: the gateway repoint fixes the **LLM seam** only — it does
+> **not** fix the `open_pr` tool/MCP seam (that's Phase 2).
+
 ## What's changing (and why it affects your design)
 - **Today:** the agent uses the **Claude Agent SDK** (`claude_agent_sdk.query`,
   `create_sdk_mcp_server`) + raw **`anthropic` SDK** helpers, calling Anthropic directly.

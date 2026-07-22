@@ -220,6 +220,19 @@ def test_initiative_env_only_forwards_known_keys(monkeypatch: pytest.MonkeyPatch
     assert 'SOMETHING_UNRELATED' not in env
 
 
+def test_initiative_env_forwards_gateway_base_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gateway repoint (Phase 1): a spawned Job MUST inherit ANTHROPIC_BASE_URL
+    from the API pod. If this drops off the forward list, Jobs silently call
+    Anthropic directly — unmetered, unbudgeted, bypassing the gateway. This
+    guard makes that regression a red test, not a silent billing leak."""
+    from app.routers.initiatives import _JOB_FORWARDED_ENV_KEYS, _initiative_env
+
+    assert 'ANTHROPIC_BASE_URL' in _JOB_FORWARDED_ENV_KEYS
+    monkeypatch.setenv('ANTHROPIC_BASE_URL', 'http://leartech-ai-gateway.ai-gateway.svc:8080')
+    env = _initiative_env()
+    assert env['ANTHROPIC_BASE_URL'] == 'http://leartech-ai-gateway.ai-gateway.svc:8080'
+
+
 def test_initiative_secret_refs_uses_chart_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without env overrides the secret refs must match the chart's
     `secrets.*` defaults (ai-review-api-keys + tekton-git)."""

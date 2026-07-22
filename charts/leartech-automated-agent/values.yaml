@@ -17,6 +17,17 @@ service:
 # at `gate/agent/main.py::DEFAULT_MODEL`.
 agent:
   model: ""
+  # Gateway repoint (Phase 1). Empty = call Anthropic directly (current
+  # behaviour, unchanged). Set per-cluster in GitOps to the in-cluster gateway
+  # to route every LLM call (agent loop + spec_suggester + video_review +
+  # self_retrospect) through leartech-ai-gateway — metered, budgeted,
+  # allowlisted. When set, `secrets.anthropicApiKey` must resolve to a gateway
+  # VIRTUAL key (sk-lt-…), and the same base URL is forwarded to spawned Jobs
+  # via _JOB_FORWARDED_ENV_KEYS. Proven pattern: ai-review-worker (ai-bus S13).
+  #   aiGateway:
+  #     baseUrl: http://leartech-ai-gateway.ai-gateway.svc:8080
+  aiGateway:
+    baseUrl: ""
   # Auth-hardening C1 (2026-07) — OIDC bearer validation is now REQUIRED by
   # default so every cluster (staging + previews) boots fail-closed. This is
   # the symmetric counterpart of the orchestrator's C1 flip: both services
