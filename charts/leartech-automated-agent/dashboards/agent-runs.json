@@ -1,0 +1,100 @@
+{
+  "uid": "leartech-agent-runs",
+  "title": "Leartech — Agent Runs",
+  "tags": ["leartech", "agents", "loki"],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "ns",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values(namespace)",
+        "refresh": 2,
+        "includeAll": false,
+        "multi": false,
+        "current": { "text": "jx-staging", "value": "jx-staging" }
+      },
+      {
+        "name": "run",
+        "label": "Run / pod",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values({namespace=\"$ns\"}, pod)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "logs",
+      "title": "Agent run logs — $run",
+      "description": "Live + historical logs for agent runs. Survives pod GC (Loki-backed) — the durable replacement for `kubectl logs`.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 0 },
+      "options": { "showTime": true, "wrapLogMessage": true, "prettifyLogMessage": false, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{namespace=\"$ns\", pod=~\"$run\"}" }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "logs",
+      "title": "open_pr / MCP tool activity",
+      "description": "Every line mentioning open_pr — the PR-capture path (Phase 2 bridge). Watch for success vs 401/404/retry.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 11 },
+      "options": { "showTime": true, "wrapLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{namespace=\"$ns\", pod=~\"$run\"} |~ \"(?i)open_pr|mcp__|targetPR|leartech-pr-context\"" }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "logs",
+      "title": "Errors & failures",
+      "description": "Error-level lines, tracebacks, auth failures, step failures.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 11 },
+      "options": { "showTime": true, "wrapLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{namespace=\"$ns\", pod=~\"$run\"} |~ \"(?i)error|traceback|exception|failed|\\\\b(401|403|404)\\\\b\"" }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Log volume by pod",
+      "description": "Per-pod log rate — spot busy/looping runs.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 16, "x": 0, "y": 20 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum by (pod) (count_over_time({namespace=\"$ns\", pod=~\"$run\"}[$__auto]))", "legendFormat": "{{pod}}" }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "open_pr mentions (window)",
+      "description": "Count of open_pr-related log lines over the dashboard window — activity of the PR-capture path.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 20 },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "green", "value": null } ] } }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"(?i)open_pr\" [$__range]))", "instant": true }
+      ]
+    }
+  ]
+}
