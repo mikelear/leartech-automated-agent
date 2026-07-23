@@ -209,3 +209,32 @@ roles:
       - Read
       - Grep
       - Bash
+
+  infra_agent:
+    description: |
+      Cluster-side write-mode agent. Owns the repo/cluster wiring the dev agent
+      doesn't: create a repo, register it in source-config (per cluster), land
+      deploy config, and VERIFY a release is healthy after a dev PR merges
+      (the "PR merged != release healthy" gap). Scaffolds new repos
+      DETERMINISTICALLY via gate.tools.repo_factory (literal rename, never LLM
+      grep/replace) and opens the scaffold PR whose preview exercises the Tekton
+      steps. Runs on a cheaper model via its OWN gateway virtual key (see
+      project_per_agent_model_routing) — smaller scope than the code agent.
+    llm:
+      backend: claude
+      # Placeholder default; the real switch to a cheap/OSS model happens on this
+      # agent's OWN virtual key in the gateway (no redeploy) — the AgentType maps
+      # to leartech-infra-agent-key once provisioned.
+      model: claude-opus-4-7
+      max_turns: 200
+    mcps:
+      - leartech-jx3-flow
+      - leartech-tekton
+      - leartech-pr-context
+    tools:
+      - Read
+      - Write
+      - Edit
+      - Bash
+      - Glob
+      - Grep

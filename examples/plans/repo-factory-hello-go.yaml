@@ -1,0 +1,78 @@
+# repo-factory-hello-go — the worked example that proves the deterministic repo factory
+# end-to-end (see memory project_repo_factory_init). Bootstraps a NEW hello-world Go service
+# from the language template, entirely via deterministic tools (no LLM grep/edit), and
+# verifies the first release is HEALTHY on both clusters.
+#
+# All steps run on the infra agent: creating + wiring + release-verifying a repo is a
+# bootstrap (infra) concern; the DEV agent enters later for real feature initiatives.
+#
+# WHY no deploy-config step: jx-promote auto-creates the helmfile entry on first release
+# (staging promotionStrategy: Auto) on EACH cluster independently once the repo is in that
+# cluster's source-config. Verified against the live gitops history (chore: promote <svc> to
+# version 0.0.1). So registering + scaffolding + merging is enough — the deploy is automatic.
+#
+# stepPhase flow:
+#   create        -> Succeeded (no PR; repo:"" so the merged!=healthy guard permits it)
+#   register-gcp  -> AwaitingReview -> Succeeded  (source-config PR on jx-build-cluster-gsm)
+#   register-az   -> AwaitingReview -> Succeeded  (source-config PR on jx-build-cluster-akv)
+#   scaffold      -> AwaitingReview -> Succeeded  (its PR is where the PREVIEW runs; merge
+#                    triggers release -> jx-promote -> deploy on both clusters)
+#   release-check -> Succeeded on /health=200 both clusters (repo:"" verification)
+#
+# PREREQS to fire: the leartech-agent-infra AgentType must exist on-cluster (occ-src chart
+# change deployed) and the agent image must carry gate.agent.infra_agent (aa-src released +
+# agent-py base bumped). Iterate empirically: fire -> observe -> fix -> delete the repo ->
+# retry until clean.
+apiVersion: agent.leartech.io/v1alpha1
+kind: Plan
+metadata:
+  name: repo-factory-hello-go
+  namespace: jx-staging
+spec:
+  tenant: leartech
+  triggeredBy: agent
+  steps:
+    - name: create
+      agentType: leartech-agent-infra
+      repo: ""
+      inputs:
+        action: create-repo
+        newRepo: mikelear/hello-go
+
+    - name: register-gcp
+      agentType: leartech-agent-infra
+      dependsOn: [create]
+      repo: ""
+      inputs:
+        action: register-source-config
+        service: hello-go
+        cluster: gcp
+
+    - name: register-az
+      agentType: leartech-agent-infra
+      dependsOn: [create]
+      repo: ""
+      inputs:
+        action: register-source-config
+        service: hello-go
+        cluster: az
+
+    - name: scaffold
+      agentType: leartech-agent-infra
+      dependsOn: [register-gcp, register-az]
+      repo: mikelear/hello-go
+      inputs:
+        action: scaffold-pr
+        template: go
+        name: hello-go
+
+    - name: release-check
+      agentType: leartech-agent-infra
+      dependsOn: [scaffold]
+      repo: ""
+      inputs:
+        action: release-health-check
+        service: hello-go
+        urls:
+          - https://hello-go-jx-staging.jx.leartech.com/health
+          - https://hello-go-jx-staging.az.leartech.com/health
