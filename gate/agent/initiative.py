@@ -31,6 +31,7 @@ from claude_agent_sdk.types import (
 from app.db import dispose_engine as _dispose_engine
 from app.db import init_engine as _init_engine
 from app.db import is_db_enabled
+from gate import obslog
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.commands import (
     CommandSink,
@@ -1449,8 +1450,6 @@ def main(initiative_path: Path, repo_root: Path | None, model: str, max_turns: i
     # seam-agnostic — Phase B's runtime calls the same fns, so this survives the
     # refactor. run_end is THE authoritative per-run outcome line (one per run),
     # queryable in Loki: {namespace="jx-staging"} | json | event="run_end"
-    from gate import obslog
-
     obslog.info(
         'run_start', 'initiative run starting', logger='agent.initiative',
         model=model, initiative=str(initiative_path),
