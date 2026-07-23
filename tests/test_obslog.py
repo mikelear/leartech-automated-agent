@@ -16,6 +16,7 @@ import io
 import json
 import logging
 from collections.abc import Iterator
+from pathlib import Path
 
 import pytest
 
@@ -89,3 +90,26 @@ def test_run_start_end_pair_parses(cap_obslog: io.StringIO) -> None:
     assert [r['event'] for r in recs] == ['run_start', 'run_end']
     assert recs[1]['exit_code'] == 1
     assert recs[1]['reason'] == 'no PR'
+
+
+def test_initiative_main_crash_emits_run_end_error(
+    cap_obslog: io.StringIO, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The main() crash branch must emit a run_end ERROR (exit_code=1,
+    reason='crashed') and re-raise — so a crashed run still produces its
+    authoritative outcome line in Loki instead of vanishing."""
+    from gate.agent import initiative
+
+    async def _boom(*args: object, **kwargs: object) -> object:
+        raise RuntimeError('kaboom')
+
+    monkeypatch.setattr(initiative, 'run_initiative', _boom)
+    with pytest.raises(RuntimeError, match='kaboom'):
+        initiative.main.callback(  # type: ignore[misc]  # click Command.callback = the underlying fn
+            initiative_path=tmp_path / 'x.yaml', repo_root=None, model='m', max_turns=1
+        )
+    ends = [r for r in _lines(cap_obslog) if r['event'] == 'run_end']
+    assert ends, 'crash path emitted no run_end'
+    assert ends[-1]['level'] == 'ERROR'
+    assert ends[-1]['exit_code'] == 1
+    assert ends[-1]['reason'] == 'crashed'
