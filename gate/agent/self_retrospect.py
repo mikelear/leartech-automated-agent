@@ -234,14 +234,12 @@ async def retrospect_after_ready(
     chosen_model = model or DEFAULT_RETROSPECT_MODEL
 
     try:
-        # Imported lazily so the module can be imported in environments
-        # that don't have the anthropic SDK installed at import time
-        # (e.g. some test paths that monkeypatch the call).
-        from anthropic import Anthropic
+        # LLM call goes through the provider seam (gate.llm) — the single
+        # anthropic import site. to_thread keeps the sync SDK call off the loop.
+        from gate import llm
 
-        client = Anthropic()
         resp = await asyncio.to_thread(
-            client.messages.create,
+            llm.complete,
             model=chosen_model,
             max_tokens=2000,
             messages=cast(Any, [{'role': 'user', 'content': prompt}]),

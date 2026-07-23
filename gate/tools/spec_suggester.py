@@ -165,11 +165,10 @@ def suggest_spec(
 
     Requires ANTHROPIC_API_KEY. Use `is_anthropic_key_present()` to gate the call.
     """
-    from anthropic import Anthropic
+    from gate import llm
 
-    client = Anthropic()
     user_msg = build_user_message(delta, reference_specs=reference_specs, component_source=component_source)
-    response = client.messages.create(
+    response = llm.complete(
         model=model,
         max_tokens=4096,
         system=SPEC_SUGGESTER_SYSTEM_PROMPT,

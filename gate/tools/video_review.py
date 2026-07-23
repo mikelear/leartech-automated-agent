@@ -218,16 +218,16 @@ def review_video(
 
     Requires `ANTHROPIC_API_KEY` env var. Use `check_prerequisites()` to gate the call.
     """
-    # Defer the import so the rest of this module is importable without anthropic installed
+    # LLM call goes through the provider seam (gate.llm) — the single anthropic
+    # import site. Deferred import keeps this module importable without anthropic
     # (helps the tests that don't exercise the IO path).
-    from anthropic import Anthropic
+    from gate import llm
 
-    client = Anthropic()
     messages = [{'role': 'user', 'content': build_user_message(spec_name, frames, expected_flow)}]
     # The SDK uses TypedDict shapes for messages/tools/tool_choice; our literal-dict
     # construction matches at runtime but mypy can't structurally verify the nested image
     # blocks. cast(Any, ...) keeps strict mode green without weakening the rest of the file.
-    response = client.messages.create(
+    response = llm.complete(
         model=model,
         max_tokens=1024,
         system=VIDEO_REVIEW_SYSTEM_PROMPT,
