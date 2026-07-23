@@ -28,7 +28,6 @@ import json
 import os
 import sys
 from datetime import UTC, datetime
-from typing import Any
 
 # Ambient run context, injected into the Job pod by the controller's jobspawn.
 # Absent on laptop/preview → simply omitted from the record (no crash).
@@ -46,7 +45,7 @@ def _context() -> dict[str, str]:
     return {key: os.environ[env] for key, env in _CONTEXT_ENV.items() if os.environ.get(env)}
 
 
-def emit(level: str, event: str, msg: str, *, logger: str = 'agent', **fields: Any) -> None:
+def emit(level: str, event: str, msg: str, *, logger: str = 'agent', **fields: object) -> None:
     """Emit one structured JSON log line on stderr.
 
     ``fields`` are event-specific (None values dropped so absent data doesn't
@@ -55,7 +54,7 @@ def emit(level: str, event: str, msg: str, *, logger: str = 'agent', **fields: A
     lvl = level.upper()
     if lvl not in _VALID_LEVELS:
         lvl = 'INFO'
-    record: dict[str, Any] = {
+    record: dict[str, object] = {
         'time': datetime.now(UTC).isoformat(),
         'level': lvl,
         'logger': logger,
@@ -69,13 +68,13 @@ def emit(level: str, event: str, msg: str, *, logger: str = 'agent', **fields: A
     print(json.dumps(record, default=str), file=sys.stderr, flush=True)
 
 
-def info(event: str, msg: str, *, logger: str = 'agent', **fields: Any) -> None:
+def info(event: str, msg: str, *, logger: str = 'agent', **fields: object) -> None:
     emit('INFO', event, msg, logger=logger, **fields)
 
 
-def warning(event: str, msg: str, *, logger: str = 'agent', **fields: Any) -> None:
+def warning(event: str, msg: str, *, logger: str = 'agent', **fields: object) -> None:
     emit('WARN', event, msg, logger=logger, **fields)
 
 
-def error(event: str, msg: str, *, logger: str = 'agent', **fields: Any) -> None:
+def error(event: str, msg: str, *, logger: str = 'agent', **fields: object) -> None:
     emit('ERROR', event, msg, logger=logger, **fields)
