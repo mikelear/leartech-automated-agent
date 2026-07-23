@@ -465,28 +465,37 @@ def evidence_for_flip(
     signal: ChartFlipSignal,
     pr_title: str,
     pr_body: str,
+    commit_messages: str = '',
 ) -> tuple[bool, str]:
     """Combined check: does this flip have evidence of a paired overlay landing?
 
+    ``commit_messages`` is a single string with the headline+body of every
+    commit in the PR concatenated together (see
+    :func:`gate.tools.pr_context.fetch_pr_commit_messages`). It's scanned
+    alongside title+body so authors who drop the overlay reference in a
+    commit message (but forget to repeat it in the PR title/body) still get
+    credit for the paper trail. Empty string ⇒ commit-message evidence
+    unavailable; check falls back to title/body only.
+
     Returns ``(ok, reason)``:
       * ``ok=True``: an overlay YAML already sets the key, OR the PR
-        references a linked overlay PR by ``owner/repo#N`` / URL. ``reason``
-        describes what was found.
+        title / body / commit messages reference a linked overlay PR by
+        ``owner/repo#N`` / URL. ``reason`` describes what was found.
       * ``ok=False``: neither an overlay match nor a linked PR was found.
         ``reason`` describes the gap.
     """
     overlay_reason = any_cluster_overlay_sets_flip(signal)
     if overlay_reason:
         return True, f'overlay already sets {signal.dotted_key}: {overlay_reason}'
-    refs = find_overlay_pr_refs(pr_title, pr_body)
+    refs = find_overlay_pr_refs(pr_title, pr_body, commit_messages)
     if refs:
         return True, 'linked overlay PR references: ' + ', '.join(refs)
     return (
         False,
         (
             f'no overlay YAML in any of {sorted(CLUSTER_OVERLAY_REPOS.values())} sets '
-            f'`{signal.dotted_key}`, and PR title/body reference no overlay PR '
-            f'(expected `owner/repo#N` or GitHub PR URL against a cluster repo). '
+            f'`{signal.dotted_key}`, and PR title / body / commit messages reference no '
+            f'overlay PR (expected `owner/repo#N` or GitHub PR URL against a cluster repo). '
             f'Chart-comment hint: {signal.hint_snippet!r}.'
         ),
     )

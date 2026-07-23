@@ -57,7 +57,7 @@ from gate.tools.playwright_artifacts import (
     read_playwright_runs,
 )
 from gate.tools.playwright_specs import SpecCoverage, inventory_specs, parse_spec
-from gate.tools.pr_context import PRContext, load_pr_context
+from gate.tools.pr_context import PRContext, fetch_pr_commit_messages, load_pr_context
 from gate.tools.pr_diff import added_files, added_lines, fetch_pr_diff
 from gate.tools.security_claim import (
     SecurityClaim,
@@ -96,6 +96,7 @@ from gate.tools.video_review import (
 
 __all__ = [
     'PRContext',
+    'fetch_pr_commit_messages',
     'load_pr_context',
     'PipelineCheck',
     'list_pr_checks',

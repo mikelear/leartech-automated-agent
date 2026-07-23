@@ -307,6 +307,63 @@ def test_evidence_for_flip_ok_when_pr_links_overlay(monkeypatch: pytest.MonkeyPa
     assert 'jx-build-cluster-gsm#77' in reason
 
 
+def test_evidence_for_flip_ok_when_commit_message_links_overlay(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Overlay reference in a commit message counts as evidence.
+
+    Covers the case where the author drops the paper-trail into a commit message
+    (`git commit -m "feat(chart): add dcr toggle (paired with mikelear/...#77)"`)
+    but forgets to repeat it in the PR title or body. The criterion now scans
+    commit messages alongside title/body.
+    """
+    sig = _make_signal()
+    monkeypatch.setattr(chart_overlay, 'fetch_overlay_yaml', lambda *a, **kw: {})
+    ok, reason = evidence_for_flip(
+        sig,
+        pr_title='feat(chart): add dcr toggle',
+        pr_body='Adds the new flag; enabled in prod via GitOps overlay.',
+        commit_messages='feat(chart): add dcr toggle\n\nPaired with mikelear/jx-build-cluster-gsm#88.',
+    )
+    assert ok
+    assert 'jx-build-cluster-gsm#88' in reason
+
+
+def test_evidence_for_flip_scans_all_three_sources_for_refs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Refs from title + body + commit_messages are all surfaced (and de-duped)."""
+    sig = _make_signal()
+    monkeypatch.setattr(chart_overlay, 'fetch_overlay_yaml', lambda *a, **kw: {})
+    ok, reason = evidence_for_flip(
+        sig,
+        pr_title='feat(chart): add dcr toggle (mikelear/jx-build-cluster-akv#1)',
+        pr_body='mikelear/jx-build-cluster-gsm#2 pairs with this.',
+        commit_messages='chore: mention https://github.com/mikelear/jx-build-cluster-akv/pull/1 again',
+    )
+    assert ok
+    # akv#1 and gsm#2 both surface; the URL is normalised to owner/repo#N and de-duped.
+    assert 'jx-build-cluster-akv#1' in reason
+    assert 'jx-build-cluster-gsm#2' in reason
+    # De-dup — akv#1 must appear exactly once even though title + commit_messages both reference it.
+    assert reason.count('jx-build-cluster-akv#1') == 1
+
+
+def test_evidence_for_flip_fails_when_only_commit_messages_reference_non_cluster_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A commit-message reference to a NON-cluster repo isn't overlay evidence."""
+    sig = _make_signal()
+    monkeypatch.setattr(chart_overlay, 'fetch_overlay_yaml', lambda *a, **kw: {})
+    ok, reason = evidence_for_flip(
+        sig,
+        pr_title='shipped it',
+        pr_body='trust me',
+        commit_messages='feat: paired with mikelear/leartech-automated-agent#61',
+    )
+    assert not ok
+    assert 'no overlay YAML' in reason
+    # The updated failure text mentions commit messages explicitly so authors know
+    # the criterion looked there.
+    assert 'commit message' in reason.lower()
+
+
 def test_evidence_for_flip_fails_when_no_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
     """PR #61-style regression — chart flip added, no overlay, no linked PR."""
     sig = _make_signal()

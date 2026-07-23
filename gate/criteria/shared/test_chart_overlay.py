@@ -26,6 +26,7 @@ import pytest
 from gate.tools import (
     PRContext,
     evidence_for_flip,
+    fetch_pr_commit_messages,
     fetch_pr_diff,
     parse_chart_flip_signals,
 )
@@ -43,9 +44,14 @@ def test_chart_flip_has_overlay_or_linked_pr(pr_context: PRContext) -> None:
             'claim a per-cluster GitOps overlay flip.'
         )
 
+    # Commit messages are fetched once per criterion run and reused across every
+    # signal (they don't vary per-signal). Empty string on gh failure — the
+    # criterion falls back to title/body-only evidence and still gates cleanly.
+    commit_messages = fetch_pr_commit_messages(pr_context.qualified_repo, pr_context.number)
+
     failures: list[str] = []
     for signal in signals:
-        ok, reason = evidence_for_flip(signal, pr_context.title, pr_context.body)
+        ok, reason = evidence_for_flip(signal, pr_context.title, pr_context.body, commit_messages)
         if not ok:
             failures.append(
                 f'{signal.chart_path} → `{signal.dotted_key}: {str(signal.default_value).lower()}`\n  {reason}'
@@ -56,6 +62,6 @@ def test_chart_flip_has_overlay_or_linked_pr(pr_context: PRContext) -> None:
         'landing evidence:\n\n' + '\n\n'.join(failures) + '\n\n'
         'Fix by either (a) landing the per-cluster GitOps overlay PR first '
         'and merging it before this PR, or (b) referencing the linked overlay '
-        "PR in this PR's title or body (`mikelear/jx-build-cluster-<cluster>#<n>` "
-        'or the full GitHub PR URL).'
+        "PR in this PR's title, body, or a commit message "
+        '(`mikelear/jx-build-cluster-<cluster>#<n>` or the full GitHub PR URL).'
     )
