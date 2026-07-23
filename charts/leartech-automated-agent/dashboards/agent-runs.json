@@ -96,6 +96,18 @@
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"(?i)open_pr\" [$__range]))", "instant": true }
       ]
+    },
+    {
+      "id": 6,
+      "type": "logs",
+      "title": "Run outcomes (structured run_end)",
+      "description": "The authoritative per-run outcome line from obslog (event=run_end): exit_code, reason, targetPR, turns, cost. Parsed via `| json`. This is the first stop for 'did this run succeed and why'.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 28 },
+      "options": { "showTime": true, "wrapLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{namespace=\"$ns\", pod=~\"$run\"} | json | event=`run_end`" }
+      ]
     }
   ]
 }

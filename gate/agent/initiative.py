@@ -1445,7 +1445,29 @@ async def run_initiative(
 )
 def main(initiative_path: Path, repo_root: Path | None, model: str, max_turns: int) -> None:
     """Run an initiative YAML end-to-end via the write-mode agent."""
-    summary = asyncio.run(run_initiative(initiative_path, repo_root=repo_root, model=model, max_turns=max_turns))
+    # Phase-A observability: emit stable run-boundary events. obslog is
+    # seam-agnostic — Phase B's runtime calls the same fns, so this survives the
+    # refactor. run_end is THE authoritative per-run outcome line (one per run),
+    # queryable in Loki: {namespace="jx-staging"} | json | event="run_end"
+    from gate import obslog
+
+    obslog.info(
+        'run_start', 'initiative run starting', logger='agent.initiative',
+        model=model, initiative=str(initiative_path),
+    )
+    try:
+        summary = asyncio.run(run_initiative(initiative_path, repo_root=repo_root, model=model, max_turns=max_turns))
+    except Exception as exc:
+        obslog.error(
+            'run_end', f'initiative run crashed: {exc}', logger='agent.initiative',
+            exit_code=1, reason='crashed', error=str(exc),
+        )
+        raise
+    obslog.emit(
+        'INFO' if summary.exit_code == 0 else 'ERROR', 'run_end', 'initiative run finished',
+        logger='agent.initiative', exit_code=summary.exit_code, targetPR=summary.pr_number,
+        turns=summary.turns, cost_usd=summary.cost_usd,
+    )
     sys.exit(summary.exit_code)
 
 
