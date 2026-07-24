@@ -160,13 +160,33 @@ def test_name_variants_snake_before_kebab() -> None:
     assert variants == [(OLD_SNAKE, NEW_SNAKE), (OLD, NEW)]
 
 
-def test_run_raises_on_subprocess_failure() -> None:
+def test_run_helper_raises_on_subprocess_failure() -> None:
+    from gate.tools._subprocess import run
+
     with pytest.raises(RuntimeError, match='failed'):
-        repo_factory._run(['false'])
+        run(['false'])
+
+
+def test_open_scaffold_pr_propagates_run_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A composite git/gh op propagates the underlying subprocess failure (not swallowed)."""
+
+    def _boom(*_a: object, **_k: object) -> str:
+        raise RuntimeError('git clone failed')
+
+    monkeypatch.setattr(repo_factory, 'run', _boom)
+    with pytest.raises(RuntimeError, match='git clone failed'):
+        repo_factory.open_scaffold_pr(
+            template='go', new_name='x', target_repo='mikelear/y', workdir=tmp_path / 'wd'
+        )
 
 
 def test_is_text_file_false_on_missing(tmp_path: Path) -> None:
     assert repo_factory._is_text_file(tmp_path / 'does-not-exist') is False
+
+
+def test_default_org_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('LEARTECH_GITHUB_ORG', 'acme')
+    assert repo_factory.resolve_template('go') == ('acme/leartech-go-service-template', 'leartech-go-service-template')
 
 
 def test_resolve_template_language_key_and_slug() -> None:

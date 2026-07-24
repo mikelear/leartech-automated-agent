@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import os
 import shutil
-import subprocess
 from dataclasses import dataclass
 from pathlib import Path
+
+from gate.tools._subprocess import default_org, run
 
 # Language key -> the template's own kebab name (which is BOTH the GitHub repo short name
 # and the in-tree placeholder string). Mirrors the templates referenced by
@@ -138,23 +139,17 @@ def resolve_template(template: str) -> tuple[str, str]:
     (``leartech-go-service-template``), or an ``owner/repo`` slug. Returns the fully
     qualified repo to clone and the in-tree placeholder string to replace.
     """
+    org = default_org()
     if template in KNOWN_TEMPLATES:
         short = KNOWN_TEMPLATES[template]
-        return f'mikelear/{short}', short
+        return f'{org}/{short}', short
     short = template.split('/')[-1]
-    repo = template if '/' in template else f'mikelear/{template}'
+    repo = template if '/' in template else f'{org}/{template}'
     return repo, short
 
 
-def _run(args: list[str], cwd: str | os.PathLike[str] | None = None) -> str:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f'{" ".join(args)} failed: {result.stderr.strip()}')
-    return result.stdout
-
-
-def _qualify(repo: str, org: str = 'mikelear') -> str:
-    return repo if '/' in repo else f'{org}/{repo}'
+def _qualify(repo: str, org: str | None = None) -> str:
+    return repo if '/' in repo else f'{org or default_org()}/{repo}'
 
 
 def render_template(
@@ -181,7 +176,7 @@ def render_template(
         old_name = placeholder or src.name
     else:
         repo, short = resolve_template(template)
-        _run(['git', 'clone', '--depth=1', '--branch', ref, f'https://github.com/{repo}.git', str(dest_path)])
+        run(['git', 'clone', '--depth=1', '--branch', ref, f'https://github.com/{repo}.git', str(dest_path)])
         git_dir = dest_path / '.git'
         if git_dir.exists():
             shutil.rmtree(git_dir)
@@ -203,15 +198,15 @@ def scaffold(
     """
     report = render_template(template, new_name, dest, ref=ref)
     dest_path = Path(dest)
-    _run(['git', 'init'], cwd=dest_path)
-    _run(['git', 'branch', '-m', 'main'], cwd=dest_path)
-    _run(['git', 'add', '-A'], cwd=dest_path)
-    _run(['git', 'commit', '-m', f'feat: scaffold {new_name}'], cwd=dest_path)
-    _run(['git', 'tag', 'v0.0.1'], cwd=dest_path)
+    run(['git', 'init'], cwd=dest_path)
+    run(['git', 'branch', '-m', 'main'], cwd=dest_path)
+    run(['git', 'add', '-A'], cwd=dest_path)
+    run(['git', 'commit', '-m', f'feat: scaffold {new_name}'], cwd=dest_path)
+    run(['git', 'tag', 'v0.0.1'], cwd=dest_path)
     return report
 
 
-def create_repo(name: str, *, org: str = 'mikelear', private: bool = True, add_readme: bool = True) -> str:
+def create_repo(name: str, *, org: str | None = None, private: bool = True, add_readme: bool = True) -> str:
     """``gh repo create`` an EMPTY repo. Returns the ``owner/repo`` slug.
 
     ``add_readme`` seeds a README so ``main`` exists — required so a later scaffold can be
@@ -223,7 +218,7 @@ def create_repo(name: str, *, org: str = 'mikelear', private: bool = True, add_r
     args = ['gh', 'repo', 'create', slug, '--private' if private else '--public']
     if add_readme:
         args.append('--add-readme')
-    _run(args)
+    run(args)
     return slug
 
 
@@ -235,9 +230,9 @@ def push_main(dest: str | os.PathLike[str], target_repo: str) -> None:
     """
     slug = _qualify(target_repo)
     dest_path = Path(dest)
-    _run(['git', 'remote', 'add', 'origin', f'https://github.com/{slug}.git'], cwd=dest_path)
-    _run(['git', 'push', '-u', 'origin', 'main'], cwd=dest_path)
-    _run(['git', 'push', 'origin', 'v0.0.1'], cwd=dest_path)
+    run(['git', 'remote', 'add', 'origin', f'https://github.com/{slug}.git'], cwd=dest_path)
+    run(['git', 'push', '-u', 'origin', 'main'], cwd=dest_path)
+    run(['git', 'push', 'origin', 'v0.0.1'], cwd=dest_path)
 
 
 def open_scaffold_pr(
@@ -267,15 +262,15 @@ def open_scaffold_pr(
     target = work / 'target'
 
     render_template(template, new_name, rendered, ref=ref)
-    _run(['git', 'clone', f'https://github.com/{slug}.git', str(target)])
+    run(['git', 'clone', f'https://github.com/{slug}.git', str(target)])
     # Overlay onto the target clone, keeping its .git so the branch descends from main.
     shutil.copytree(rendered, target, dirs_exist_ok=True, ignore=shutil.ignore_patterns('.git'))
 
-    _run(['git', 'checkout', '-b', branch], cwd=target)
-    _run(['git', 'add', '-A'], cwd=target)
-    _run(['git', 'commit', '-m', f'feat: scaffold {new_name} from template'], cwd=target)
-    _run(['git', 'push', '-u', 'origin', branch], cwd=target)
-    pr_url = _run(
+    run(['git', 'checkout', '-b', branch], cwd=target)
+    run(['git', 'add', '-A'], cwd=target)
+    run(['git', 'commit', '-m', f'feat: scaffold {new_name} from template'], cwd=target)
+    run(['git', 'push', '-u', 'origin', branch], cwd=target)
+    pr_url = run(
         [
             'gh', 'pr', 'create', '--repo', slug, '--head', branch,
             '--title', title or f'feat: scaffold {new_name} from template',

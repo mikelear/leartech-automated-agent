@@ -81,3 +81,14 @@ def test_cluster_keys_match_overlay_repos() -> None:
 def test_register_unknown_cluster_raises() -> None:
     with pytest.raises(ValueError, match='unknown cluster'):
         source_config.register_source_config(service='x', cluster='nope', workdir='unused-workdir')
+
+
+def test_register_propagates_run_failure(tmp_path: object, monkeypatch: pytest.MonkeyPatch) -> None:
+    """register_source_config propagates a git/gh subprocess failure (clone/push/pr create)."""
+
+    def _boom(*_a: object, **_k: object) -> str:
+        raise RuntimeError('git clone failed')
+
+    monkeypatch.setattr(source_config, 'run', _boom)
+    with pytest.raises(RuntimeError, match='git clone failed'):
+        source_config.register_source_config(service='x', cluster='gcp', workdir='wd-x')

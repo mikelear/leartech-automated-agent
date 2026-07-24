@@ -19,9 +19,9 @@ drop comments). Registration is per-cluster: one PR each on gcp + az (see
 from __future__ import annotations
 
 import os
-import subprocess
 from pathlib import Path
 
+from gate.tools._subprocess import run
 from gate.tools.chart_overlay import CLUSTER_OVERLAY_REPOS
 
 # The source-config lives at the same path in both cluster GitOps repos.
@@ -94,13 +94,6 @@ def add_repo_to_source_config(text: str, name: str, description: str | None = No
     return ''.join(lines), True
 
 
-def _run(args: list[str], cwd: str | os.PathLike[str] | None = None) -> str:
-    result = subprocess.run(args, cwd=cwd, capture_output=True, text=True, check=False)
-    if result.returncode != 0:
-        raise RuntimeError(f'{" ".join(args)} failed: {result.stderr.strip()}')
-    return result.stdout
-
-
 def register_source_config(
     *,
     service: str,
@@ -120,7 +113,7 @@ def register_source_config(
         raise ValueError(f'unknown cluster {cluster!r}; expected one of {sorted(CLUSTER_OVERLAY_REPOS)}')
 
     work = Path(workdir)
-    _run(['git', 'clone', f'https://github.com/{gitops}.git', str(work)])
+    run(['git', 'clone', f'https://github.com/{gitops}.git', str(work)])
     cfg = work / SOURCE_CONFIG_PATH
     new_text, changed = add_repo_to_source_config(cfg.read_text(), service, description)
     if not changed:
@@ -128,11 +121,11 @@ def register_source_config(
 
     cfg.write_text(new_text)
     branch = branch or f'register-{service}'
-    _run(['git', 'checkout', '-b', branch], cwd=work)
-    _run(['git', 'add', SOURCE_CONFIG_PATH], cwd=work)
-    _run(['git', 'commit', '-m', f'chore: register {service} in source-config'], cwd=work)
-    _run(['git', 'push', '-u', 'origin', branch], cwd=work)
-    pr_url = _run(
+    run(['git', 'checkout', '-b', branch], cwd=work)
+    run(['git', 'add', SOURCE_CONFIG_PATH], cwd=work)
+    run(['git', 'commit', '-m', f'chore: register {service} in source-config'], cwd=work)
+    run(['git', 'push', '-u', 'origin', branch], cwd=work)
+    pr_url = run(
         [
             'gh', 'pr', 'create', '--repo', gitops, '--head', branch,
             '--title', f'chore: register {service} in source-config',
