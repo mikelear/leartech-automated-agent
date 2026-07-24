@@ -1,0 +1,94 @@
+# repo-factory-hello-go-decomposed — the DECOMPOSED Dev+Infra shape (Mike 2026-07-24).
+#
+# Supersedes repo-factory-hello-go's single linear infra run. Separates the two concerns the
+# platform actually has, with a STATE-TRIGGERED handoff between them (occ-src TriggeredWhen):
+#
+#   Infra (bootstrap):   create the repo + register it in each cluster's source-config.
+#   Dev   (deliverable): scaffold the hello-world + open its PR  -> reaches AwaitingReview.
+#   Infra (release-mon): the MOMENT the Dev PR opens (AwaitingReview), a release-monitor step
+#                        is TRIGGERED to watch it through review -> merge -> release -> deploy
+#                        and fail the Plan unless /health=200 (release-health-check fail-closed,
+#                        aa-src). It does NOT wait for the Dev step to Succeed (that's merge) —
+#                        it shadows it from PR-open, so a stuck/red release surfaces immediately.
+#
+# WHY TriggeredWhen instead of dependsOn: dependsOn gates on the target reaching Succeeded
+# (== PR merged). The release-monitor must start EARLIER — at AwaitingReview (PR opened) — so
+# it can watch the whole merge->release arc. `triggeredWhen: {step, phase}` fires on the named
+# phase or any later success phase (reached-or-beyond); if scaffold Fails/Cancels the monitor
+# never fires and the Plan rolls up Failed via scaffold. See occ-src PlanStep.TriggeredWhen.
+#
+# ENABLING DEP (must be deployed for scaffold to reach AwaitingReview): the repo-factory
+# `scaffold` MCP tool must publish targetPR onto the AgentRun (mirror `open_pr`: accept
+# run_id+namespace, patch AgentRun.status.targetPR after opening the PR). Until that ships,
+# scaffold collapses to Succeeded (repo:"" path) and the monitor effectively fires on merge.
+# With it shipped + scaffold.repo set, scaffold -> AwaitingReview and the early handoff works.
+#
+# stepPhase flow (target state):
+#   create         -> Succeeded (no PR; repo:"" bootstrap)
+#   register-gcp   -> AwaitingReview -> Succeeded  (source-config PR, jx-build-cluster-gsm)
+#   register-az    -> AwaitingReview -> Succeeded  (source-config PR, jx-build-cluster-akv)
+#   scaffold       -> AwaitingReview (PR open, targetPR published) -> Succeeded (merged)
+#   release-monitor-> (spawns at scaffold=AwaitingReview) -> Succeeded on /health=200 both
+#                     clusters, else Failed (fail-closed verdict feeds real deploy state back)
+apiVersion: agent.leartech.io/v1alpha1
+kind: Plan
+metadata:
+  name: repo-factory-hello-go-decomposed
+  namespace: jx-staging
+spec:
+  tenant: leartech
+  triggeredBy: agent
+  steps:
+    # ── Infra: bootstrap ────────────────────────────────────────────────────────
+    - name: create
+      agentType: leartech-agent-infra
+      repo: ""
+      inputs:
+        action: create-repo
+        newRepo: mikelear/hello-go
+
+    - name: register-gcp
+      agentType: leartech-agent-infra
+      dependsOn: [create]
+      repo: ""
+      inputs:
+        action: register-source-config
+        service: hello-go
+        cluster: gcp
+
+    - name: register-az
+      agentType: leartech-agent-infra
+      dependsOn: [create]
+      repo: ""
+      inputs:
+        action: register-source-config
+        service: hello-go
+        cluster: az
+
+    # ── Dev: the hello-world deliverable (its PR is the review/preview surface) ───
+    # repo is set so the phase machine polls the PR (repo:"" would collapse to Succeeded);
+    # scaffold publishes targetPR, so this reaches AwaitingReview when the PR opens.
+    - name: scaffold
+      agentType: leartech-agent-infra
+      dependsOn: [register-gcp, register-az]
+      repo: mikelear/hello-go
+      inputs:
+        action: scaffold-pr
+        template: go
+        name: hello-go
+
+    # ── Infra: release-monitor — TRIGGERED at Dev PR-open, not at merge ──────────
+    - name: release-monitor
+      agentType: leartech-agent-infra
+      triggeredWhen:
+        step: scaffold
+        phase: AwaitingReview
+      repo: ""
+      inputs:
+        action: release-health-check
+        service: hello-go
+        namespace: jx-staging
+        healthPath: /health
+        # No cluster hostnames — the infra agent discovers the Ingress host via kubectl
+        # (leartech no-hardcoded-cluster-URL convention). Fail-closed: PASS only on an
+        # observed >=1-available-replica Deployment AND HTTP 200.
