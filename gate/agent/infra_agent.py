@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 
 import click
@@ -93,9 +94,17 @@ ACTIONS (your inputs include `action` + its params):
 - release-health-check: after the dev PR merged and the release deployed, verify the
   service is HEALTHY — WITHOUT hardcoding cluster domains (leartech convention). Use kubectl
   to find the service's Ingress host(s) for `service` in `namespace` on this cluster, confirm
-  the Deployment rolled out, then curl https://<host><healthPath> and confirm HTTP 200.
-  Params: service, namespace, healthPath. Succeed only if ALL checks pass — a merged PR does
-  NOT mean a healthy release.
+  the Deployment rolled out (>=1 available replica), then curl https://<host><healthPath> and
+  confirm HTTP 200. Params: service, namespace, healthPath.
+  You MUST end your final message with EXACTLY ONE verdict line, on its own line:
+      RELEASE_HEALTH: PASS
+  or
+      RELEASE_HEALTH: FAIL: <one-line reason>
+  Output PASS ONLY if you OBSERVED all of: the Deployment exists with >=1 available replica
+  AND an HTTP 200 from the health endpoint. If the Deployment/Ingress is missing, the rollout
+  is incomplete, the curl is non-200, or you could NOT confirm for ANY reason, output FAIL.
+  A merged PR, a queued release, or "not deployed yet" is a FAIL, never a PASS — the step's
+  success is decided by this verdict, not by whether you finished exploring.
 
 Report concisely what you did, which PRs you opened (numbers), and the pass/fail outcome.
 """
@@ -131,6 +140,29 @@ def _task_prompt(action: str, inputs: dict[str, object]) -> str:
     )
 
 
+# Machine-readable verdict the release-health-check action must emit; the LAST match wins
+# (the agent may narrate before its final verdict line). Absent => treated as FAIL.
+_HEALTH_VERDICT_RE = re.compile(r'^\s*RELEASE_HEALTH:\s*(PASS|FAIL)\b', re.MULTILINE)
+
+
+def _last_health_verdict(text: str) -> str | None:
+    """Return the last RELEASE_HEALTH verdict (PASS/FAIL) in the agent transcript, or None."""
+    matches = _HEALTH_VERDICT_RE.findall(text)
+    return matches[-1].upper() if matches else None
+
+
+def _resolve_exit_code(action: str, sdk_exit_code: int, health_verdict: str | None) -> int:
+    """Fold the outcome-verdict into the exit code for judgment actions.
+
+    For release-health-check, ONLY an explicit PASS keeps success; FAIL or a MISSING verdict
+    forces exit 1 (a merged PR / undeployed release must never read as healthy). Other actions
+    keep the SDK-derived code (is_error).
+    """
+    if action == 'release-health-check' and health_verdict != 'PASS':
+        return 1
+    return sdk_exit_code
+
+
 async def run_infra_task(
     action: str,
     inputs: dict[str, object],
@@ -151,6 +183,7 @@ async def run_infra_task(
     prompt = _task_prompt(action, inputs)
 
     exit_code = 0
+    transcript: list[str] = []
     try:
         # Drain the iterator fully (return inside `async for` breaks the SDK's generator
         # shutdown — see gate/agent/main.py).
@@ -158,6 +191,7 @@ async def run_infra_task(
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):
+                        transcript.append(block.text)
                         click.echo(block.text)
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
@@ -168,6 +202,19 @@ async def run_infra_task(
     except Exception as exc:
         obslog.error('run_end', f'infra agent crashed: {exc}', logger='infra', action=action, exit_code=1)
         raise
+
+    # Judgment actions must drive the exit code from the OUTCOME, not just SDK errors.
+    # release-health-check emits a machine-readable verdict; anything but an explicit PASS
+    # (incl. a MISSING verdict) FAILS the step — a merged PR / undeployed release must never
+    # read as healthy (closes the false-success where exit_code tracked only is_error).
+    if action == 'release-health-check':
+        verdict = _last_health_verdict('\n'.join(transcript))
+        exit_code = _resolve_exit_code(action, exit_code, verdict)
+        obslog.info(
+            'health_verdict',
+            f'release-health-check verdict={verdict or "MISSING"}',
+            logger='infra', action=action, verdict=verdict or 'MISSING', exit_code=exit_code,
+        )
 
     obslog.info('run_end', f'infra agent action={action} done', logger='infra', action=action, exit_code=exit_code)
     return exit_code

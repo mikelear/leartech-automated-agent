@@ -42,7 +42,7 @@ def _rpc(base: str, server: str, method: str, params: dict | None, token: str | 
     if token:
         req.add_header('authorization', f'Bearer {token}')
     try:
-        with urllib.request.urlopen(req, timeout=20) as r:
+        with urllib.request.urlopen(req, timeout=180) as r:
             raw = r.read().decode()
     except urllib.error.HTTPError as e:
         return {'error': f'HTTP {e.code}: {e.read().decode()[:200]}'}

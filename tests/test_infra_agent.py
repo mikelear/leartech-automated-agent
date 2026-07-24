@@ -67,6 +67,33 @@ def test_run_infra_task_reraises_sdk_exception(monkeypatch: pytest.MonkeyPatch) 
         asyncio.run(infra_agent.run_infra_task('create-repo', {'newRepo': 'x'}))
 
 
+def test_last_health_verdict_parses_and_takes_last() -> None:
+    assert infra_agent._last_health_verdict('all good\nRELEASE_HEALTH: PASS') == 'PASS'
+    assert infra_agent._last_health_verdict('RELEASE_HEALTH: FAIL: no deployment') == 'FAIL'
+    assert infra_agent._last_health_verdict('nothing to see here') is None
+    # narration before the verdict, and the LAST verdict wins
+    multi = 'RELEASE_HEALTH: FAIL: rollout incomplete\n...retried...\nRELEASE_HEALTH: PASS'
+    assert infra_agent._last_health_verdict(multi) == 'PASS'
+
+
+def test_resolve_exit_code_health_check_fails_closed() -> None:
+    # release-health-check: only an explicit PASS survives; FAIL/MISSING force 1 even when the
+    # SDK loop reported success (is_error=False -> sdk_exit_code=0). Closes the false-success.
+    assert infra_agent._resolve_exit_code('release-health-check', 0, 'PASS') == 0
+    assert infra_agent._resolve_exit_code('release-health-check', 0, 'FAIL') == 1
+    assert infra_agent._resolve_exit_code('release-health-check', 0, None) == 1
+    # other actions keep the SDK-derived code untouched
+    assert infra_agent._resolve_exit_code('create-repo', 0, None) == 0
+    assert infra_agent._resolve_exit_code('create-repo', 1, 'PASS') == 1
+
+
+def test_release_health_check_prompt_demands_verdict_and_fails_closed() -> None:
+    prompt = infra_agent.INFRA_SYSTEM_PROMPT
+    assert 'RELEASE_HEALTH: PASS' in prompt
+    assert 'RELEASE_HEALTH: FAIL' in prompt
+    assert 'never a PASS' in prompt  # "not deployed yet" is a FAIL
+
+
 def test_main_rejects_invalid_json_inputs() -> None:
     with pytest.raises(click.BadParameter, match='valid JSON'):
         infra_agent.main.callback(action='create-repo', inputs_opt='{not json', model='m', max_turns=1)
