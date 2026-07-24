@@ -26,16 +26,19 @@ def test_infra_role_in_catalog_references_real_mcps() -> None:
         assert mcp in catalog.mcp_servers, f'infra_agent references unknown MCP {mcp!r}'
 
 
-def test_allowed_tools_grant_write_and_open_pr() -> None:
+def test_allowed_tools_grant_repo_factory_and_open_pr() -> None:
     tools = infra_agent.INFRA_ALLOWED_TOOLS
     assert {'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'} <= set(tools)
-    assert 'mcp__leartech-pr-context__open_pr' in tools  # opens PRs via the structured tool
+    assert 'mcp__leartech-pr-context__open_pr' in tools
+    # deterministic repo ops go through the server-side repo-factory MCP
+    for t in ('create_repo', 'register_source_config', 'scaffold'):
+        assert f'mcp__leartech-repo-factory__{t}' in tools
 
 
-def test_system_prompt_enforces_deterministic_scaffold_and_two_clusters() -> None:
+def test_system_prompt_routes_to_repo_factory_mcp_and_two_clusters() -> None:
     prompt = infra_agent._build_system_prompt()
-    assert 'repo_factory' in prompt  # scaffolding goes through the deterministic tool
-    assert 'never hand-edit' in prompt or 'never hand-edit or grep' in prompt
+    assert 'mcp__leartech-repo-factory__' in prompt  # deterministic ops via the MCP, not Bash
+    assert 'do not patch by hand' in prompt
     assert 'jx-build-cluster-gsm' in prompt and 'jx-build-cluster-akv' in prompt
     assert 'release-health-check' in prompt  # the merged!=healthy verification action
 

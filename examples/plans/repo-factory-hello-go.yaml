@@ -57,10 +57,12 @@ spec:
         service: hello-go
         cluster: az
 
+    # scaffold is SERVER-SIDE via the repo-factory MCP (Git Data API) — no clone, so repo:"".
+    # The MCP renders + overlays + opens the PR; release-check polls health until ready.
     - name: scaffold
       agentType: leartech-agent-infra
       dependsOn: [register-gcp, register-az]
-      repo: mikelear/hello-go
+      repo: ""
       inputs:
         action: scaffold-pr
         template: go

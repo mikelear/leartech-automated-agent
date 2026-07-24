@@ -67,7 +67,11 @@ _TOKEN_TIMEOUT = 15.0
 #     stay in-process under `leartech-agent-local` (LLM diagnosis + workspace git).
 #   * jx3_flow    — aggregate PR-check status (list_pr_checks, wait_for_terminal,
 #     wait_for_first_failure_or_all_pass); replaces the old pipeline_server shim.
-WANTED_MCP_SERVERS: frozenset[str] = frozenset({'pr_context', 'tekton', 'jx3_flow'})
+#   * repo_factory — server-side deterministic repo ops (create_repo,
+#     register_source_config, scaffold) for the infra agent; the credential
+#     (GITHUB_OWNER_ADMIN_PAT) lives in the MCP host, not the agent. Only the
+#     infra_agent role's allowed_tools grants these; other agents just don't call them.
+WANTED_MCP_SERVERS: frozenset[str] = frozenset({'pr_context', 'tekton', 'jx3_flow', 'repo_factory'})
 
 _DISCOVERY_TIMEOUT = 15.0
 
