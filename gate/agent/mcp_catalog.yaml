@@ -82,6 +82,17 @@ mcp_servers:
       cluster-local URL; the source fallback is a dev-only localhost (no
       hardcoded cluster URL).
 
+  leartech-repo-factory:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/repo_factory/sse
+    description: |
+      Server-side deterministic repo-factory ops (infra agent): create_repo
+      (owner PAT, rejects bot tokens, invites the 6 bots), register_source_config
+      (Contents API, idempotent minimal-diff), scaffold (Git Data API, literal
+      rename — no LLM grep). The high-privilege credential (GITHUB_OWNER_ADMIN_PAT)
+      lives in the platform-mcps host, NOT the agent. New features land in the
+      leartech-mcp-servers repo (internal/repofactory).
+
   leartech-agent-local:
     type: sdk
     builder: gate.mcp_servers.agent_local:build_agent_local_server
@@ -231,6 +242,7 @@ roles:
       - leartech-jx3-flow
       - leartech-tekton
       - leartech-pr-context
+      - leartech-repo-factory
     tools:
       - Read
       - Write
