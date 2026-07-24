@@ -15,6 +15,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
+
 from gate.tools import repo_factory
 
 OLD = 'leartech-go-service-template'
@@ -156,6 +158,15 @@ def test_scaffold_working_tree_overlays_and_preserves_git(tmp_path: Path) -> Non
 def test_name_variants_snake_before_kebab() -> None:
     variants = repo_factory.name_variants(OLD, NEW)
     assert variants == [(OLD_SNAKE, NEW_SNAKE), (OLD, NEW)]
+
+
+def test_run_raises_on_subprocess_failure() -> None:
+    with pytest.raises(RuntimeError, match='failed'):
+        repo_factory._run(['false'])
+
+
+def test_is_text_file_false_on_missing(tmp_path: Path) -> None:
+    assert repo_factory._is_text_file(tmp_path / 'does-not-exist') is False
 
 
 def test_resolve_template_language_key_and_slug() -> None:

@@ -8,6 +8,11 @@ the infra_agent role exists in the catalog and references only real MCPs.
 
 from __future__ import annotations
 
+import asyncio
+
+import click
+import pytest
+
 from gate.agent import infra_agent
 from gate.agent.mcp_catalog import load_catalog
 
@@ -39,3 +44,29 @@ def test_task_prompt_embeds_action_and_inputs() -> None:
     out = infra_agent._task_prompt('create-repo', {'newRepo': 'mikelear/hello-go'})
     assert 'create-repo' in out
     assert 'mikelear/hello-go' in out
+
+
+def test_run_infra_task_returns_2_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
+    rc = asyncio.run(infra_agent.run_infra_task('create-repo', {'newRepo': 'x'}))
+    assert rc == 2
+
+
+def test_run_infra_task_reraises_sdk_exception(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'k')
+
+    async def _boom(*_args: object, **_kwargs: object):  # noqa: ANN202 — test stub async generator
+        raise RuntimeError('sdk down')
+        yield  # pragma: no cover — makes this an async generator
+
+    monkeypatch.setattr(infra_agent, 'query', _boom)
+    with pytest.raises(RuntimeError, match='sdk down'):
+        asyncio.run(infra_agent.run_infra_task('create-repo', {'newRepo': 'x'}))
+
+
+def test_main_rejects_invalid_json_inputs() -> None:
+    with pytest.raises(click.BadParameter, match='valid JSON'):
+        infra_agent.main.callback(action='create-repo', inputs='{not json', model='m', max_turns=1)
+
+    with pytest.raises(click.BadParameter, match='JSON object'):
+        infra_agent.main.callback(action='create-repo', inputs='[]', model='m', max_turns=1)

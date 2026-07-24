@@ -76,3 +76,8 @@ def test_missing_repositories_key_raises() -> None:
 def test_cluster_keys_match_overlay_repos() -> None:
     # register targets the same GitOps repos the overlay tool uses (gcp/az)
     assert set(source_config.CLUSTER_OVERLAY_REPOS) == {'gcp', 'az'}
+
+
+def test_register_unknown_cluster_raises() -> None:
+    with pytest.raises(ValueError, match='unknown cluster'):
+        source_config.register_source_config(service='x', cluster='nope', workdir='unused-workdir')

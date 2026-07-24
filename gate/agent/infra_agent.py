@@ -180,7 +180,10 @@ async def run_infra_task(
 @click.option('--max-turns', default=DEFAULT_MAX_TURNS, type=int, show_default=True, help='Max agent turns.')
 def main(action: str, inputs: str, model: str, max_turns: int) -> None:
     """Run the infra agent for one action (the entrypoint an infra AgentType spawns)."""
-    parsed = json.loads(inputs)
+    try:
+        parsed = json.loads(inputs)
+    except json.JSONDecodeError as exc:
+        raise click.BadParameter(f'--inputs must be valid JSON: {exc}') from exc
     if not isinstance(parsed, dict):
         raise click.BadParameter('--inputs must be a JSON object')
     sys.exit(asyncio.run(run_infra_task(action, parsed, model=model, max_turns=max_turns)))
