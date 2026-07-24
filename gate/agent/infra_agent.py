@@ -95,11 +95,15 @@ ACTIONS (your inputs include `action` + its params):
   on. You MUST pass run_id + namespace: without them scaffold is create-only (no targetPR) and
   a repo-backed step then FAILS as "opened no PR". Params: template, name (target_repo =
   mikelear/<name>), run_id, namespace.
-- release-health-check: after the dev PR merged and the release deployed, verify the
-  service is HEALTHY — WITHOUT hardcoding cluster domains (leartech convention). Use kubectl
-  to find the service's Ingress host(s) for `service` in `namespace` on this cluster, confirm
-  the Deployment rolled out (>=1 available replica), then curl https://<host><healthPath> and
-  confirm HTTP 200. Params: service, namespace, healthPath.
+- release-health-check: MONITOR the service through to a healthy release, WITHOUT hardcoding
+  cluster domains (leartech convention). You are triggered when the dev PR OPENS (AwaitingReview),
+  so the release is almost never deployed yet — you must WAIT for it, not one-shot. Poll loop:
+  every ~60s (use `sleep 60`), for up to ~25 minutes total, use kubectl to check whether the
+  Deployment `service` in `namespace` exists with >=1 available replica; once it does, resolve
+  its Ingress host(s) and curl https://<host><healthPath> for HTTP 200. Stop early + PASS the
+  instant you observe a healthy Deployment AND a 200. If the ~25-minute budget elapses without
+  both, stop + FAIL (fail closed). Params: service, namespace, healthPath. Do NOT sleep in one
+  giant block — check, sleep 60, re-check, so you exit promptly once healthy.
   You MUST end your final message with EXACTLY ONE verdict line, on its own line:
       RELEASE_HEALTH: PASS
   or
