@@ -66,7 +66,31 @@ def test_run_infra_task_reraises_sdk_exception(monkeypatch: pytest.MonkeyPatch) 
 
 def test_main_rejects_invalid_json_inputs() -> None:
     with pytest.raises(click.BadParameter, match='valid JSON'):
-        infra_agent.main.callback(action='create-repo', inputs='{not json', model='m', max_turns=1)
+        infra_agent.main.callback(action='create-repo', inputs_opt='{not json', model='m', max_turns=1)
 
     with pytest.raises(click.BadParameter, match='JSON object'):
-        infra_agent.main.callback(action='create-repo', inputs='[]', model='m', max_turns=1)
+        infra_agent.main.callback(action='create-repo', inputs_opt='[]', model='m', max_turns=1)
+
+
+def test_main_reads_action_and_params_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The controller contract: inputs (incl. action) arrive via $LEARTECH_INITIATIVE_YAML."""
+    monkeypatch.setenv('LEARTECH_INITIATIVE_YAML', '{"action": "create-repo", "newRepo": "mikelear/hello-go"}')
+    captured: dict[str, object] = {}
+
+    async def _fake(action: str, params: dict[str, object], **_kw: object) -> int:
+        captured['action'] = action
+        captured['params'] = params
+        return 0
+
+    monkeypatch.setattr(infra_agent, 'run_infra_task', _fake)
+    with pytest.raises(SystemExit) as exc:
+        infra_agent.main.callback(action=None, inputs_opt=None, model='m', max_turns=1)
+    assert exc.value.code == 0
+    assert captured['action'] == 'create-repo'
+    assert captured['params'] == {'newRepo': 'mikelear/hello-go'}  # action key stripped from params
+
+
+def test_main_errors_when_no_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv('LEARTECH_INITIATIVE_YAML', raising=False)
+    with pytest.raises(click.BadParameter, match='no inputs'):
+        infra_agent.main.callback(action=None, inputs_opt=None, model='m', max_turns=1)

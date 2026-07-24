@@ -173,20 +173,37 @@ async def run_infra_task(
     return exit_code
 
 
+# The controller inlines the Plan step's `inputs` JSON into this env var (jobspawn.go);
+# an entrypoint-override AgentType gets NO CLI args, so inputs arrive here, not via flags.
+INPUTS_ENV = 'LEARTECH_INITIATIVE_YAML'
+
+
 @click.command()
-@click.option('--action', required=True, help='Infra action (create-repo, register-source-config, ...).')
-@click.option('--inputs', default='{}', help='JSON object of params for the action.')
+@click.option('--action', default=None, help='Infra action; defaults to inputs["action"].')
+@click.option('--inputs', 'inputs_opt', default=None, help=f'JSON inputs; defaults to ${INPUTS_ENV}.')
 @click.option('--model', default=DEFAULT_MODEL, show_default=True, help='Claude model.')
 @click.option('--max-turns', default=DEFAULT_MAX_TURNS, type=int, show_default=True, help='Max agent turns.')
-def main(action: str, inputs: str, model: str, max_turns: int) -> None:
-    """Run the infra agent for one action (the entrypoint an infra AgentType spawns)."""
+def main(action: str | None, inputs_opt: str | None, model: str, max_turns: int) -> None:
+    """Run the infra agent for one action (the entrypoint an infra AgentType spawns).
+
+    Inputs default to ``$LEARTECH_INITIATIVE_YAML`` (the controller's contract — the Plan
+    step's inputs JSON, which carries ``action`` + params); ``--inputs``/``--action``
+    override for local use.
+    """
+    raw = inputs_opt if inputs_opt is not None else os.environ.get(INPUTS_ENV, '')
+    if not raw.strip():
+        raise click.BadParameter(f'no inputs: set ${INPUTS_ENV} or --inputs')
     try:
-        parsed = json.loads(inputs)
+        parsed = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise click.BadParameter(f'--inputs must be valid JSON: {exc}') from exc
+        raise click.BadParameter(f'inputs must be valid JSON: {exc}') from exc
     if not isinstance(parsed, dict):
-        raise click.BadParameter('--inputs must be a JSON object')
-    sys.exit(asyncio.run(run_infra_task(action, parsed, model=model, max_turns=max_turns)))
+        raise click.BadParameter('inputs must be a JSON object')
+    act = action or parsed.get('action')
+    if not isinstance(act, str) or not act:
+        raise click.BadParameter('no action: set --action or inputs["action"]')
+    params = {k: v for k, v in parsed.items() if k != 'action'}
+    sys.exit(asyncio.run(run_infra_task(act, params, model=model, max_turns=max_turns)))
 
 
 if __name__ == '__main__':
