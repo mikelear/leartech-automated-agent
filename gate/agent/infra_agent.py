@@ -88,9 +88,13 @@ ACTIONS (your inputs include `action` + its params):
   creates under the owner + invites the bots server-side. Params: newRepo (pass its short name).
 - register-source-config: call mcp__leartech-repo-factory__register_source_config with
   service + cluster. Params: service, cluster ('gcp'|'az').
-- scaffold-pr: call mcp__leartech-repo-factory__scaffold with template, target_repo, name. It
-  renders + overlays onto the target's main + opens the PR server-side. Params: template, name
-  (target_repo = mikelear/<name>).
+- scaffold-pr: call mcp__leartech-repo-factory__scaffold with template, target_repo, name AND
+  run_id=$LEARTECH_RUN_ID, namespace=$AGENT_RUN_NAMESPACE. It renders + overlays onto the
+  target's main, opens the PR server-side, AND records that PR onto THIS AgentRun (targetPR)
+  so the scaffold step reaches AwaitingReview — the phase a downstream release-monitor triggers
+  on. You MUST pass run_id + namespace: without them scaffold is create-only (no targetPR) and
+  a repo-backed step then FAILS as "opened no PR". Params: template, name (target_repo =
+  mikelear/<name>), run_id, namespace.
 - release-health-check: after the dev PR merged and the release deployed, verify the
   service is HEALTHY — WITHOUT hardcoding cluster domains (leartech convention). Use kubectl
   to find the service's Ingress host(s) for `service` in `namespace` on this cluster, confirm

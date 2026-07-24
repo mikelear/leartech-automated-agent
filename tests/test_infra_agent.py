@@ -41,6 +41,9 @@ def test_system_prompt_routes_to_repo_factory_mcp_and_two_clusters() -> None:
     assert 'do not patch by hand' in prompt
     assert 'jx-build-cluster-gsm' in prompt and 'jx-build-cluster-akv' in prompt
     assert 'release-health-check' in prompt  # the merged!=healthy verification action
+    # scaffold MUST pass run_id/namespace so it publishes targetPR -> step reaches
+    # AwaitingReview (else a repo-backed scaffold step fails as "opened no PR").
+    assert 'run_id=$LEARTECH_RUN_ID' in prompt and 'namespace=$AGENT_RUN_NAMESPACE' in prompt
 
 
 def test_task_prompt_embeds_action_and_inputs() -> None:
