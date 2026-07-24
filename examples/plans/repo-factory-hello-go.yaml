@@ -73,6 +73,7 @@ spec:
       inputs:
         action: release-health-check
         service: hello-go
-        urls:
-          - https://hello-go-jx-staging.jx.leartech.com/health
-          - https://hello-go-jx-staging.az.leartech.com/health
+        namespace: jx-staging
+        healthPath: /health
+        # No cluster hostnames here — the infra agent discovers the service's Ingress
+        # host via kubectl on this cluster (leartech no-hardcoded-cluster-URL convention).

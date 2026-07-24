@@ -91,9 +91,11 @@ ACTIONS (your inputs include `action` + its params):
   with the `open_pr` MCP tool (do NOT commit/push by hand) — that publishes targetPR so the
   step gates on merge and the preview exercises every Tekton step. Params: template, name.
 - release-health-check: after the dev PR merged and the release deployed, verify the
-  service is HEALTHY. curl each URL in `urls` and confirm HTTP 200; confirm the deployment
-  rolled out. Params: urls (list), service. Succeed only if ALL checks pass — a merged PR
-  does NOT mean a healthy release.
+  service is HEALTHY — WITHOUT hardcoding cluster domains (leartech convention). Use kubectl
+  to find the service's Ingress host(s) for `service` in `namespace` on this cluster, confirm
+  the Deployment rolled out, then curl https://<host><healthPath> and confirm HTTP 200.
+  Params: service, namespace, healthPath. Succeed only if ALL checks pass — a merged PR does
+  NOT mean a healthy release.
 
 Report concisely what you did, which PRs you opened (numbers), and the pass/fail outcome.
 """
