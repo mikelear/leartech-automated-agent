@@ -59,6 +59,19 @@ from gate.tools.playwright_artifacts import (
 from gate.tools.playwright_specs import SpecCoverage, inventory_specs, parse_spec
 from gate.tools.pr_context import PRContext, fetch_pr_commit_messages, load_pr_context
 from gate.tools.pr_diff import added_files, added_lines, fetch_pr_diff
+from gate.tools.repo_factory import (
+    KNOWN_TEMPLATES,
+    RenameReport,
+    create_repo,
+    name_variants,
+    open_scaffold_pr,
+    push_main,
+    rename_tree,
+    render_template,
+    resolve_template,
+    scaffold,
+    scaffold_working_tree,
+)
 from gate.tools.security_claim import (
     SecurityClaim,
     evidence_for_claim,
@@ -66,6 +79,13 @@ from gate.tools.security_claim import (
     has_in_diff_evidence,
     manifest_exists_at_ref,
     parse_security_claims,
+)
+from gate.tools.source_config import (
+    SOURCE_CONFIG_PATH,
+    add_repo_to_source_config,
+    is_registered,
+    register_source_config,
+    source_config_entry,
 )
 from gate.tools.spec_suggester import (
     SpecSuggestion,
@@ -156,6 +176,22 @@ __all__ = [
     'SpecSuggestion',
     'suggest_spec',
     'is_anthropic_key_present',
+    'KNOWN_TEMPLATES',
+    'RenameReport',
+    'create_repo',
+    'name_variants',
+    'open_scaffold_pr',
+    'push_main',
+    'render_template',
+    'rename_tree',
+    'resolve_template',
+    'scaffold',
+    'scaffold_working_tree',
+    'SOURCE_CONFIG_PATH',
+    'add_repo_to_source_config',
+    'is_registered',
+    'register_source_config',
+    'source_config_entry',
     'SecurityClaim',
     'evidence_for_claim',
     'find_manifest_refs',
