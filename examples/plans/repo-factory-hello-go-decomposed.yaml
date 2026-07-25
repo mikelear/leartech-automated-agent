@@ -1,35 +1,27 @@
-# repo-factory-hello-go-decomposed — the DECOMPOSED Dev+Infra shape (Mike 2026-07-24).
+# repo-factory-hello-go-decomposed — the DECOMPOSED Infra+Dev bootstrap (Mike 2026-07-24/25).
 #
-# Supersedes repo-factory-hello-go's single linear infra run. Separates the two concerns the
-# platform actually has, with a STATE-TRIGGERED handoff between them (occ-src TriggeredWhen):
+# Bootstraps a NEW service repo end-to-end, then shepherds its first release — the automation
+# of the manual repo-creation + release watch. The flow is ordered so the new repo is fully
+# wired BEFORE anything expects gating (fixing the first-PR chicken-and-egg where a scaffold
+# PR's own .lighthouse/ triggers aren't on main yet):
 #
-#   Infra (bootstrap):   create the repo + register it in each cluster's source-config.
-#   Dev   (deliverable): scaffold the hello-world + open its PR  -> reaches AwaitingReview.
-#   Infra (release-mon): the MOMENT the Dev PR opens (AwaitingReview), a release-monitor step
-#                        is TRIGGERED to watch it through review -> merge -> release -> deploy
-#                        and fail the Plan unless /health=200 (release-health-check fail-closed,
-#                        aa-src). It does NOT wait for the Dev step to Succeed (that's merge) —
-#                        it shadows it from PR-open, so a stuck/red release surfaces immediately.
+#   create           create the repo (README on main)
+#   register-gcp/az  add it to each cluster's source-config — MERGE-GATED: the step publishes
+#                    its PR onto the AgentRun + auto-approves, so it stays AwaitingReview until
+#                    Tide merges + reconciles (repo now known to Lighthouse/webhooks), THEN
+#                    Succeeds. repo = the GitOps repo so the controller polls that PR to merge.
+#   scaffold         push the template (code + .lighthouse/) STRAIGHT TO main (to_main=true) —
+#                    lands triggers on main AND fires the release off the main push. repo:"" so
+#                    it Succeeds on push (no PR).
+#   release-monitor  the JX3 release check (release_status -> promote_status both clusters ->
+#                    retest flakes / escalate gate-fails -> all_merged -> /health). dependsOn
+#                    scaffold: the release fires at scaffold Succeeded. Fail-closed.
+#   smoke            a trivial PR that now GATES (main has triggers) — proves the repo's PR
+#                    pipelines fire. repo = the new repo so it reaches AwaitingReview.
 #
-# WHY TriggeredWhen instead of dependsOn: dependsOn gates on the target reaching Succeeded
-# (== PR merged). The release-monitor must start EARLIER — at AwaitingReview (PR opened) — so
-# it can watch the whole merge->release arc. `triggeredWhen: {step, phase}` fires on the named
-# phase or any later success phase (reached-or-beyond); if scaffold Fails/Cancels the monitor
-# never fires and the Plan rolls up Failed via scaffold. See occ-src PlanStep.TriggeredWhen.
-#
-# ENABLING DEP (must be deployed for scaffold to reach AwaitingReview): the repo-factory
-# `scaffold` MCP tool must publish targetPR onto the AgentRun (mirror `open_pr`: accept
-# run_id+namespace, patch AgentRun.status.targetPR after opening the PR). Until that ships,
-# scaffold collapses to Succeeded (repo:"" path) and the monitor effectively fires on merge.
-# With it shipped + scaffold.repo set, scaffold -> AwaitingReview and the early handoff works.
-#
-# stepPhase flow (target state):
-#   create         -> Succeeded (no PR; repo:"" bootstrap)
-#   register-gcp   -> AwaitingReview -> Succeeded  (source-config PR, jx-build-cluster-gsm)
-#   register-az    -> AwaitingReview -> Succeeded  (source-config PR, jx-build-cluster-akv)
-#   scaffold       -> AwaitingReview (PR open, targetPR published) -> Succeeded (merged)
-#   release-monitor-> (spawns at scaffold=AwaitingReview) -> Succeeded on /health=200 both
-#                     clusters, else Failed (fail-closed verdict feeds real deploy state back)
+# TriggeredWhen (occ-src) still applies to ongoing dev Plans (a real Dev PR -> AwaitingReview
+# -> release-monitor watches merge->release); the bootstrap uses dependsOn because
+# scaffold-to-main fires the release at Succeeded.
 apiVersion: agent.leartech.io/v1alpha1
 kind: Plan
 metadata:
@@ -39,7 +31,6 @@ spec:
   tenant: leartech
   triggeredBy: agent
   steps:
-    # ── Infra: bootstrap ────────────────────────────────────────────────────────
     - name: create
       agentType: leartech-agent-infra
       repo: ""
@@ -47,10 +38,11 @@ spec:
         action: create-repo
         newRepo: mikelear/hello-go
 
+    # Merge-gated: repo = the GitOps repo so the controller polls the register PR to merge.
     - name: register-gcp
       agentType: leartech-agent-infra
       dependsOn: [create]
-      repo: ""
+      repo: mikelear/jx-build-cluster-gsm
       inputs:
         action: register-source-config
         service: hello-go
@@ -59,36 +51,41 @@ spec:
     - name: register-az
       agentType: leartech-agent-infra
       dependsOn: [create]
-      repo: ""
+      repo: mikelear/jx-build-cluster-akv
       inputs:
         action: register-source-config
         service: hello-go
         cluster: az
 
-    # ── Dev: the hello-world deliverable (its PR is the review/preview surface) ───
-    # repo is set so the phase machine polls the PR (repo:"" would collapse to Succeeded);
-    # scaffold publishes targetPR, so this reaches AwaitingReview when the PR opens.
+    # Bootstrap to main (no PR): lands .lighthouse/ on main + fires the release. Waits for both
+    # registers to MERGE first (merge-gated) so the repo is known to Lighthouse when it pushes.
     - name: scaffold
       agentType: leartech-agent-infra
       dependsOn: [register-gcp, register-az]
-      repo: mikelear/hello-go
+      repo: ""
       inputs:
         action: scaffold-pr
         template: go
         name: hello-go
 
-    # ── Infra: release-monitor — TRIGGERED at Dev PR-open, not at merge ──────────
+    # The JX3 release check — shepherds the release fired by scaffold-to-main through promote +
+    # boot on both clusters, fail-closed. repo:"" (no PR of its own).
     - name: release-monitor
       agentType: leartech-agent-infra
-      triggeredWhen:
-        step: scaffold
-        phase: AwaitingReview
+      dependsOn: [scaffold]
       repo: ""
       inputs:
         action: release-health-check
         service: hello-go
         namespace: jx-staging
         healthPath: /health
-        # No cluster hostnames — the infra agent discovers the Ingress host via kubectl
-        # (leartech no-hardcoded-cluster-URL convention). Fail-closed: PASS only on an
-        # observed >=1-available-replica Deployment AND HTTP 200.
+
+    # Smoke: a trivial PR that now gates (main carries triggers) — proves PR CI works.
+    # repo = the new repo so its PR is polled -> AwaitingReview.
+    - name: smoke
+      agentType: leartech-agent-infra
+      dependsOn: [scaffold]
+      repo: mikelear/hello-go
+      inputs:
+        action: smoke-pr
+        name: hello-go

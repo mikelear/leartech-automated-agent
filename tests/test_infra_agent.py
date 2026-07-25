@@ -31,7 +31,7 @@ def test_allowed_tools_grant_repo_factory_and_open_pr() -> None:
     assert {'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'} <= set(tools)
     assert 'mcp__leartech-pr-context__open_pr' in tools
     # deterministic repo ops go through the server-side repo-factory MCP
-    for t in ('create_repo', 'register_source_config', 'scaffold'):
+    for t in ('create_repo', 'register_source_config', 'scaffold', 'smoke_pr'):
         assert f'mcp__leartech-repo-factory__{t}' in tools
     # the JX3 release check goes through the jx-release MCP
     for t in ('release_status', 'promote_status', 'retest_promote'):
