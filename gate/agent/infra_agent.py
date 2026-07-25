@@ -53,6 +53,7 @@ REPO_FACTORY_TOOLS = [
     'mcp__leartech-repo-factory__create_repo',
     'mcp__leartech-repo-factory__register_source_config',
     'mcp__leartech-repo-factory__scaffold',
+    'mcp__leartech-repo-factory__smoke_pr',
 ]
 
 # jx_release MCP — the JX3 release-check primitives (GitHub-API-first, both clusters). The
@@ -83,8 +84,10 @@ GROUND RULES
     * mcp__leartech-repo-factory__register_source_config — idempotent source-config PR on a
       cluster (skips if already registered). cluster is 'gcp' or 'az'.
     * mcp__leartech-repo-factory__scaffold — renders a template into the target repo (literal
-      rename, no grep) via the Git Data API and opens the scaffold PR (its preview exercises
-      the Tekton steps).
+      rename, no grep) via the Git Data API. to_main=true pushes it straight to main (bootstrap
+      a new repo: triggers land on main + the release fires); else it opens a scaffold PR.
+    * mcp__leartech-repo-factory__smoke_pr — opens a trivial gated PR to verify the bootstrapped
+      repo's PR pipelines fire (main now has .lighthouse/ triggers).
   The high-privilege owner credential lives in the MCP host, NOT here. If a tool errors or a
   rename looks wrong, report it as a TOOL bug — do not patch by hand.
 - The JX3 release check is DETERMINISTIC too — go through the jx-release MCP, never hand-scrape
@@ -103,14 +106,22 @@ ACTIONS (your inputs include `action` + its params):
 - create-repo: call mcp__leartech-repo-factory__create_repo with name=<short repo name>. It
   creates under the owner + invites the bots server-side. Params: newRepo (pass its short name).
 - register-source-config: call mcp__leartech-repo-factory__register_source_config with
-  service + cluster. Params: service, cluster ('gcp'|'az').
-- scaffold-pr: call mcp__leartech-repo-factory__scaffold with template, target_repo, name AND
-  run_id=$LEARTECH_RUN_ID, namespace=$AGENT_RUN_NAMESPACE. It renders + overlays onto the
-  target's main, opens the PR server-side, AND records that PR onto THIS AgentRun (targetPR)
-  so the scaffold step reaches AwaitingReview — the phase a downstream release-monitor triggers
-  on. You MUST pass run_id + namespace: without them scaffold is create-only (no targetPR) and
-  a repo-backed step then FAILS as "opened no PR". Params: template, name (target_repo =
-  mikelear/<name>), run_id, namespace.
+  service + cluster AND run_id=$LEARTECH_RUN_ID, namespace=$AGENT_RUN_NAMESPACE. It edits the
+  cluster's source-config, opens the PR, AUTO-APPROVES it (owner /approve so Tide merges), and
+  records the PR onto THIS AgentRun so the register step is MERGE-GATED (AwaitingReview until
+  merged, then Succeeds) — so a downstream scaffold waits until the repo is really registered
+  (Lighthouse/webhook live). Idempotent (no PR if already registered → Succeeds immediately).
+  Params: service, cluster ('gcp'|'az'), run_id, namespace.
+- scaffold-pr: BOOTSTRAP a brand-new repo — call mcp__leartech-repo-factory__scaffold with
+  template, target_repo, name, to_main=true. It renders the template and pushes it (incl.
+  .lighthouse/ triggers) STRAIGHT TO main (no PR), which both lets later PRs gate AND fires the
+  release off the main push. Do NOT pass run_id here (no PR to record); the step is repo:"" and
+  Succeeds on push. Params: template, name (target_repo = mikelear/<name>), to_main=true.
+- smoke-pr: after scaffold-pr, call mcp__leartech-repo-factory__smoke_pr with target_repo,
+  marker=$LEARTECH_RUN_ID, run_id=$LEARTECH_RUN_ID, namespace=$AGENT_RUN_NAMESPACE. It opens a
+  trivial PR that now gates (main has .lighthouse/) to PROVE the repo's PR pipelines fire, and
+  records it onto the AgentRun (step -> AwaitingReview). Params: target_repo = mikelear/<name>,
+  run_id, namespace.
 - release-health-check: shepherd the service THROUGH the JX3 release pipeline to a landed,
   healthy release — the automation of the manual release watch. You are triggered when the dev
   PR OPENS (AwaitingReview), so nothing has released yet; you WAIT and drive it, using the
