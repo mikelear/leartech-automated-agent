@@ -33,6 +33,9 @@ def test_allowed_tools_grant_repo_factory_and_open_pr() -> None:
     # deterministic repo ops go through the server-side repo-factory MCP
     for t in ('create_repo', 'register_source_config', 'scaffold'):
         assert f'mcp__leartech-repo-factory__{t}' in tools
+    # the JX3 release check goes through the jx-release MCP
+    for t in ('release_status', 'promote_status', 'retest_promote'):
+        assert f'mcp__leartech-jx-release__{t}' in tools
 
 
 def test_system_prompt_routes_to_repo_factory_mcp_and_two_clusters() -> None:
@@ -41,6 +44,9 @@ def test_system_prompt_routes_to_repo_factory_mcp_and_two_clusters() -> None:
     assert 'do not patch by hand' in prompt
     assert 'jx-build-cluster-gsm' in prompt and 'jx-build-cluster-akv' in prompt
     assert 'release-health-check' in prompt  # the merged!=healthy verification action
+    # the release check composes the jx-release MCP (promote across clusters) + escalates gate-fails
+    assert 'mcp__leartech-jx-release__promote_status' in prompt
+    assert 'needs-cross-plan-Infra-agent' in prompt
     # scaffold MUST pass run_id/namespace so it publishes targetPR -> step reaches
     # AwaitingReview (else a repo-backed scaffold step fails as "opened no PR").
     assert 'run_id=$LEARTECH_RUN_ID' in prompt and 'namespace=$AGENT_RUN_NAMESPACE' in prompt

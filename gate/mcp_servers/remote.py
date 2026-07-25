@@ -71,7 +71,9 @@ _TOKEN_TIMEOUT = 15.0
 #     register_source_config, scaffold) for the infra agent; the credential
 #     (GITHUB_OWNER_ADMIN_PAT) lives in the MCP host, not the agent. Only the
 #     infra_agent role's allowed_tools grants these; other agents just don't call them.
-WANTED_MCP_SERVERS: frozenset[str] = frozenset({'pr_context', 'tekton', 'jx3_flow', 'repo_factory'})
+#   * jx_release — JX3 release-check primitives (release_status, promote_status,
+#     retest_promote) the infra agent composes into the release-health-check action.
+WANTED_MCP_SERVERS: frozenset[str] = frozenset({'pr_context', 'tekton', 'jx3_flow', 'repo_factory', 'jx_release'})
 
 _DISCOVERY_TIMEOUT = 15.0
 

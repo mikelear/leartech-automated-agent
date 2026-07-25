@@ -55,10 +55,20 @@ REPO_FACTORY_TOOLS = [
     'mcp__leartech-repo-factory__scaffold',
 ]
 
+# jx_release MCP — the JX3 release-check primitives (GitHub-API-first, both clusters). The
+# release-health-check action composes these to shepherd a release through jx-promote.
+JX_RELEASE_TOOLS = [
+    'mcp__leartech-jx-release__release_status',
+    'mcp__leartech-jx-release__promote_status',
+    'mcp__leartech-jx-release__retest_promote',
+]
+
 # Write-mode built-ins + the shared MCP surface + step-aware Tekton tools + the repo-factory
-# MCP. Deterministic repo ops go through repo-factory (server-side); Bash is for release
-# health checks (kubectl/curl) only.
-INFRA_ALLOWED_TOOLS = [*WRITE_MODE_TOOLS, *MCP_ALLOWED_TOOLS, *INITIATIVE_TEKTON_TOOLS, *REPO_FACTORY_TOOLS]
+# and jx-release MCPs. Deterministic repo ops go through repo-factory (server-side); the
+# release check goes through jx-release; Bash is for the optional /health tail (kubectl/curl).
+INFRA_ALLOWED_TOOLS = [
+    *WRITE_MODE_TOOLS, *MCP_ALLOWED_TOOLS, *INITIATIVE_TEKTON_TOOLS, *REPO_FACTORY_TOOLS, *JX_RELEASE_TOOLS,
+]
 
 INFRA_SYSTEM_PROMPT = """\
 You are the leartech INFRA AGENT. You own repo/cluster wiring and release verification —
@@ -77,6 +87,12 @@ GROUND RULES
       the Tekton steps).
   The high-privilege owner credential lives in the MCP host, NOT here. If a tool errors or a
   rename looks wrong, report it as a TOOL bug — do not patch by hand.
+- The JX3 release check is DETERMINISTIC too — go through the jx-release MCP, never hand-scrape
+  Tekton or GitHub:
+    * mcp__leartech-jx-release__release_status — did the release fire on the repo?
+    * mcp__leartech-jx-release__promote_status — promote PRs across both clusters + verify/gate
+      state (all_green / gate_failed / merged / all_merged).
+    * mcp__leartech-jx-release__retest_promote — chatops /retest to clear ONE flake.
 - The platform runs on TWO clusters (GCP gitops `jx-build-cluster-gsm`, Azure
   `jx-build-cluster-akv`). Registration is ONE PR PER CLUSTER — do the cluster in your inputs;
   a Plan runs one register step per cluster.
@@ -95,15 +111,27 @@ ACTIONS (your inputs include `action` + its params):
   on. You MUST pass run_id + namespace: without them scaffold is create-only (no targetPR) and
   a repo-backed step then FAILS as "opened no PR". Params: template, name (target_repo =
   mikelear/<name>), run_id, namespace.
-- release-health-check: MONITOR the service through to a healthy release, WITHOUT hardcoding
-  cluster domains (leartech convention). You are triggered when the dev PR OPENS (AwaitingReview),
-  so the release is almost never deployed yet — you must WAIT for it, not one-shot. Poll loop:
-  every ~60s (use `sleep 60`), for up to ~25 minutes total, use kubectl to check whether the
-  Deployment `service` in `namespace` exists with >=1 available replica; once it does, resolve
-  its Ingress host(s) and curl https://<host><healthPath> for HTTP 200. Stop early + PASS the
-  instant you observe a healthy Deployment AND a 200. If the ~25-minute budget elapses without
-  both, stop + FAIL (fail closed). Params: service, namespace, healthPath. Do NOT sleep in one
-  giant block — check, sleep 60, re-check, so you exit promptly once healthy.
+- release-health-check: shepherd the service THROUGH the JX3 release pipeline to a landed,
+  healthy release — the automation of the manual release watch. You are triggered when the dev
+  PR OPENS (AwaitingReview), so nothing has released yet; you WAIT and drive it, using the
+  jx-release MCP (do NOT hand-scrape Tekton). Bounded ~25 min total; poll ~60s between checks
+  (`sleep 60`) — never one giant sleep. Stages (stop + FAIL closed if the budget elapses at any
+  stage):
+    1. RELEASE FIRED — poll mcp__leartech-jx-release__release_status(repo=mikelear/<service>)
+       until released=true (the dev PR merged and the release Tekton produced a release).
+    2. PROMOTE PRs — poll mcp__leartech-jx-release__promote_status(service) (both clusters):
+       * found=false on a cluster → keep polling (jx-promote hasn't opened it yet).
+       * a cluster check is non-green but NOT gate_failed (a flake) → call
+         mcp__leartech-jx-release__retest_promote(cluster, pr_number) ONCE for that PR, then
+         keep polling. Do NOT retest-loop.
+       * any_gate_failed=true → STOP. This is a real qa-gate failure that may need other plans:
+         FAIL with reason "needs-cross-plan-Infra-agent: <cluster> qa-gate failed on promote PR
+         #<n>". Do NOT try to fix it yourself.
+    3. MERGED — keep polling until all_merged=true (Tide auto-merges the promote PRs on green).
+    4. HEALTH (optional tail) — once merged, best-effort confirm the Deployment `service` in
+       `namespace` is rolling out; if you can quickly curl https://<host><healthPath> for 200
+       via kubectl-discovered Ingress, note it. Do not fail solely on this tail if all_merged.
+  PASS only when all_merged=true (stage 3). Params: service, namespace, healthPath.
   You MUST end your final message with EXACTLY ONE verdict line, on its own line:
       RELEASE_HEALTH: PASS
   or
