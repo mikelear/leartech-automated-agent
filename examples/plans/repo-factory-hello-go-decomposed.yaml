@@ -1,27 +1,22 @@
-# repo-factory-hello-go-decomposed — the DECOMPOSED Infra+Dev bootstrap (Mike 2026-07-24/25).
+# repo-factory-hello-go-decomposed — FULL Infra+Dev bootstrap + release watch (2026-07-27).
 #
-# Bootstraps a NEW service repo end-to-end, then shepherds its first release — the automation
-# of the manual repo-creation + release watch. The flow is ordered so the new repo is fully
-# wired BEFORE anything expects gating (fixing the first-PR chicken-and-egg where a scaffold
-# PR's own .lighthouse/ triggers aren't on main yet):
+# Clean role split (Mike): INFRA creates the repo + wires plumbing + opens the smoke PR +
+# watches the release; the DEV agent OWNS the smoke PR (adopts it, reacts to any gate failure,
+# merges) — its job, no hardcoded failure list.
 #
 #   create           create the repo (README on main)
-#   register-gcp/az  add it to each cluster's source-config — MERGE-GATED: the step publishes
-#                    its PR onto the AgentRun + auto-approves, so it stays AwaitingReview until
-#                    Tide merges + reconciles (repo now known to Lighthouse/webhooks), THEN
-#                    Succeeds. repo = the GitOps repo so the controller polls that PR to merge.
-#   scaffold         push the template (code + .lighthouse/) STRAIGHT TO main (to_main=true) —
-#                    lands triggers on main AND fires the release off the main push. repo:"" so
-#                    it Succeeds on push (no PR).
-#   release-monitor  the JX3 release check (release_status -> promote_status both clusters ->
-#                    retest flakes / escalate gate-fails -> all_merged -> /health). dependsOn
-#                    scaffold: the release fires at scaffold Succeeded. Fail-closed.
-#   smoke            a trivial PR that now GATES (main has triggers) — proves the repo's PR
-#                    pipelines fire. repo = the new repo so it reaches AwaitingReview.
-#
-# TriggeredWhen (occ-src) still applies to ongoing dev Plans (a real Dev PR -> AwaitingReview
-# -> release-monitor watches merge->release); the bootstrap uses dependsOn because
-# scaffold-to-main fires the release at Succeeded.
+#   register-gcp/az  MERGE-GATED source-config (auto-approved; AwaitingReview until Tide merges
+#                    + reconciles → repo known to Lighthouse) — so scaffold waits until it's real.
+#   scaffold         push template (code + .lighthouse/) STRAIGHT TO main (to_main) — triggers on
+#                    main + fires the bootstrap release. repo:"" (no PR).
+#   smoke            Infra OPENS the smoke PR on branch smoke-hello-go (deterministic plumbing,
+#                    fire-and-forget: NO run_id → no targetPR, repo:"" → Succeeds on open).
+#   smoke-dev        DEV agent (leartech-agent-go) ADOPTS branch smoke-hello-go (idempotent
+#                    open_pr records targetPR → AwaitingReview) and DRIVES it: watch gates, react
+#                    to failures (retest flakes / fix real), MERGE. repo = the new repo.
+#   release-monitor  Infra JX3 release check — triggeredWhen smoke-dev=AwaitingReview → watches
+#                    that PR through merge → release → promote (both clusters) → boot → deploy,
+#                    fail-closed. budgetMinutes:60 (a cold multi-cluster deploy runs 40-50 min).
 apiVersion: agent.leartech.io/v1alpha1
 kind: Plan
 metadata:
@@ -38,7 +33,6 @@ spec:
         action: create-repo
         newRepo: mikelear/hello-go
 
-    # Merge-gated: repo = the GitOps repo so the controller polls the register PR to merge.
     - name: register-gcp
       agentType: leartech-agent-infra
       dependsOn: [create]
@@ -57,8 +51,6 @@ spec:
         service: hello-go
         cluster: az
 
-    # Bootstrap to main (no PR): lands .lighthouse/ on main + fires the release. Waits for both
-    # registers to MERGE first (merge-gated) so the repo is known to Lighthouse when it pushes.
     - name: scaffold
       agentType: leartech-agent-infra
       dependsOn: [register-gcp, register-az]
@@ -68,24 +60,42 @@ spec:
         template: go
         name: hello-go
 
-    # The JX3 release check — shepherds the release fired by scaffold-to-main through promote +
-    # boot on both clusters, fail-closed. repo:"" (no PR of its own).
-    - name: release-monitor
+    # Infra opens the smoke PR — deterministic plumbing, fire-and-forget (no run_id/targetPR).
+    - name: smoke
       agentType: leartech-agent-infra
       dependsOn: [scaffold]
+      repo: ""
+      inputs:
+        action: smoke-pr
+        name: hello-go
+
+    # Dev agent OWNS the smoke PR: adopt branch smoke-hello-go, drive to green, merge.
+    - name: smoke-dev
+      agentType: leartech-agent-go
+      dependsOn: [smoke]
+      repo: mikelear/hello-go
+      inputs:
+        name: hello-go-smoke
+        repo: hello-go
+        branch: smoke-hello-go
+        goal: |
+          A smoke PR is already OPEN on branch `smoke-hello-go` of this repo (opened by the Infra
+          step). ADOPT it — the harness has checked the branch out; CALL the `open_pr` MCP tool
+          (it is IDEMPOTENT: adopts the existing PR and records it onto this run). Then OWN the PR
+          like any other: watch the Tekton gates, REACT to whatever fails (retest a flake, fix a
+          real issue — new gate, vuln, lint), and take it GREEN through to MERGE. This proves the
+          freshly-bootstrapped repo's PR pipelines work end-to-end. Do not re-do the pushed commit.
+
+    # Infra JX3 release check — watches the smoke PR through to a deployed release, fail-closed.
+    - name: release-monitor
+      agentType: leartech-agent-infra
+      triggeredWhen:
+        step: smoke-dev
+        phase: AwaitingReview
       repo: ""
       inputs:
         action: release-health-check
         service: hello-go
         namespace: jx-staging
         healthPath: /health
-
-    # Smoke: a trivial PR that now gates (main carries triggers) — proves PR CI works.
-    # repo = the new repo so its PR is polled -> AwaitingReview.
-    - name: smoke
-      agentType: leartech-agent-infra
-      dependsOn: [scaffold]
-      repo: mikelear/hello-go
-      inputs:
-        action: smoke-pr
-        name: hello-go
+        budgetMinutes: 60

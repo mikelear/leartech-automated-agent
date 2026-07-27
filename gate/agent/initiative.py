@@ -624,17 +624,19 @@ def _build_resume_preamble(*, branch: str, base: str, pr_number: int | None) -> 
     pr_line: str
     if pr_number is not None:
         pr_line = (
-            f'An open PR already exists on this branch: **#{pr_number}**. '
-            f'DO NOT open a duplicate PR — reuse this one for any '
-            f'commits + comments. `gh pr create` would fail anyway '
-            f'(GitHub rejects a second open PR on the same branch).'
+            f'An open PR already exists on this branch: **#{pr_number}** '
+            f'(it may have been opened by a prior pod OR by an Infra step). '
+            f'CALL the `open_pr` MCP tool anyway — it is IDEMPOTENT: it ADOPTS '
+            f'the existing PR (no duplicate) AND records {{targetPR, headBranch}} '
+            f'onto THIS run so the step advances to AwaitingReview. Then reuse '
+            f'that PR for commits + comments. Never run `gh pr create`.'
         )
     else:
         pr_line = (
-            'No open PR is on this branch yet — a prior attempt pushed '
-            'the branch but never got as far as `gh pr create`. You '
-            'MAY open the PR yourself when the work is ready; do NOT '
-            'first re-do the pushed commits.'
+            'No open PR is on this branch yet — a prior attempt pushed the '
+            'branch but never opened one. When the work is ready CALL the '
+            '`open_pr` MCP tool (it creates + records the PR); do NOT first '
+            're-do the pushed commits, and never run `gh pr create`.'
         )
     return (
         '⚠ **RESUME MODE — this is a retry pod for an initiative whose '

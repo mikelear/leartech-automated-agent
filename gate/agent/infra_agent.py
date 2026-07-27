@@ -117,17 +117,20 @@ ACTIONS (your inputs include `action` + its params):
   .lighthouse/ triggers) STRAIGHT TO main (no PR), which both lets later PRs gate AND fires the
   release off the main push. Do NOT pass run_id here (no PR to record); the step is repo:"" and
   Succeeds on push. Params: template, name (target_repo = mikelear/<name>), to_main=true.
-- smoke-pr: after scaffold-pr, call mcp__leartech-repo-factory__smoke_pr with target_repo,
-  marker=$LEARTECH_RUN_ID, run_id=$LEARTECH_RUN_ID, namespace=$AGENT_RUN_NAMESPACE. It opens a
-  trivial PR that now gates (main has .lighthouse/) to PROVE the repo's PR pipelines fire, and
-  records it onto the AgentRun (step -> AwaitingReview). Params: target_repo = mikelear/<name>,
-  run_id, namespace.
+- smoke-pr: after scaffold-pr, OPEN the trivial smoke PR (deterministic plumbing) — call
+  mcp__leartech-repo-factory__smoke_pr with target_repo, marker=<name> (the SERVICE name from
+  your inputs, so the branch is the deterministic `smoke-<name>`). Do NOT pass run_id/namespace:
+  this step just OPENS the PR (fire-and-forget, repo:"") — a downstream Dev-agent step ADOPTS
+  branch `smoke-<name>` (via idempotent open_pr) and OWNS it (watch gates, fix failures, merge).
+  Infra opens + verifies the plumbing; the Dev agent drives the PR. Params: target_repo =
+  mikelear/<name>, name.
 - release-health-check: shepherd the service THROUGH the JX3 release pipeline to a landed,
   healthy release — the automation of the manual release watch. You are triggered when the dev
   PR OPENS (AwaitingReview), so nothing has released yet; you WAIT and drive it, using the
-  jx-release MCP (do NOT hand-scrape Tekton). Bounded ~25 min total; poll ~60s between checks
-  (`sleep 60`) — never one giant sleep. Stages (stop + FAIL closed if the budget elapses at any
-  stage):
+  jx-release MCP (do NOT hand-scrape Tekton). Bounded by `budgetMinutes` from your inputs
+  (default 60 if unset) — a real cold-repo multi-cluster release+promote+deploy can take
+  40-50 min, so do NOT give up early. Poll ~60s between checks (`sleep 60`) — never one giant
+  sleep. Stages (stop + FAIL closed only once the budget elapses):
     1. RELEASE FIRED — poll mcp__leartech-jx-release__release_status(repo=mikelear/<service>)
        until released=true (the dev PR merged and the release Tekton produced a release).
     2. PROMOTE PRs — poll mcp__leartech-jx-release__promote_status(service) (both clusters):
