@@ -1,0 +1,33 @@
+# Golden brief: cluster-wide multi-resolve.
+#
+# BOTH clusters' foo-service release plans have stalled after a shared
+# upstream regression. `resolves` carries TWO PlanRefs — one per cluster
+# — and the BA is expected to author ONE draft plan per cluster (each
+# `remediates` covers ITS PlanRef, but the UNION covers both).
+#
+# This exercises the collection-level "cluster-wide multi-resolve
+# coverage" check in the harness: every PlanRef in `resolves` must be
+# covered by SOME authored plan's `remediates`.
+name: unstick-foo-service-both-clusters
+goal: |
+  A shared upstream Helm chart bump (leartech-service-template@0.9.4)
+  broke the foo-service release health check on BOTH clusters after
+  landing on the gitops env repo at 2026-07-28T06:12Z. Roll the release
+  back to the last-known-good chart version (0.9.3) via a targeted
+  jx-promote PR on each cluster, then re-verify /health on each.
+successCriteria:
+  - foo-service Deployment on BOTH clusters reports >=1 available replica
+  - HTTP GET /health returns 200 for 3 consecutive polls on each cluster
+  - The gitops env repo shows chart version 0.9.3 pinned for foo-service
+context: |
+  Both clusters' foo-service release-health-check pipelines have been
+  red since the 0.9.4 chart bump at 06:12Z. No other service is
+  affected — issue is confined to foo-service's overriden values shape.
+  Roll back is the safest resolution while an upstream fix is drafted.
+resolves:
+  - name: foo-service-release
+    namespace: jx-staging
+    cluster: gcp
+  - name: foo-service-release
+    namespace: jx-production
+    cluster: az

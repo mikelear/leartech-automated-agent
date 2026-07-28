@@ -1,0 +1,44 @@
+# Mocked platform_state snapshot — cluster-wide multi-resolve.
+#
+# Both cluster plans failed at the same step within minutes of each
+# other, consistent with a shared upstream regression.
+
+plans:
+  - name: foo-service-release
+    namespace: jx-staging
+    cluster: gcp
+    latestRun:
+      state: Failed
+      failedStep: release-check
+      message: 'foo-service Deployment: 0/1 available replicas'
+      lastTransitionTime: '2026-07-28T06:14:18Z'
+      consecutiveFailures: 3
+  - name: foo-service-release
+    namespace: jx-production
+    cluster: az
+    latestRun:
+      state: Failed
+      failedStep: release-check
+      message: 'foo-service Deployment: 0/2 available replicas'
+      lastTransitionTime: '2026-07-28T06:15:02Z'
+      consecutiveFailures: 3
+
+deploys:
+  - service: foo-service
+    namespace: jx-staging
+    cluster: gcp
+    availableReplicas: 0
+    desiredReplicas: 1
+  - service: foo-service
+    namespace: jx-production
+    cluster: az
+    availableReplicas: 0
+    desiredReplicas: 2
+
+gitops:
+  envRepo: mikelear/leartech-env
+  lastCommit:
+    sha: 89a7b31
+    author: leartech-bot
+    message: 'chore(chart): bump leartech-service-template 0.9.3 -> 0.9.4'
+    committedAt: '2026-07-28T06:12:44Z'

@@ -1,0 +1,46 @@
+# Expected authored-plan shape for the infra-remediation brief.
+#
+# This YAML is a LIST of plans; the harness treats the whole list as the
+# BA's output for one brief. In this scenario the brief resolves a SINGLE
+# PlanRef, so we expect ONE authored plan that copies it into `remediates`
+# and appends a release-health-check as the final step.
+#
+# The intermediate step ("wait-for-deploy") is what the BA would typically
+# schedule between reading the brief and re-verifying — it's illustrative;
+# the harness cares about the invariants (hold:true, draft annotation,
+# final step verification, remediates ↔ resolves), not the details of
+# intermediate steps.
+
+- apiVersion: agent.leartech.io/v1alpha1
+  kind: Plan
+  metadata:
+    name: draft-fix-gcp-foo-service-release
+    namespace: jx-staging
+    annotations:
+      leartech.io/draft: 'true'
+  spec:
+    tenant: leartech
+    triggeredBy: ba-agent
+    hold: true
+    remediates:
+      - name: foo-service-release
+        namespace: jx-staging
+    steps:
+      - name: wait-for-deploy
+        agentType: leartech-agent-infra
+        repo: ''
+        inputs:
+          action: deploy-wait
+          service: foo-service
+          namespace: jx-staging
+          cluster: gcp
+      - name: verify
+        agentType: leartech-agent-infra
+        dependsOn: [wait-for-deploy]
+        repo: ''
+        inputs:
+          action: release-health-check
+          service: foo-service
+          namespace: jx-staging
+          healthPath: /health/live
+          cluster: gcp
