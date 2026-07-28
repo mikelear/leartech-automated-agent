@@ -140,27 +140,27 @@ mcp_servers:
       triggers downstream until a human reviews. May be called MULTIPLE
       times per brief (cluster-wide multi-resolve).
 
-  # Remote — orchestrator/agent API surface for mutating in-flight plans.
-  # Distinct from control_plane so future finer-grained authz can gate the
-  # two independently.
+  # Remote — orchestrator/agent API surface for mutating in-flight plans AND
+  # firing initiatives. Distinct from control_plane so future finer-grained
+  # authz can gate the two independently.
+  #
+  # The former in-process `leartech-initiatives` SDK shim
+  # (`gate.mcp_servers.initiatives_server`, with `fire_initiative` +
+  # `fire_initiative_inline`) has been retired in favour of this remote
+  # server, which exposes `fire_initiative(initiative_body)` — the
+  # by-name path composes client-side as `get_catalog_entry(name)` →
+  # `fire_initiative(initiative_body=yaml_body)`.
   leartech-agent-api:
     type: http_sse
     url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/agent_api/sse
     description: |
-      Agent/orchestrator API surface — `amend_plan` (mutate an in-flight
-      plan when re-authoring is safer than opening a new one). BA agent
-      uses this when a live plan is close enough to the brief that a diff
-      is preferable to a fresh create.
-
-  leartech-initiatives:
-    type: sdk
-    builder: gate.mcp_servers.initiatives_server:build_initiatives_server
-    description: |
-      Fire initiatives against the deployed agent service. Exposes
-      `fire_initiative(name)` for catalog-resolved firing and
-      `fire_initiative_inline(body)` for one-shot firing whose YAML body is
-      built at call time (e.g. orchestrator fix-up iterations whose goal
-      embeds a failing PR's verdict comment).
+      Agent/orchestrator API surface. Authoring surface for BA:
+      `amend_plan` (mutate an in-flight plan when re-authoring is safer
+      than opening a new one). Initiative firing + inspection for
+      orchestrator fix-up flows: `fire_initiative(initiative_body)`,
+      `list_catalog_entries`, `get_catalog_entry`, `list_initiative_runs`,
+      `get_initiative_run`, `get_run_snapshot`, `get_run_decisions`,
+      `cancel_initiative_run`, `send_command_to_run`, `list_roles`.
 
   # Stdio (subprocess) — for external tools and future cross-process agents.
   # Marked `status: not_built` until the wrapper repo exists.

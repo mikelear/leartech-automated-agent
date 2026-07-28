@@ -1,4 +1,17 @@
-"""leartech-test-artifacts-mcp — Playwright run + artifact discovery from end2end-ui sticky comments."""
+"""leartech-test-artifacts-mcp — Playwright run + artifact discovery from end2end-ui sticky comments.
+
+**Bucket: GAP** (in-process only). This is a shim over
+:mod:`gate.tools.playwright_artifacts` (GitHub PR-sticky parsing) and
+:mod:`gate.tools.head_artifact` (HTTP HEAD to public GCS URLs). Both
+operations are pure network I/O that a Go MCP could serve just as well,
+but ``leartech-mcp-servers`` doesn't (yet) advertise a matching server
+— so per the Go-first rule the shim stays in place until a Go
+``test_artifacts`` server lands. When it does, add ``test_artifacts``
+to ``WANTED_MCP_SERVERS`` in :mod:`gate.mcp_servers.remote`, delete
+this module, and drop the ``leartech-test-artifacts`` entry from
+``gate/agent/mcp_catalog.yaml`` (mirroring the pr_context / tekton /
+jx3_flow / initiatives retirements).
+"""
 
 from __future__ import annotations
 
