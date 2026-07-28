@@ -120,8 +120,14 @@ spec:
     # reproducibility matters.
     LEARTECH_BA_AGENT_MODEL: {{ .Values.baAgent.model | quote }}
     # Cluster identity — surfaces in obslog / retrospect output so a run's
-    # provenance is unambiguous.
-    CLUSTER: {{ .Values.baAgent.cluster | default (env "CLUSTER") | default "unknown" | quote }}
+    # provenance is unambiguous. Populated at render time from
+    # `.Values.baAgent.cluster` (which the cluster's GitOps overlay in
+    # `configs/leartech-automated-agent.yaml` sets to `az`/`gcp`). Empty
+    # defaults to "unknown" — the `env` function is intentionally NOT used
+    # here because Helm's default install disables it (parse error at
+    # render time), and pod-side env-fallback would need a Downward-API
+    # ref the CRD doesn't expose. Cluster-in-GitOps is the reliable path.
+    CLUSTER: {{ .Values.baAgent.cluster | default "unknown" | quote }}
     # Version stamp — matches the chart release so a BA run's logs
     # cross-reference the exact agent-image lineage.
     VERSION: {{ .Chart.Version | quote }}

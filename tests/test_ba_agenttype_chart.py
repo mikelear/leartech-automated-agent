@@ -132,6 +132,22 @@ def test_agenttype_env_wires_gateway_url_and_model() -> None:
     assert '.Values.baAgent.model' in text
 
 
+def test_agenttype_does_not_use_sprig_env_function() -> None:
+    """Regression guard: Helm's default install disables the ``env`` Sprig
+    function (see helm/helm#5063 — access to process env vars is disabled by
+    default for security). Using ``env "SOMETHING"`` here would cause the
+    chart to fail helm-template with ``function "env" not defined``, and the
+    preview-deploy step (``promote-jx-preview`` in ``.lighthouse/jenkins-x/
+    pullrequest.yaml``) would fail. Values-driven per-cluster identity via
+    GitOps overlays is the correct pattern (``.Values.baAgent.cluster``)."""
+    text = AGENTTYPE_TEMPLATE.read_text()
+    assert not re.search(r'\benv\s+"', text), (
+        'AgentType template must not use Helm/Sprig `env "..."` — it is '
+        'disabled by default and would break helm-template render. Use '
+        '`.Values.baAgent.cluster` (set per-cluster via GitOps) instead.'
+    )
+
+
 def test_agenttype_gated_on_register_toggle() -> None:
     """Cluster-scoped resources must not collide across previews +
     staging. The manifest renders ONLY when
