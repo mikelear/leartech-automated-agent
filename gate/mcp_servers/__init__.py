@@ -23,6 +23,7 @@ remote server via authed Streamable-HTTP alongside pr_context + tekton.
 """
 
 from gate.mcp_servers.agent_local import build_agent_local_server
+from gate.mcp_servers.ai_gateway_web_server import build_ai_gateway_web_server
 from gate.mcp_servers.artifacts_server import build_artifacts_server
 from gate.mcp_servers.criteria_server import build_criteria_server
 from gate.mcp_servers.initiatives_server import build_initiatives_server
@@ -30,6 +31,7 @@ from gate.mcp_servers.remote import build_remote_mcp_servers
 
 __all__ = [
     'build_agent_local_server',
+    'build_ai_gateway_web_server',
     'build_artifacts_server',
     'build_criteria_server',
     'build_initiatives_server',

@@ -1,5 +1,15 @@
 """Primitives the criteria layer depends on. Each module is also wrappable as an MCP server (see gate/mcp_servers/)."""
 
+from gate.tools.ai_gateway_web import (
+    AIGatewayWebUnavailableError,
+    WebFetchResult,
+    WebSearchResult,
+    web_fetch,
+    web_search,
+)
+from gate.tools.ai_gateway_web import (
+    is_available as ai_gateway_web_is_available,
+)
 from gate.tools.ai_review import (
     AIReviewFinding,
     AIReviewVerdict,
@@ -198,6 +208,13 @@ __all__ = [
     'has_in_diff_evidence',
     'manifest_exists_at_ref',
     'parse_security_claims',
+    # BA agent — ai-gateway web research (/v1/search + /v1/fetch)
+    'AIGatewayWebUnavailableError',
+    'WebFetchResult',
+    'WebSearchResult',
+    'ai_gateway_web_is_available',
+    'web_fetch',
+    'web_search',
     # v6p0.6 step 1 — structured artefact parsers + dispatcher
     'ARTEFACT_PARSERS',
     'Finding',

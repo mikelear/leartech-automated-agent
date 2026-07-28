@@ -47,9 +47,34 @@ def _mounts(*names: str) -> list[dict[str, str]]:
     return [{'name': n, 'path': f'/mcp/{n}'} for n in names]
 
 
+# Advertise every server the agent knows about (including the BA agent's
+# new platform_state / control_plane / agent_api trio) so the happy-path
+# wire-up assertion exercises the full WANTED_MCP_SERVERS set. `k8s` is
+# NOT in WANTED — it is included here to prove the agent silently ignores
+# host-only servers instead of wiring them.
 _ALL_ADVERTISED = {
-    'servers': ['pr_context', 'tekton', 'jx3_flow', 'k8s', 'agent_api'],
-    'mounts': _mounts('pr_context', 'tekton', 'jx3_flow', 'k8s', 'agent_api'),
+    'servers': [
+        'pr_context',
+        'tekton',
+        'jx3_flow',
+        'k8s',
+        'agent_api',
+        'platform_state',
+        'control_plane',
+        'repo_factory',
+        'jx_release',
+    ],
+    'mounts': _mounts(
+        'pr_context',
+        'tekton',
+        'jx3_flow',
+        'k8s',
+        'agent_api',
+        'platform_state',
+        'control_plane',
+        'repo_factory',
+        'jx_release',
+    ),
 }
 
 
@@ -161,7 +186,17 @@ def test_fully_configured_wires_from_discovery_with_bearer(monkeypatch: pytest.M
     _mock_token(monkeypatch)
     _mock_discovery(monkeypatch, _ALL_ADVERTISED)
     servers = remote.build_remote_mcp_servers()
-    assert set(servers) == {'leartech-pr-context', 'leartech-tekton', 'leartech-jx3-flow'}
+    assert set(servers) == {
+        'leartech-pr-context',
+        'leartech-tekton',
+        'leartech-jx3-flow',
+        'leartech-repo-factory',
+        'leartech-jx-release',
+        # BA agent surface (platform state + control plane + agent API).
+        'leartech-platform-state',
+        'leartech-control-plane',
+        'leartech-agent-api',
+    }
     base = 'http://leartech-mcp-servers.jx-staging.svc.cluster.local'
     # Phase 2: each server is wired as a stdio bridge. The discovered downstream
     # URL (base + host-advertised path) + bearer are passed to the bridge via env;
@@ -169,6 +204,10 @@ def test_fully_configured_wires_from_discovery_with_bearer(monkeypatch: pytest.M
     assert servers['leartech-pr-context']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/pr_context'
     assert servers['leartech-tekton']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/tekton'
     assert servers['leartech-jx3-flow']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/jx3_flow'
+    # BA agent MCPs — host-advertised paths, verbatim.
+    assert servers['leartech-platform-state']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/platform_state'
+    assert servers['leartech-control-plane']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/control_plane'
+    assert servers['leartech-agent-api']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/agent_api'
     for cfg in servers.values():
         assert cfg['type'] == 'stdio'
         assert cfg['args'] == ['-m', 'gate.mcp_servers.stdio_bridge']
@@ -235,6 +274,11 @@ def test_discover_mounts_parses_name_path_map(monkeypatch: pytest.MonkeyPatch) -
         'jx3_flow': '/mcp/jx3_flow',
         'k8s': '/mcp/k8s',
         'agent_api': '/mcp/agent_api',
+        # BA agent surface — the host now advertises these too.
+        'platform_state': '/mcp/platform_state',
+        'control_plane': '/mcp/control_plane',
+        'repo_factory': '/mcp/repo_factory',
+        'jx_release': '/mcp/jx_release',
     }
 
 

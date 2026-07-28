@@ -104,6 +104,54 @@ mcp_servers:
       The rest of the step-aware surface lives in the remote `leartech-tekton`
       MCP; this catalog entry is the boundary marker.
 
+  leartech-ai-gateway-web:
+    type: sdk
+    builder: gate.mcp_servers.ai_gateway_web_server:build_ai_gateway_web_server
+    description: |
+      Web research helpers backed by leartech-ai-gateway (BA agent). Exposes
+      `web_search` (POST /v1/search) and `web_fetch` (POST /v1/fetch) as MCP
+      tools so the BA agent can research the state of the world before
+      authoring a Plan CRD — e.g. "has upstream fixed X?", "current release
+      cadence for Y?". Reads ANTHROPIC_BASE_URL + AI_GATEWAY_API_KEY (or
+      ANTHROPIC_API_KEY) from env; returns `{"error": ...}` when unset so the
+      caller can degrade cleanly rather than crash.
+
+  # Remote — BA agent's live-state read surface. Served by the Go
+  # leartech-mcp-servers `platform_state` deployment.
+  leartech-platform-state:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/platform_state/sse
+    description: |
+      Read-only view of live platform state — `list_plans`, `list_runs`,
+      `get_plan_state`, `deploy_health`. Consumed by the BA agent to
+      correlate the brief's `resolves: [PlanRef]` against what's actually in
+      flight before authoring a new remediation Plan (so BA doesn't
+      re-author an existing plan or miss the healthy path).
+
+  # Remote — BA agent's authoring write surface. Served by the Go
+  # leartech-mcp-servers `control_plane` deployment.
+  leartech-control-plane:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/control_plane/sse
+    description: |
+      Control-plane write surface — `create_plan` and other landscape-level
+      authoring tools. The BA agent authors REMEDIATION Plans here
+      DRAFT-BY-DEFAULT (hold:true + draft annotation) so nothing heavy
+      triggers downstream until a human reviews. May be called MULTIPLE
+      times per brief (cluster-wide multi-resolve).
+
+  # Remote — orchestrator/agent API surface for mutating in-flight plans.
+  # Distinct from control_plane so future finer-grained authz can gate the
+  # two independently.
+  leartech-agent-api:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/agent_api/sse
+    description: |
+      Agent/orchestrator API surface — `amend_plan` (mutate an in-flight
+      plan when re-authoring is safer than opening a new one). BA agent
+      uses this when a live plan is close enough to the brief that a diff
+      is preferable to a fresh create.
+
   leartech-initiatives:
     type: sdk
     builder: gate.mcp_servers.initiatives_server:build_initiatives_server
@@ -192,20 +240,42 @@ roles:
 
   ba_agent:
     description: |
-      Translates intent (Lovable mockup, docs, customer ask) into an initiative-set
-      YAML for orchestrator consumption. Two-track sign-off (design + functional)
-      gates whether the orchestrator picks it up.
+      Business analyst — takes a BRIEF (Initiative contract EXTENDED with
+      successCriteria, context, resolves:[PlanRef]) and OUTPUTS a Plan CRD
+      (does NOT open a PR). Reads live platform state, correlates it against
+      the brief's `resolves`, then AUTHORS remediation/target Plans via
+      `create_plan` DRAFT-BY-DEFAULT (hold:true + draft annotation) so
+      nothing heavy triggers downstream until a human reviews. Every
+      authored plan's FINAL step must verify the brief's successCriteria
+      (e.g. release-health-check). May author/amend MULTIPLE plans
+      (cluster-wide multi-resolve). BA has ZERO infra-specific knowledge —
+      it consumes the brief only.
+    llm:
+      # Fixed Opus 4.8 — NOT "auto" (which can downgrade to GLM per the
+      # ai-gateway router). Reasoning-heavy authoring where a downgrade
+      # loses the ability to correlate live state against the brief.
+      backend: claude
+      model: claude-opus-4-8
+      max_turns: 200
     mcps:
-      - lovable
-      - stitch
-      - figma
+      # Live platform state — list_plans / list_runs / get_plan_state /
+      # deploy_health for correlation before authoring.
+      - leartech-platform-state
+      # Authoring surfaces — create_plan on control_plane, amend_plan on
+      # agent_api. Draft-by-default so nothing merges into a live plan
+      # without human review.
+      - leartech-control-plane
+      - leartech-agent-api
+      # Web research via ai-gateway /v1/search + /v1/fetch (metered +
+      # governed alongside the LLM turns).
+      - leartech-ai-gateway-web
+      # PR context (read-only) — the brief may reference PRs the BA needs
+      # to inspect before authoring a remediation plan against them.
+      - leartech-pr-context
     tools:
       - Read
-      - Write
-      - Bash
       - Glob
       - Grep
-      - WebFetch
 
   forensic_agent:
     description: |

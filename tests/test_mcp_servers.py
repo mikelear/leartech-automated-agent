@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from gate.mcp_servers import (
+    build_ai_gateway_web_server,
     build_artifacts_server,
     build_criteria_server,
     build_initiatives_server,
@@ -43,6 +44,13 @@ def test_initiatives_server_builds() -> None:
     """The initiatives MCP server (fire_initiative + fire_initiative_inline)
     must construct cleanly so the dynamic-MCP-registry can wire it in."""
     server = build_initiatives_server()
+    assert server is not None
+
+
+def test_ai_gateway_web_server_builds() -> None:
+    """The BA agent's web-research MCP (web_search + web_fetch) must build
+    cleanly — a shape regression here would silently disable BA research."""
+    server = build_ai_gateway_web_server()
     assert server is not None
 
 
@@ -155,6 +163,7 @@ def test_all_servers_build_with_distinct_names() -> None:
         build_artifacts_server(),
         build_criteria_server(),
         build_initiatives_server(),
+        build_ai_gateway_web_server(),
     ]
     assert all(s is not None for s in servers)
-    assert len({id(s) for s in servers}) == 3
+    assert len({id(s) for s in servers}) == 4

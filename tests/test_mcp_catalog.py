@@ -300,6 +300,14 @@ def test_existing_roles_still_parse() -> None:
     assert initiative.llm.model == 'claude-opus-4-7'
     assert initiative.llm.max_turns == 1000
 
-    for role_name in ('review_agent', 'ba_agent', 'forensic_agent'):
+    # ba_agent pins Opus 4.8 explicitly (NOT "auto") so the gateway's
+    # auto-router can't downgrade a reasoning-heavy authoring pass to GLM.
+    # This is enforced by test_ba_role_pins_opus_not_auto in test_ba_agent.py.
+    ba = catalog.roles['ba_agent']
+    assert ba.llm is not None, 'ba_agent.llm should be populated (Opus 4.8 pinned)'
+    assert ba.llm.backend == 'claude'
+    assert ba.llm.model is not None and 'opus' in ba.llm.model.lower()
+
+    for role_name in ('review_agent', 'forensic_agent'):
         role = catalog.roles[role_name]
         assert role.llm is None, f'{role_name}.llm should be None (no llm block in yaml)'

@@ -73,7 +73,30 @@ _TOKEN_TIMEOUT = 15.0
 #     infra_agent role's allowed_tools grants these; other agents just don't call them.
 #   * jx_release — JX3 release-check primitives (release_status, promote_status,
 #     retest_promote) the infra agent composes into the release-health-check action.
-WANTED_MCP_SERVERS: frozenset[str] = frozenset({'pr_context', 'tekton', 'jx3_flow', 'repo_factory', 'jx_release'})
+#   * platform_state — read-only live-state view for the BA agent: list_plans /
+#     list_runs / get_plan_state / deploy_health. Correlates the brief's
+#     `resolves` (PlanRefs) against what's actually in flight so BA doesn't
+#     re-author an existing plan.
+#   * control_plane — control-plane write path for the BA agent: create_plan
+#     (and any future landscape-level authoring surface). Draft-by-default —
+#     BA sets hold:true + a draft annotation on the created Plans.
+#   * agent_api — orchestrator/agent API surface for the BA agent: amend_plan
+#     (mutate an in-flight plan when re-authoring is safer than a new plan).
+#     Distinct from control_plane so future finer-grained authz can gate the
+#     two independently.
+WANTED_MCP_SERVERS: frozenset[str] = frozenset(
+    {
+        'pr_context',
+        'tekton',
+        'jx3_flow',
+        'repo_factory',
+        'jx_release',
+        # BA agent — live-state + authoring surface.
+        'platform_state',
+        'control_plane',
+        'agent_api',
+    }
+)
 
 _DISCOVERY_TIMEOUT = 15.0
 
@@ -262,8 +285,7 @@ def build_remote_mcp_servers() -> dict[str, McpStdioServerConfig]:
         )
     if missing:
         log.warning(
-            'wanted remote MCP(s) NOT advertised by %s/mcps: %s — skipped. '
-            'Host advertises: %s',
+            'wanted remote MCP(s) NOT advertised by %s/mcps: %s — skipped. Host advertises: %s',
             base,
             ', '.join(missing),
             ', '.join(sorted(mounts)),
