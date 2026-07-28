@@ -3,6 +3,16 @@
 Runs criteria as a subprocess (`uv run gate check ...`) rather than calling pytest in-process,
 because pytest mutates global state that's awkward to compose inside a long-lived agent loop.
 The structured `.report.json` is parsed and returned.
+
+**Bucket: KEEP-LOCAL.** Unlike the pipeline / tekton / pr_context / agent_api
+shims that moved to the remote Go MCPs in ``leartech-mcp-servers``, this
+one stays in-process because it *is* an agent-pod workload: it spawns
+``uv run pytest`` against :mod:`gate.criteria` in THIS repo's workspace, and
+the criteria's imports (``gate.tools.*``, ``gate.watcher.*``) all resolve
+against the same checkout. Moving this remote would require projecting the
+agent pod's workspace over a network filesystem to the MCP host — a
+strictly worse boundary. Sibling of :mod:`gate.mcp_servers.agent_local`,
+which stays in-process for the same "state lives in the agent pod" reason.
 """
 
 from __future__ import annotations
