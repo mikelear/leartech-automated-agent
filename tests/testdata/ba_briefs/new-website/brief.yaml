@@ -1,0 +1,26 @@
+# Golden brief: new-website.
+#
+# Brand-new deliverable — nothing to remediate. `resolves` is empty; the
+# brief asks the BA to author a plan that stands up a new site from
+# scratch. This exercises the "empty resolves" branch of the harness:
+# the plan's `remediates` MUST be empty/absent (no smuggled additions).
+#
+# The verification step reflects "the site's home page returns 200" —
+# a health-check-shaped action, which the harness accepts because the
+# action name contains the "health-check" marker.
+name: launch-marketing-microsite
+goal: |
+  Stand up a new prerendered marketing microsite under
+  mikelear/leartech-marketing-microsite. Follow the ai-content-page
+  template: prerendered, JSON-LD Article + FAQ, sitemap + llms.txt
+  updated. Ship a single hero page + about + contact.
+successCriteria:
+  - Site home page returns HTTP 200 with prerendered HTML
+  - Sitemap.xml lists the three shipped routes
+  - /health endpoint returns 200 on both clusters
+context: |
+  Greenfield initiative. No live plan or deploy exists yet — this is the
+  first time this repo/service will exist. Follow the standard scaffold
+  path (infra_agent create-repo -> register-source-config -> scaffold-pr)
+  and then verify the release lands on both clusters.
+resolves: []

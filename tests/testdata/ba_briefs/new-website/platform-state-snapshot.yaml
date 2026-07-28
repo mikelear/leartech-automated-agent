@@ -1,0 +1,14 @@
+# Mocked platform_state snapshot for the new-website brief.
+#
+# Greenfield — no live plans, no deploys. The BA must recognise that
+# `list_plans` / `deploy_health` return empty and STILL author a plan
+# (this is a "target" plan, not a remediation).
+
+plans: []
+deploys: []
+runs: []
+
+# Note: the BA should NOT skip authoring just because platform_state is
+# empty — an empty snapshot with an empty `resolves` on the brief is
+# exactly the "new-target" case, not the "already healthy, no work
+# needed" case.

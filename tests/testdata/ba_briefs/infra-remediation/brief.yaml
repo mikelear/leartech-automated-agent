@@ -1,0 +1,29 @@
+# Golden brief: infra-remediation.
+#
+# One-cluster remediation. A live Plan on gcp keeps failing at its
+# release-health-check step; the brief asks the BA to author a corrective
+# plan that clears the underlying deploy problem and re-verifies.
+#
+# `resolves` carries ONE PlanRef → we expect the BA to author at least ONE
+# draft plan whose `remediates` copies that PlanRef and whose final step
+# re-verifies the deploy is healthy.
+name: fix-gcp-foo-service-release
+goal: |
+  The gcp release for foo-service is failing at release-health-check (5
+  consecutive failures in the last 24h; az cluster is unaffected). Author
+  a corrective plan that unblocks the release: verify the underlying
+  Deployment reaches Ready, and re-run the release-health-check to prove
+  the fix landed.
+successCriteria:
+  - foo-service Deployment on gcp reports >=1 available replica
+  - HTTP GET /health/live returns 200 for 3 consecutive polls
+context: |
+  gcp release-health-check has been failing since 2026-07-27T10:00Z after
+  a Helm value change landed on the gitops env repo. Only gcp is affected;
+  the same chart on az stays green. Suspect a per-cluster secret shape
+  drift, but the BA should correlate against live state before assuming.
+resolves:
+  - name: foo-service-release
+    namespace: jx-staging
+    cluster: gcp
+    since: '2026-07-27T10:00:00Z'

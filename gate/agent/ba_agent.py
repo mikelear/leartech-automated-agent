@@ -462,17 +462,65 @@ def _load_brief_from_cli(brief_opt: str | None) -> Brief:
         raise click.BadParameter(f'brief did not validate: {exc}') from exc
 
 
+def _dry_run_summary(brief: Brief) -> str:
+    """Human-readable one-brief summary for ``--dry-run`` mode.
+
+    The dry-run path is the fast, LLM-free sanity check operators can run
+    while drafting a brief — it validates the schema (via ``load_brief``)
+    and prints WHAT the BA will be asked to do, without spending any
+    tokens or contacting the gateway. See ``docs/BA-TEST-HARNESS.md`` for
+    the full workflow.
+    """
+    lines = [
+        '# BA dry-run — brief validated, no plans authored.',
+        f'name: {brief.name}',
+        f'goal: {brief.goal.strip().splitlines()[0][:120]}',
+        f'successCriteria: {len(brief.success_criteria)} criterion(s)',
+    ]
+    for c in brief.success_criteria:
+        lines.append(f'  - {c}')
+    if brief.resolves:
+        lines.append(f'resolves: {len(brief.resolves)} PlanRef(s) — the BA is expected to author >=1 draft plan')
+        for ref in brief.resolves:
+            lines.append(f'  - {ref.name} in {ref.namespace}')
+    else:
+        lines.append('resolves: [] — nothing to remediate; the BA will author a target plan (empty remediates)')
+    lines.append('')
+    lines.append(
+        'To exercise this brief with the real BA on-cluster, wrap it in an AgentRun '
+        'of AgentType leartech-agent-ba (see docs/BA-TEST-HARNESS.md).'
+    )
+    return '\n'.join(lines)
+
+
 @click.command()
 @click.option('--brief', 'brief_opt', default=None, help=f'Brief body (YAML/JSON) or @file; defaults to ${INPUTS_ENV}.')
 @click.option('--model', default=DEFAULT_MODEL, show_default=True, help='Claude model.')
 @click.option('--max-turns', default=DEFAULT_MAX_TURNS, type=int, show_default=True, help='Max agent turns.')
-def main(brief_opt: str | None, model: str, max_turns: int) -> None:
+@click.option(
+    '--dry-run',
+    'dry_run',
+    is_flag=True,
+    default=False,
+    help=(
+        'Validate the brief and print a summary WITHOUT calling the LLM or the '
+        'gateway. Zero-cost sanity check while drafting briefs. Exits 0 on '
+        'validation success, 2 on invalid brief.'
+    ),
+)
+def main(brief_opt: str | None, model: str, max_turns: int, dry_run: bool) -> None:
     """Run the BA agent for one brief (the entrypoint a BA AgentType spawns).
 
     Inputs default to ``$LEARTECH_INITIATIVE_YAML`` (the controller's contract);
-    ``--brief`` overrides for local use.
+    ``--brief`` overrides for local use. ``--dry-run`` skips the LLM call
+    entirely and just validates + summarises the brief — useful while
+    drafting a brief and to prove BA plumbing without firing repo-factory-
+    scale work.
     """
     brief = _load_brief_from_cli(brief_opt)
+    if dry_run:
+        click.echo(_dry_run_summary(brief))
+        sys.exit(0)
     sys.exit(asyncio.run(run_ba_task(brief, model=model, max_turns=max_turns)))
 
 

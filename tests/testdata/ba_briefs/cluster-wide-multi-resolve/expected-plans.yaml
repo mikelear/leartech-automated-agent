@@ -1,0 +1,73 @@
+# Expected authored-plan shape for the cluster-wide multi-resolve brief.
+#
+# Two authored plans, one per cluster. Each plan's `remediates` covers
+# ITS PlanRef; the UNION covers both. The collection-level check in
+# `validate_authored_plans` enforces this coverage rule.
+
+- apiVersion: agent.leartech.io/v1alpha1
+  kind: Plan
+  metadata:
+    name: draft-unstick-foo-service-gcp
+    namespace: jx-staging
+    annotations:
+      leartech.io/draft: 'true'
+  spec:
+    tenant: leartech
+    triggeredBy: ba-agent
+    hold: true
+    remediates:
+      - name: foo-service-release
+        namespace: jx-staging
+    steps:
+      - name: rollback-chart
+        agentType: leartech-agent-infra
+        repo: ''
+        inputs:
+          action: pin-chart-version
+          service: foo-service
+          cluster: gcp
+          version: 0.9.3
+      - name: verify
+        agentType: leartech-agent-infra
+        dependsOn: [rollback-chart]
+        repo: ''
+        inputs:
+          action: release-health-check
+          service: foo-service
+          namespace: jx-staging
+          healthPath: /health
+          cluster: gcp
+
+- apiVersion: agent.leartech.io/v1alpha1
+  kind: Plan
+  metadata:
+    name: draft-unstick-foo-service-az
+    namespace: jx-production
+    annotations:
+      leartech.io/draft: 'true'
+  spec:
+    tenant: leartech
+    triggeredBy: ba-agent
+    hold: true
+    remediates:
+      - name: foo-service-release
+        namespace: jx-production
+    steps:
+      - name: rollback-chart
+        agentType: leartech-agent-infra
+        repo: ''
+        inputs:
+          action: pin-chart-version
+          service: foo-service
+          cluster: az
+          version: 0.9.3
+      - name: verify
+        agentType: leartech-agent-infra
+        dependsOn: [rollback-chart]
+        repo: ''
+        inputs:
+          action: release-health-check
+          service: foo-service
+          namespace: jx-production
+          healthPath: /health
+          cluster: az

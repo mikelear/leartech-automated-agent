@@ -1,0 +1,34 @@
+# Mocked platform_state snapshot — what a real BA would have seen when it
+# correlated the brief against live state (via
+# mcp__leartech-platform-state__get_plan_state / deploy_health / list_runs).
+#
+# This file is DOCUMENTATION for the scenario, not consumed by the
+# harness. Its purpose is to make the fixture self-describing so a future
+# operator revisiting the golden can reproduce the reasoning path.
+
+plans:
+  - name: foo-service-release
+    namespace: jx-staging
+    cluster: gcp
+    latestRun:
+      state: Failed
+      failedStep: release-check
+      message: 'foo-service Deployment on gcp: 0/1 available replicas'
+      lastTransitionTime: '2026-07-28T09:14:22Z'
+      consecutiveFailures: 5
+
+deploys:
+  - service: foo-service
+    namespace: jx-staging
+    cluster: gcp
+    availableReplicas: 0
+    desiredReplicas: 1
+    lastEventReason: FailedMount
+    lastEventMessage: 'MountVolume.SetUp failed for volume "opus-api-key" : secret "opus-api-key" not found'
+  - service: foo-service
+    namespace: jx-staging
+    cluster: az
+    availableReplicas: 1
+    desiredReplicas: 1
+    lastEventReason: Started
+    lastEventMessage: 'Started container foo-service'

@@ -335,7 +335,7 @@ def test_main_reads_brief_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ba_agent, 'run_ba_task', _fake)
     with pytest.raises(SystemExit) as exc:
-        ba_agent.main.callback(brief_opt=None, model='m', max_turns=1)
+        ba_agent.main.callback(brief_opt=None, model='m', max_turns=1, dry_run=False)
     assert exc.value.code == 0
     assert isinstance(captured['brief'], ba_agent.Brief)
     assert captured['brief'].name == 'fix-flaky-release'  # type: ignore[union-attr]
@@ -355,7 +355,7 @@ def test_main_reads_brief_from_at_file(monkeypatch: pytest.MonkeyPatch, tmp_path
 
     monkeypatch.setattr(ba_agent, 'run_ba_task', _fake)
     with pytest.raises(SystemExit) as exc:
-        ba_agent.main.callback(brief_opt=f'@{brief_path}', model='m', max_turns=1)
+        ba_agent.main.callback(brief_opt=f'@{brief_path}', model='m', max_turns=1, dry_run=False)
     assert exc.value.code == 0
     assert captured['brief'].name == 'from-file'  # type: ignore[union-attr]
 
@@ -363,7 +363,7 @@ def test_main_reads_brief_from_at_file(monkeypatch: pytest.MonkeyPatch, tmp_path
 def test_main_errors_when_no_brief(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv('LEARTECH_INITIATIVE_YAML', raising=False)
     with pytest.raises(click.BadParameter, match='no brief'):
-        ba_agent.main.callback(brief_opt=None, model='m', max_turns=1)
+        ba_agent.main.callback(brief_opt=None, model='m', max_turns=1, dry_run=False)
 
 
 def test_main_errors_on_invalid_brief(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -371,14 +371,14 @@ def test_main_errors_on_invalid_brief(monkeypatch: pytest.MonkeyPatch) -> None:
     with a clear message so operators see WHY the brief was rejected."""
     monkeypatch.setenv('LEARTECH_INITIATIVE_YAML', '{"name": "x", "goal": "g"}')
     with pytest.raises(click.BadParameter, match='did not validate'):
-        ba_agent.main.callback(brief_opt=None, model='m', max_turns=1)
+        ba_agent.main.callback(brief_opt=None, model='m', max_turns=1, dry_run=False)
 
 
 def test_main_errors_on_missing_at_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv('LEARTECH_INITIATIVE_YAML', raising=False)
     missing = tmp_path / 'nope.yaml'
     with pytest.raises(click.BadParameter, match='could not read brief file'):
-        ba_agent.main.callback(brief_opt=f'@{missing}', model='m', max_turns=1)
+        ba_agent.main.callback(brief_opt=f'@{missing}', model='m', max_turns=1, dry_run=False)
 
 
 # --- Default model + max_turns are sane defaults ------------------------------
@@ -398,3 +398,58 @@ def test_default_model_is_opus_not_auto() -> None:
 
 def test_default_max_turns_is_positive() -> None:
     assert ba_agent.DEFAULT_MAX_TURNS > 0
+
+
+# --- Dry-run mode -------------------------------------------------------------
+
+
+def test_main_dry_run_skips_llm_and_prints_summary(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """--dry-run must NOT call run_ba_task and MUST exit 0 with a
+    human-readable brief summary — the LLM-free sanity-check path."""
+    monkeypatch.setenv('LEARTECH_INITIATIVE_YAML', json.dumps(_minimal_brief_dict()))
+
+    called = False
+
+    async def _fail_if_called(*_args: object, **_kwargs: object) -> int:
+        nonlocal called
+        called = True
+        raise AssertionError('run_ba_task must NOT be called under --dry-run')
+
+    monkeypatch.setattr(ba_agent, 'run_ba_task', _fail_if_called)
+    with pytest.raises(SystemExit) as exc:
+        ba_agent.main.callback(brief_opt=None, model='m', max_turns=1, dry_run=True)
+    assert exc.value.code == 0
+    assert called is False
+
+    captured = capsys.readouterr()
+    # Summary is self-describing: names the brief, mentions successCriteria
+    # count, and calls out the resolves shape (the two axes the dry-run
+    # sanity check is meant to help operators eyeball).
+    assert 'BA dry-run' in captured.out
+    assert 'fix-flaky-release' in captured.out
+    assert 'successCriteria' in captured.out
+    assert 'resolves' in captured.out
+
+
+def test_dry_run_summary_names_empty_resolves_case() -> None:
+    """A brief with `resolves: []` must be summarised distinctly so
+    operators can tell "greenfield" from "remediation" at a glance."""
+    data = _minimal_brief_dict()
+    data['resolves'] = []
+    brief = ba_agent.Brief.model_validate(data)
+    summary = ba_agent._dry_run_summary(brief)
+    assert 'nothing to remediate' in summary
+    assert 'target plan' in summary
+
+
+def test_dry_run_summary_names_multi_resolve_case() -> None:
+    """Multi-resolve briefs should be visibly multi in the summary — the
+    number of PlanRefs is the single most useful piece of information."""
+    brief = ba_agent.Brief.model_validate(_minimal_brief_dict())
+    summary = ba_agent._dry_run_summary(brief)
+    assert '2 PlanRef(s)' in summary
+    # The individual PlanRefs get listed so operators can eyeball typos.
+    assert 'foo-service-release in jx-staging' in summary
+    assert 'foo-service-release in jx-production' in summary

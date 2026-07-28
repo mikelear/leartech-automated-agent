@@ -1,0 +1,58 @@
+# Expected authored-plan shape for the new-website brief (empty resolves).
+#
+# Nothing to remediate — the plan MUST NOT carry a non-empty `remediates`
+# list (the harness rejects smuggled additions). Steps stand up the repo
+# via repo-factory then verify the release is healthy.
+
+- apiVersion: agent.leartech.io/v1alpha1
+  kind: Plan
+  metadata:
+    name: draft-launch-marketing-microsite
+    namespace: jx-staging
+    annotations:
+      leartech.io/draft: 'true'
+  spec:
+    tenant: leartech
+    triggeredBy: ba-agent
+    hold: true
+    # No `remediates` — brief.resolves is empty.
+    steps:
+      - name: create
+        agentType: leartech-agent-infra
+        repo: ''
+        inputs:
+          action: create-repo
+          newRepo: mikelear/leartech-marketing-microsite
+      - name: register-gcp
+        agentType: leartech-agent-infra
+        dependsOn: [create]
+        repo: ''
+        inputs:
+          action: register-source-config
+          service: leartech-marketing-microsite
+          cluster: gcp
+      - name: register-az
+        agentType: leartech-agent-infra
+        dependsOn: [create]
+        repo: ''
+        inputs:
+          action: register-source-config
+          service: leartech-marketing-microsite
+          cluster: az
+      - name: scaffold
+        agentType: leartech-agent-infra
+        dependsOn: [register-gcp, register-az]
+        repo: ''
+        inputs:
+          action: scaffold-pr
+          template: angular-prerendered
+          name: leartech-marketing-microsite
+      - name: verify
+        agentType: leartech-agent-infra
+        dependsOn: [scaffold]
+        repo: ''
+        inputs:
+          action: release-health-check
+          service: leartech-marketing-microsite
+          namespace: jx-staging
+          healthPath: /health
