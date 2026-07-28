@@ -1,15 +1,12 @@
 replicaCount: 1
-
 image:
-  repository: ""
-  tag: ""
+  repository: "modernburro.azurecr.io/mikelear/leartech-automated-agent"
+  tag: "0.10.155"
   pullPolicy: IfNotPresent
-
 service:
   type: ClusterIP
   port: 8080
   externalPort: 8080
-
 # Agent runtime config. Override `model` to switch Anthropic model
 # without a code change — `claude-opus-4-7` (default, balanced),
 # `claude-haiku-4-5` (cheap routine work), `claude-opus-4-7`
@@ -81,7 +78,6 @@ agent:
     # is comfortable; bump for high-traffic clusters where the steady-state
     # JWKS fetch is wasted bandwidth.
     jwksTtlSeconds: 300
-
   # Phase F.1 — default runtime is now 'job' (K8s Job per initiative; runs
   # survive API pod restarts via the orphan-killer path). Both clusters'
   # GitOps configs/leartech-automated-agent.yaml entries can drop their
@@ -91,7 +87,6 @@ agent:
   # in the template) so a future runtime variant can be introduced
   # without re-plumbing.
   runtime: "job"
-
   # V5 D2.1 — threshold (seconds) for the stale-progress detector in
   # gate/agent/run_driver.py::detect_pod_stuck_image_pull. When a run's
   # row is older than this AND the agent has not yet executed its first
@@ -103,7 +98,6 @@ agent:
   # Lowered to 60s in preview-deploy integration tests so the broken-
   # image-tag flow finishes within the test's wait budget.
   staleProgressThresholdSeconds: 600
-
 # Anthropic SDK + agent loops are memory-heavy on substantial initiatives.
 # 2026-05-20: mortgages-gw-add-mcp-mock-sourcing run OOMKilled at the 1 GiB
 # limit during real code work (3 MCP tools + mock data + endpoint
@@ -118,27 +112,23 @@ resources:
   limits:
     cpu: 2000m
     memory: 4Gi
-
 livenessProbe:
   httpGet:
     path: /health
     port: 8080
   initialDelaySeconds: 10
   periodSeconds: 30
-
 readinessProbe:
   httpGet:
     path: /readyz
     port: 8080
   initialDelaySeconds: 5
   periodSeconds: 10
-
 autoscaling:
   enabled: false
   minReplicas: 1
   maxReplicas: 3
   targetCPUUtilizationPercentage: 80
-
 ingress:
   enabled: false
   host: ""
@@ -146,7 +136,6 @@ ingress:
   annotations: {}
   labels: {}
   pathType: ImplementationSpecific
-
 # Grafana dashboards shipped with the chart (templates/grafana-dashboards.yaml +
 # dashboards/*.json). Each JSON → a ConfigMap the cluster Grafana sidecar
 # auto-imports (label jenkins-x.io/grafana-dashboard, searchNamespace ALL). Same
@@ -156,7 +145,6 @@ ingress:
 grafanaDashboards:
   enabled: true
   folder: "Leartech Agents"
-
 # Secrets — deployment references existing K8s Secret names; ExternalSecrets
 # materialise them per-cluster using the auth-service pattern (same chart,
 # both backends represented, cluster's GitOps configs/<chart>.yaml flips
@@ -174,7 +162,6 @@ secrets:
   ghToken:
     secretName: tekton-git
     secretKey: password
-
 # Phase B (B.3+B.4) — V2 plumbing. Admin-token gate for POST /admin/cleanup.
 # Lifted out of `.Values.secrets` into a top-level block so it sits next to
 # its own per-cluster ESO source-path toggles (mirroring `.Values.postgresql`).
@@ -212,41 +199,38 @@ adminToken:
     # documented in memory `reference_cross_cluster_secret_sync`.
     key: secret/data/leartech/automated-agent/admin-token
     property: token
-
 # ExternalSecret rendering — both clusters' shape kept here so the chart is
 # multi-cluster-ready out of the box. Activate one via the cluster's
 # configs/leartech-automated-agent.yaml override; never both at once.
 externalSecrets:
   eso:
-    enabled: false  # set true on AZ via configs/leartech-automated-agent.yaml (ESO -> leartech-secrets)
+    enabled: false # set true on AZ via configs/leartech-automated-agent.yaml (ESO -> leartech-secrets)
     storeName: leartech-secrets
   gcp:
-    enabled: false  # set true on GCP via configs/leartech-automated-agent.yaml
+    enabled: false # set true on GCP via configs/leartech-automated-agent.yaml
     projectId: product-first
     secrets:
-      - name: leartech-ai-gateway-key
-        data:
-          # Materialised k8s secret key = AI_GATEWAY_API_KEY (provider-neutral).
-          # The GSM SOURCE (key: claude-api-key) is unchanged for now so the
-          # agent keeps working on direct Anthropic; the GitOps cutover repoints
-          # this to the gateway virtual-key source when agent.aiGateway.baseUrl
-          # is flipped on. See docs/AI-GATEWAY-MIGRATION-PLAN.md ("Naming").
-          - name: AI_GATEWAY_API_KEY
-            key: claude-api-key
-
+    - name: leartech-ai-gateway-key
+      data:
+      # Materialised k8s secret key = AI_GATEWAY_API_KEY (provider-neutral).
+      # The GSM SOURCE (key: claude-api-key) is unchanged for now so the
+      # agent keeps working on direct Anthropic; the GitOps cutover repoints
+      # this to the gateway virtual-key source when agent.aiGateway.baseUrl
+      # is flipped on. See docs/AI-GATEWAY-MIGRATION-PLAN.md ("Naming").
+      - name: AI_GATEWAY_API_KEY
+        key: claude-api-key
   azure:
-    enabled: false  # set true on AZ via configs/leartech-automated-agent.yaml
+    enabled: false # set true on AZ via configs/leartech-automated-agent.yaml
     vaultMountPoint: kubernetes
     vaultRole: jx-vault
     secrets:
-      - name: leartech-ai-gateway-key
-        data:
-          # See the gcp note: neutral k8s key; Vault SOURCE unchanged until the
-          # GitOps cutover repoints it at the gateway virtual key.
-          - name: AI_GATEWAY_API_KEY
-            key: secret/data/ai/claude
-            property: apiKey
-
+    - name: leartech-ai-gateway-key
+      data:
+      # See the gcp note: neutral k8s key; Vault SOURCE unchanged until the
+      # GitOps cutover repoints it at the gateway virtual key.
+      - name: AI_GATEWAY_API_KEY
+        key: secret/data/ai/claude
+        property: apiKey
 # tekton-git — materialises the basic-auth Secret used by `gh` / git inside
 # the agent pod. Toggle via configs/<chart>.yaml. See
 # templates/externalsecret-tekton-git.yaml for the convention discussion
@@ -255,7 +239,7 @@ tektonGit:
   eso:
     storeName: leartech-secrets
   create: false
-  backend: ""  # "gsm" | "vault"
+  backend: "" # "gsm" | "vault"
   gsm:
     projectId: product-first
     key: tf-jx-usable-bird-jx-pipeline-user
@@ -263,11 +247,9 @@ tektonGit:
     mountPoint: kubernetes
     role: jx-vault
     key: secret/data/jx/pipelineUser
-
 # Where consumer-repo checkouts get mounted in cluster mode.
 # The Initiative agent resolves repo paths against this prefix.
 leartechRepoRoot: /workspace
-
 # Postgres-backed initiative catalog. Mirrors auth-service's pattern:
 # - CNPG Database CR provisions the per-service DB in the shared cluster
 #   (leartech-staging lives in cnpg-system; Database CR sits in this
@@ -296,7 +278,7 @@ leartechRepoRoot: /workspace
 # endpoints return 503 and the agent falls back to filesystem-only YAML.
 # Use that for previews or any cluster without CNPG.
 postgresql:
-  enabled: false  # flip via configs/leartech-automated-agent.yaml on clusters with CNPG
+  enabled: false # flip via configs/leartech-automated-agent.yaml on clusters with CNPG
   # DO NOT enable on preview deployments. Preview environments don't have the
   # leartech-staging CNPG cluster, the role won't exist, and the ExternalSecret
   # will 404 on the workload Vault/GSM path — pod CrashLoops on startup.
@@ -328,7 +310,6 @@ postgresql:
       # KV-v2 path. The `/data/` segment is required by ESO's vault driver.
       key: secret/data/automated-agent/automated-agent-db
       property: dsn
-
 # Phase D.2 — Job-per-run infrastructure. Enables the chart to render:
 #   - ServiceAccount `<fullname>-job-runner` (spawned Job pods)
 #   - ServiceAccount `<fullname>` (API pod — wired into deployment.yaml)
@@ -382,7 +363,6 @@ jobs:
   # reach a terminal state. 24 h gives humans a comfortable window to read
   # logs after a failed run before K8s cleans up.
   ttlSecondsAfterFinished: 86400
-
 # BA (Business Analyst) agent — first-class AgentType wiring.
 #
 # The BA agent (gate/agent/ba_agent.py) is a distinct agent role from the dev
@@ -406,35 +386,29 @@ baAgent:
   # (when the cluster's ESO backend toggle is also on), and the NetworkPolicy.
   # `false` = zero surface; safe default for previews.
   registerAgentType: false
-
   # Image override — leave empty to derive `<prefix>/leartech-agent-py:<tag>`
   # from the API image's registry (same rule deployment.yaml uses for
   # LEARTECH_INITIATIVE_DEFAULT_IMAGE). Set explicitly when pinning a specific
   # rc build for BA-specific testing.
   image: ""
-
   # ServiceAccount the spawned BA Job pod runs as. Empty defaults to the
   # chart's shared `<fullname>-job-runner` SA. Override when a per-agent SA
   # with a distinct trust-boundary is provisioned.
   serviceAccountName: ""
-
   # AI gateway wiring. baseUrl is hardcoded to the in-cluster Service so
   # every cluster gets the same value without a GitOps overlay — override
   # only if a cluster ever runs the gateway under a different name/port.
   aiGateway:
     baseUrl: "http://leartech-ai-gateway.ai-gateway.svc:8080"
-
   # Logical model name the gateway resolves against the virtual key's
   # `model_allowlist`. `claude` = "the gateway's current-best Claude
   # backend". Pin explicitly (e.g. `claude-opus-4-8`) when reproducibility
   # matters — the BA module's in-code default is Opus 4.8 either way.
   model: "claude"
-
   # Cluster label baked into env for observability. Empty = fall through to
   # the CLUSTER env var (rendered by GitOps overlays on the API pod) at
   # helm-render time; unresolvable → "unknown".
   cluster: ""
-
   # Resources injected into the BA Job pod at spawn time. Match the API
   # pod's shape — the BA agent runs Claude Agent SDK loops just like the
   # dev agent, so memory ceilings need similar headroom.
@@ -445,16 +419,13 @@ baAgent:
     limits:
       cpu: 2000m
       memory: 4Gi
-
   # Wall-clock cap on a single BA run. 1h keeps a comfortable ceiling — a
   # BA session that authors ~5 plans typically resolves in <15 min, and the
   # 200-turn LLM budget bounds it well within an hour.
   activeDeadlineSeconds: 3600
-
   # Garbage-collect the Job (and its Pod) N seconds after terminal. 24h so
   # a human can read logs after a BA run before K8s reclaims the pod.
   ttlSecondsAfterFinished: 86400
-
   # Secret wiring — the CRD spec has dedicated fields for the LLM
   # credential secret name/key. The controller reads these to build the
   # pod's ANTHROPIC_API_KEY secretKeyRef (its name is fixed by the SDK
@@ -464,7 +435,6 @@ baAgent:
     aiGatewayKey:
       secretName: leartech-ai-gateway-ba-key
       secretKey: AI_GATEWAY_API_KEY
-
   # ExternalSecret backend source paths. Named alongside the top-level
   # `externalSecrets.{gcp,azure}` toggles — the ExternalSecret template
   # AND-gates on both `baAgent.externalSecret.enabled` and the cluster's
@@ -483,7 +453,6 @@ baAgent:
     # property carries the virtual key value.
     key: secret/data/ai/agent-ba-gateway
     property: apiKey
-
   # NetworkPolicy — gateway-only egress + internal MCP + k8s API + DNS.
   # See templates/networkpolicy-ba.yaml for the threat-model rationale.
   networkPolicy:
@@ -502,7 +471,6 @@ baAgent:
     # Standard Kubernetes-service CIDR. Override per cluster if the API
     # server sits outside 10.0.0.0/8 (rare — GKE + AKS defaults fit).
     apiServerCIDR: "10.0.0.0/8"
-
 jxRequirements:
   ingress:
     domain: ""
