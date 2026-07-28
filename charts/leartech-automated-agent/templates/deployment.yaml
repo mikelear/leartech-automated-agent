@@ -178,6 +178,25 @@ spec:
               name: {{ .Values.secrets.aiGatewayKey.secretName }}
               key: {{ .Values.secrets.aiGatewayKey.secretKey }}
               optional: true
+        {{- if .Values.gateway.videoReviewUrl }}
+        # video_review vision path (S13, OpenAI seam). Independent of the
+        # whole-agent baseUrl repoint above: when gateway.videoReviewUrl is set,
+        # video_review posts image_url + tool-calls to ${url}/v1/chat/completions
+        # for a vision-capable model, authed with the SEPARATE `agent-gate` key
+        # (secrets.gatewayApiKey) so the gate's gpt-4o spend meters distinctly from
+        # the agent's key. optional:true secretRef degrades to the ANTHROPIC_API_KEY
+        # fallback if the gate key hasn't synced yet.
+        - name: AI_GATEWAY_URL
+          value: {{ .Values.gateway.videoReviewUrl | quote }}
+        - name: AI_GATEWAY_API_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.secrets.gatewayApiKey.secretName }}
+              key: {{ .Values.secrets.gatewayApiKey.secretKey }}
+              optional: true
+        - name: GATEWAY_VISION_MODEL
+          value: {{ .Values.gateway.visionModel | quote }}
+        {{- end }}
         - name: GH_TOKEN
           valueFrom:
             secretKeyRef:
