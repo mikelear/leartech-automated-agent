@@ -1000,6 +1000,111 @@ fi
 auth_cleanup
 auth_server_pid=""
 
+# ── BA test harness smoke — draft-by-default contract + --dry-run CLI ──
+# The BA (Business Analyst) agent is proven WITHOUT firing repo-factory-
+# scale work via:
+#   1. a pure-function validator (gate/agent/ba_test_harness.py) that
+#      enforces the draft-by-default + verification invariants against
+#      any BA-authored plan, and
+#   2. a `--dry-run` flag on `python -m gate.agent.ba_agent` that
+#      validates + summarises a brief WITHOUT calling the gateway.
+# This smoke exercises both surfaces against the three golden fixtures
+# (tests/testdata/ba_briefs/*) so a packaging regression that omits
+# either module OR the fixtures OR the --dry-run wire fails here.
+# See docs/BA-TEST-HARNESS.md for the full path.
+if uv run python -c "
+from pathlib import Path
+import yaml
+from gate.agent import ba_agent
+from gate.agent.ba_test_harness import (
+    CANONICAL_VERIFICATION_ACTION,
+    VERIFICATION_ACTION_MARKERS,
+    PlanShapeError,
+    validate_authored_plan,
+    validate_authored_plans,
+)
+
+fixtures = Path('tests/testdata/ba_briefs')
+assert fixtures.is_dir(), f'missing fixtures dir {fixtures} — BA harness broken'
+for name in ('infra-remediation', 'new-website', 'cluster-wide-multi-resolve'):
+    brief_path = fixtures / name / 'brief.yaml'
+    plans_path = fixtures / name / 'expected-plans.yaml'
+    assert brief_path.is_file(), f'missing {brief_path}'
+    assert plans_path.is_file(), f'missing {plans_path}'
+    brief = ba_agent.load_brief(brief_path.read_text())
+    plans = yaml.safe_load(plans_path.read_text())
+    # Positive: golden fixtures satisfy the harness.
+    validate_authored_plans(brief, plans)
+
+# Negative: each invariant is load-bearing.
+brief = ba_agent.load_brief((fixtures / 'infra-remediation' / 'brief.yaml').read_text())
+plans = yaml.safe_load((fixtures / 'infra-remediation' / 'expected-plans.yaml').read_text())
+
+import copy
+missing_hold = copy.deepcopy(plans[0])
+missing_hold['spec']['hold'] = False
+try:
+    validate_authored_plan(brief, missing_hold)
+except PlanShapeError as e:
+    assert 'not held' in str(e), e
+else:
+    raise AssertionError('validator failed to flag hold:false')
+
+missing_ann = copy.deepcopy(plans[0])
+missing_ann['metadata']['annotations'] = {}
+try:
+    validate_authored_plan(brief, missing_ann)
+except PlanShapeError as e:
+    assert 'draft-annotated' in str(e), e
+else:
+    raise AssertionError('validator failed to flag missing draft annotation')
+
+bad_final_step = copy.deepcopy(plans[0])
+bad_final_step['spec']['steps'][-1]['inputs']['action'] = 'push-config'
+try:
+    validate_authored_plan(brief, bad_final_step)
+except PlanShapeError as e:
+    assert 'verification' in str(e).lower(), e
+else:
+    raise AssertionError('validator failed to flag non-verification final step')
+
+print(f'OK: BA harness validated 3 golden fixtures + 3 negative cases; '
+      f'canonical action={CANONICAL_VERIFICATION_ACTION!r}, '
+      f'markers={len(VERIFICATION_ACTION_MARKERS)}')
+" > /tmp/e2e-ba-harness.txt 2>&1; then
+  echo "✓ BA test harness (validator + 3 golden fixtures + 3 negative cases)"
+else
+  echo "✗ BA test harness smoke failed" >&2
+  cat /tmp/e2e-ba-harness.txt >&2
+  failures=$((failures + 1))
+fi
+
+# --dry-run CLI: brief validates + summary prints WITHOUT the gateway.
+# Deliberately does NOT set ANTHROPIC_API_KEY — dry-run must not need it.
+if env -u ANTHROPIC_API_KEY uv run python -m gate.agent.ba_agent \
+     --brief @tests/testdata/ba_briefs/infra-remediation/brief.yaml \
+     --dry-run > /tmp/e2e-ba-dryrun.txt 2>&1; then
+  grep -q 'no plans authored' /tmp/e2e-ba-dryrun.txt \
+    && grep -q 'fix-gcp-foo-service-release' /tmp/e2e-ba-dryrun.txt \
+    && grep -q 'PlanRef' /tmp/e2e-ba-dryrun.txt \
+    && echo "✓ BA --dry-run CLI (brief validated, summary printed, no gateway call)" \
+    || { echo "✗ BA --dry-run: expected markers missing from output" >&2; cat /tmp/e2e-ba-dryrun.txt >&2; failures=$((failures + 1)); }
+else
+  echo "✗ BA --dry-run: CLI exited non-zero (expected 0 for a valid brief)" >&2
+  cat /tmp/e2e-ba-dryrun.txt >&2
+  failures=$((failures + 1))
+fi
+
+# --dry-run on an INVALID brief exits with an error (proves the flag doesn't silently pass).
+if env -u ANTHROPIC_API_KEY uv run python -m gate.agent.ba_agent \
+     --brief 'name: x' --dry-run > /tmp/e2e-ba-dryrun-bad.txt 2>&1; then
+  echo "✗ BA --dry-run should reject an invalid brief but exited 0" >&2
+  cat /tmp/e2e-ba-dryrun-bad.txt >&2
+  failures=$((failures + 1))
+else
+  echo "✓ BA --dry-run rejects invalid brief (missing goal/successCriteria)"
+fi
+
 if [ "${failures}" -gt 0 ]; then
   echo
   echo "✗ ${failures} e2e check(s) failed" >&2
