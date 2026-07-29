@@ -191,7 +191,12 @@ secrets:
 # in-cluster gateway to activate it.
 gateway:
   videoReviewUrl: ""
-  visionModel: azure-openai
+  # Vision model for gate.tools.video_review, resolved at the gateway. `claude`
+  # (each cluster's own Anthropic, vision + tool-calls over the compat seam —
+  # leartech-ai-gateway#32) rather than `azure-openai` (MQube-owned, AZ-only —
+  # not registered on GCP). Video review stays gateway-only + fail-closed; it is
+  # SKIPPED until videoReviewUrl is set in the per-cluster GitOps overlay.
+  visionModel: claude
 
 # Phase B (B.3+B.4) — V2 plumbing. Admin-token gate for POST /admin/cleanup.
 # Lifted out of `.Values.secrets` into a top-level block so it sits next to
@@ -258,6 +263,15 @@ externalSecrets:
         data:
           - name: AI_GATEWAY_API_KEY
             key: agent-gate-gateway-key
+      # Per-use-case gateway virtual key for the AGENT's own LLM calls (`agent`,
+      # minted ai-bus-side). Materialised here so the GitOps cutover can repoint
+      # secrets.aiGatewayKey → this secret + flip agent.aiGateway.baseUrl, moving
+      # the agent off direct-Anthropic onto the metered gateway. Unused until that
+      # repoint (safe to land ahead of the overlay).
+      - name: leartech-ai-gateway-agent-key
+        data:
+          - name: AI_GATEWAY_API_KEY
+            key: agent-gateway-key
 
   azure:
     enabled: false  # set true on AZ via configs/leartech-automated-agent.yaml
@@ -278,6 +292,15 @@ externalSecrets:
         data:
           - name: AI_GATEWAY_API_KEY
             key: secret/data/ai/agent-gate-gateway
+            property: apiKey
+      # Per-use-case gateway virtual key for the AGENT's own LLM calls (`agent`,
+      # minted ai-bus-side; KV ai-agent-gateway). Materialised for the GitOps
+      # cutover to repoint secrets.aiGatewayKey at + flip baseUrl. Unused until
+      # then (safe to land ahead of the overlay).
+      - name: leartech-ai-gateway-agent-key
+        data:
+          - name: AI_GATEWAY_API_KEY
+            key: secret/data/ai/agent-gateway
             property: apiKey
 
 # tekton-git — materialises the basic-auth Secret used by `gh` / git inside
