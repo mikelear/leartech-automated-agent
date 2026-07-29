@@ -34,17 +34,21 @@ def test_openai_user_message_omits_expected_flow_when_none() -> None:
 
 
 def _openai_resp(args: dict) -> dict:
-    return {'choices': [{'message': {'tool_calls': [
-        {'function': {'name': 'report_anomalies', 'arguments': json.dumps(args)}}
-    ]}}]}
+    return {
+        'choices': [
+            {'message': {'tool_calls': [{'function': {'name': 'report_anomalies', 'arguments': json.dumps(args)}}]}}
+        ]
+    }
 
 
 def test_parse_openai_tool_call_extracts_verdict() -> None:
-    resp = _openai_resp({
-        'anomalies_found': True,
-        'summary': 'Login button missing in frame 2 onwards.',
-        'flagged_frames': [2, 3, 4],
-    })
+    resp = _openai_resp(
+        {
+            'anomalies_found': True,
+            'summary': 'Login button missing in frame 2 onwards.',
+            'flagged_frames': [2, 3, 4],
+        }
+    )
     v = parse_openai_tool_call(resp, '02-login')
     assert v.spec_name == '02-login'
     assert v.anomalies_found is True

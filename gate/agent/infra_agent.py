@@ -43,6 +43,7 @@ from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative import INITIATIVE_TEKTON_TOOLS, WRITE_MODE_TOOLS
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
+from gate.agent.test_mode import parse_test_mode, run_test_mode
 from gate.mcp_servers import build_remote_mcp_servers
 
 DEFAULT_MAX_TURNS = 200
@@ -68,7 +69,11 @@ JX_RELEASE_TOOLS = [
 # and jx-release MCPs. Deterministic repo ops go through repo-factory (server-side); the
 # release check goes through jx-release; Bash is for the optional /health tail (kubectl/curl).
 INFRA_ALLOWED_TOOLS = [
-    *WRITE_MODE_TOOLS, *MCP_ALLOWED_TOOLS, *INITIATIVE_TEKTON_TOOLS, *REPO_FACTORY_TOOLS, *JX_RELEASE_TOOLS,
+    *WRITE_MODE_TOOLS,
+    *MCP_ALLOWED_TOOLS,
+    *INITIATIVE_TEKTON_TOOLS,
+    *REPO_FACTORY_TOOLS,
+    *JX_RELEASE_TOOLS,
 ]
 
 INFRA_SYSTEM_PROMPT = """\
@@ -221,6 +226,35 @@ async def run_infra_task(
     max_turns: int = DEFAULT_MAX_TURNS,
 ) -> int:
     """Drive the infra agent through one action. Returns the process exit code."""
+    # ── TEST-MODE short-circuit ────────────────────────────────────────────
+    # A plan step may set ``inputs.testMode`` to skip the LLM/SDK loop
+    # entirely. ONLY honored when LEARTECH_AGENT_TEST_MODE_ALLOWED=true is
+    # set — otherwise the directive is IGNORED. Placed BEFORE the API-key
+    # check because test-mode's whole point is to skip the LLM. The infra
+    # agent's PR-backed actions (register-source-config, smoke-pr) don't
+    # call open_pr directly — the repo-factory MCP handles that — so we
+    # don't build a manual open_pr_args here; the MCP's own test-mode
+    # coverage exercises those flows via a different plan step.
+    test_mode_spec = parse_test_mode(inputs)
+    if test_mode_spec is not None:
+        obslog.info(
+            'run_start',
+            f'infra agent action={action} (test-mode)',
+            logger='infra',
+            action=action,
+            test_mode=True,
+        )
+        exit_code = await run_test_mode(test_mode_spec, open_pr_args=None)
+        obslog.info(
+            'run_end',
+            f'infra agent action={action} done (test-mode)',
+            logger='infra',
+            action=action,
+            exit_code=exit_code,
+            test_mode=True,
+        )
+        return exit_code
+
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
             'ANTHROPIC_API_KEY not set. Run `leartech-claude-key` to fetch from the cluster.',
@@ -263,7 +297,10 @@ async def run_infra_task(
         obslog.info(
             'health_verdict',
             f'release-health-check verdict={verdict or "MISSING"}',
-            logger='infra', action=action, verdict=verdict or 'MISSING', exit_code=exit_code,
+            logger='infra',
+            action=action,
+            verdict=verdict or 'MISSING',
+            exit_code=exit_code,
         )
 
     obslog.info('run_end', f'infra agent action={action} done', logger='infra', action=action, exit_code=exit_code)

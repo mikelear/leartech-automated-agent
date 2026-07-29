@@ -76,6 +76,17 @@ agent:
     # JWKS fetch is wasted bandwidth.
     jwksTtlSeconds: 300
 
+  # TEST-MODE guard — enables the ``inputs.testMode`` short-circuit in
+  # gate/agent/test_mode.py so a plan step can skip the LLM/SDK loop and
+  # self-report a directed phase (Succeeded/Failed) without spending tokens.
+  # DEFAULT: false — production clusters MUST leave this off. When false the
+  # env var is not emitted at all, so any stray testMode directive is IGNORED
+  # by the agent (structural safety, not just documentation). Flip to true
+  # ONLY on test-shaped deployments (staging fixtures, e2e clusters, ephemeral
+  # test rigs) where you want to exercise the orchestration paths without
+  # burning LLM budget or opening real PRs. See gate/agent/test_mode.py.
+  testModeAllowed: false
+
   # V5 D2.1 — threshold (seconds) for the stale-progress detector in
   # gate/agent/run_driver.py::detect_pod_stuck_image_pull. When a run's
   # row is older than this AND the agent has not yet executed its first

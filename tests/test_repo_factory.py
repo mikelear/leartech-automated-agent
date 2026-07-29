@@ -175,9 +175,7 @@ def test_open_scaffold_pr_propagates_run_failure(tmp_path: Path, monkeypatch: py
 
     monkeypatch.setattr(repo_factory, 'run', _boom)
     with pytest.raises(RuntimeError, match='git clone failed'):
-        repo_factory.open_scaffold_pr(
-            template='go', new_name='x', target_repo='mikelear/y', workdir=tmp_path / 'wd'
-        )
+        repo_factory.open_scaffold_pr(template='go', new_name='x', target_repo='mikelear/y', workdir=tmp_path / 'wd')
 
 
 def test_is_text_file_false_on_missing(tmp_path: Path) -> None:
@@ -190,7 +188,10 @@ def test_default_org_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_template_language_key_and_slug() -> None:
-    assert repo_factory.resolve_template('go') == ('mikelear/leartech-go-service-template', 'leartech-go-service-template')
+    assert repo_factory.resolve_template('go') == (
+        'mikelear/leartech-go-service-template',
+        'leartech-go-service-template',
+    )
     assert repo_factory.resolve_template('angular') == (
         'mikelear/leartech-angular-service-template',
         'leartech-angular-service-template',

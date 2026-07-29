@@ -127,9 +127,17 @@ def register_source_config(
     run(['git', 'push', '-u', 'origin', branch], cwd=work)
     pr_url = run(
         [
-            'gh', 'pr', 'create', '--repo', gitops, '--head', branch,
-            '--title', f'chore: register {service} in source-config',
-            '--body', (
+            'gh',
+            'pr',
+            'create',
+            '--repo',
+            gitops,
+            '--head',
+            branch,
+            '--title',
+            f'chore: register {service} in source-config',
+            '--body',
+            (
                 f'Register `{service}` on {cluster} ({gitops}) so Lighthouse/webhooks pick it up. '
                 f'Deterministic edit via gate.tools.source_config — appended to '
                 f'`spec.groups[].repositories[]`.'

@@ -146,7 +146,9 @@ def _make_caller(url: str, timeout: float) -> CallToolFn:
             detail = _flatten(exc)
             log.warning('downstream MCP call %r failed: %s', name, detail)
             return mcp_types.CallToolResult(
-                content=[mcp_types.TextContent(type='text', text=f'bridge: downstream MCP call {name!r} failed: {detail}')],
+                content=[
+                    mcp_types.TextContent(type='text', text=f'bridge: downstream MCP call {name!r} failed: {detail}')
+                ],
                 isError=True,
             )
 

@@ -86,6 +86,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from gate import obslog
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.lessons import render_for
+from gate.agent.test_mode import parse_test_mode, run_test_mode
 from gate.mcp_servers import build_ai_gateway_web_server, build_remote_mcp_servers
 
 # BA agent runs on Opus 4.8 pinned — NOT "auto". The gateway's router can
@@ -446,6 +447,34 @@ async def run_ba_task(
     Exit code tracks whether the SDK loop ran to completion without an error,
     not whether any specific plan was authored.
     """
+    # ── TEST-MODE short-circuit ────────────────────────────────────────────
+    # A plan step may set ``brief.testMode`` (as an extra dict, since Brief
+    # uses ``extra='allow'``) to skip the LLM/SDK loop entirely. ONLY
+    # honored when LEARTECH_AGENT_TEST_MODE_ALLOWED=true is set — otherwise
+    # the directive is IGNORED. The BA agent NEVER opens a PR, so we pass
+    # ``open_pr_args=None`` — a ``prOutcome`` other than 'none' just logs a
+    # skip line (BA is not a PR-backed step).
+    test_mode_inputs = brief.model_dump(by_alias=True, mode='json')
+    test_mode_spec = parse_test_mode(test_mode_inputs)
+    if test_mode_spec is not None:
+        obslog.info(
+            'run_start',
+            f'ba agent brief={brief.name} (test-mode)',
+            logger='ba',
+            brief=brief.name,
+            test_mode=True,
+        )
+        exit_code = await run_test_mode(test_mode_spec, open_pr_args=None)
+        obslog.info(
+            'run_end',
+            f'ba agent brief={brief.name} done (test-mode)',
+            logger='ba',
+            brief=brief.name,
+            exit_code=exit_code,
+            test_mode=True,
+        )
+        return exit_code
+
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
             'ANTHROPIC_API_KEY not set. Run `leartech-claude-key` to fetch from the cluster.',

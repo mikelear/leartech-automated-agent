@@ -310,6 +310,10 @@ class _FakeInitiative:
     feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
     # Hold-as-init-option — the agent renders `/hold` posting only when true.
     hold: bool = False
+    # Test-mode directive — default None so these tests hit the real
+    # resume-detection + SDK-loop paths instead of the test-mode
+    # short-circuit added later.
+    test_mode: dict[str, object] | None = None
 
     @property
     def primary(self) -> _FakeRepo:
