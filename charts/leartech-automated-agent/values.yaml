@@ -50,17 +50,11 @@ agent:
   # the fail-closed guard, which is what proves the chart config is
   # complete before merge.
   auth:
-    # Master toggle — when false, no LEARTECH_AUTH_* env vars are rendered
-    # at all (the middleware then boots in optional mode via env-defaults).
-    # Kept as an escape hatch for a hypothetical dev cluster that wants
-    # anonymous traffic, BUT: leaving this on (the default) is what
-    # implements C1's fail-closed contract.
-    enabled: true
-    # required=true is the point of C1. The env var LEARTECH_AUTH_REQUIRED
-    # defaults to "true" in load_settings_from_env now, so even a cluster
-    # that omits this field still fails closed. Keeping the field explicit
-    # here documents intent + gives GitOps overlays a clean anchor.
-    required: true
+    # OIDC bearer validation is ALWAYS on (C1 hardening, 2026-07). The former
+    # `enabled` / `required` toggles were removed — auth is permanent on every
+    # cluster + preview (fail-closed), and the middleware defaults fail-closed
+    # in code too, so there is no anonymous mode to gate. issuer / audience /
+    # tenantClaim / jwksTtl remain configurable per cluster below.
     # Hydra staging (shared with orchestrator + auth-service). Per-cluster
     # GitOps overlays MAY override to a per-cluster Hydra once we split;
     # the chart default targets the shared staging Hydra so previews boot
@@ -81,16 +75,6 @@ agent:
     # is comfortable; bump for high-traffic clusters where the steady-state
     # JWKS fetch is wasted bandwidth.
     jwksTtlSeconds: 300
-
-  # Phase F.1 — default runtime is now 'job' (K8s Job per initiative; runs
-  # survive API pod restarts via the orphan-killer path). Both clusters'
-  # GitOps configs/leartech-automated-agent.yaml entries can drop their
-  # explicit `agent.runtime: "job"` override now that the chart default
-  # encodes the intent. The asyncio in-process path (pre-F code) is gone
-  # — no other valid value today. Kept as a value (rather than hardcoded
-  # in the template) so a future runtime variant can be introduced
-  # without re-plumbing.
-  runtime: "job"
 
   # V5 D2.1 — threshold (seconds) for the stale-progress detector in
   # gate/agent/run_driver.py::detect_pod_stuck_image_pull. When a run's
