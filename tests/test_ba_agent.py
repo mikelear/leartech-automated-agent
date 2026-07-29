@@ -469,7 +469,7 @@ def test_authoring_capabilities_render_has_surface_and_gaps() -> None:
     assert 'register-source-config' in cap and 'release-health-check' in cap
     # gaps are reported, not authored as phantom steps
     assert 'capability_gaps' in cap
-    assert 'needs-infra:provision-secret' in cap
+    assert 'needs-human:provision-secret' in cap
 
 
 def test_capabilities_injected_into_system_prompt() -> None:

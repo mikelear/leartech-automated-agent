@@ -11,15 +11,17 @@
 #      (dev: gate/agent/main.py contract; infra: gate/agent/infra_agent.py ACTIONS), and
 #   2. add an entry under that agent_type here (flip a `planned` action to `available`).
 # The BA can author it the NEXT deploy — no ba_agent code change. Infra is the
-# privileged / restricted agent, so most new cluster-side powers (secrets, config,
-# provider ops) land as new infra ACTIONS. Keep this file in sync with the controller
-# chart's agentTypes.defaults + each agent entrypoint's real contract.
+# privileged / restricted agent, so most new cluster-side powers (config, provider
+# wiring, release ops) land as new infra ACTIONS. EXCEPTION: secret VALUES are
+# human-owned by design and are NOT a future infra action (see capability_gaps).
+# Keep this file in sync with the controller chart's agentTypes.defaults + each
+# agent entrypoint's real contract.
 #
 # ── ROUTING (how the BA picks an agent_type for a step) ─────────────────────────
 routing:
   - "In-repo change (code, chart/values edits, tests) -> a DEV agent (leartech-agent-<lang>) as a PR. e.g. 'set database.enabled=false in the hello-go7 chart' is a dev PR."
-  - "Cluster-side / privileged op (source-config, deploy-config, release verification, and — in future — secret/config/provider wiring) -> leartech-agent-infra via an ACTION. Infra is the restricted capability-holder."
-  - "If the fix needs a power that is NOT an `available` action below (e.g. provisioning a secret today): do NOT author a phantom step. Do BOTH — (1) author the executable fix that unblocks it NOW if one exists (usually a DEV PR that removes the need, e.g. database.enabled=false), AND (2) REPORT the matching capability-gap (needs-infra:<action>) so the infra surface grows to cover it properly later. The gap is a REPORTED line in your summary, not a plan step, so it never competes with the executable fix. If no executable fix exists at all, author only the verify step and report the gap alone."
+  - "Cluster-side / privileged op (source-config, deploy-config, release verification, and — in future — config/provider wiring) -> leartech-agent-infra via an ACTION. Infra is the restricted capability-holder. NOTE: secret VALUES are human-owned, not an infra action (see capability_gaps)."
+  - "If the fix needs a power that is NOT an `available` action below (e.g. provisioning a secret value): do NOT author a phantom step. Do BOTH — (1) author the executable fix that unblocks it NOW if one exists (usually a DEV PR that removes the need, e.g. database.enabled=false), AND (2) REPORT the matching capability-gap (needs-infra:<action> for a future infra power, or needs-human:<x> for human-owned work like secret provisioning). The gap is a REPORTED line in your summary, not a plan step, so it never competes with the executable fix — the plan stays paused for the human owner. If no executable fix exists at all, author only the verify step and report the gap alone."
 
 # ── AGENT TYPES ────────────────────────────────────────────────────────────────
 agent_types:
@@ -62,11 +64,10 @@ agent_types:
         status: available
         inputs: {service: "service name", cluster: "gcp|az"}
         does: "Verify a release deployed HEALTHY. Use this as the FINAL verify step of every remediation plan."
-      # --- PLANNED (not yet implemented — do NOT author; report as a capability-gap) ---
-      # When one of these ships (entrypoint + status: available), the BA can author it.
-      provision-secret:
-        status: planned
-        would_do: "Provision/sync a secret into a cluster's backend (GSM/Vault/AKV) + its ExternalSecret."
+      # --- PLANNED actions land here (status: planned) once an infra power is on
+      #     the roadmap. NOTE: secret PROVISIONING is deliberately NOT here —
+      #     secrets are human-owned by design (see capability_gaps), not a future
+      #     infra action.
 
   # The BA itself — never author steps targeting leartech-agent-ba.
   leartech-agent-ba:
@@ -79,9 +80,9 @@ agent_types:
 # `needs-human` line naming the gap. Each gap is a candidate to become an infra action
 # (that's how the infra surface grows to make future remediations fully automatable).
 capability_gaps:
-  - id: needs-infra:provision-secret
-    when: "the fix requires creating/rotating a secret in the backend (GSM/Vault/AKV)"
-    today: "no infra action yet (see infra.actions.provision-secret: planned). AUTHOR BOTH: the executable dev PR that removes the need now (e.g. database.enabled=false) AND report this gap so provision-secret gets built as a real infra action."
+  - id: needs-human:provision-secret
+    when: "the fix requires creating/rotating a secret value in the backend (GSM/Vault/AKV)"
+    today: "secrets are HUMAN-OWNED BY DESIGN — no agent provisions secret values (the value is sensitive and often depends on real infra, e.g. a DB DSN needs a real database). AUTHOR the executable fix that removes the need if one exists (e.g. a DEV PR setting database.enabled=false) AND report this gap so the secret's human owner provisions the value + the plan waits (paused) for them. Do NOT plan to automate this."
   - id: needs-human:gitops-overlay
     when: "the fix requires editing a cluster GitOps overlay directly (helmfiles / config-root) or a cloud console / IAM change"
     today: "operator/GitOps only — report it as needs-human"
