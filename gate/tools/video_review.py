@@ -28,17 +28,18 @@ import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 DEFAULT_FRAME_COUNT = 8
 DEFAULT_MAX_WIDTH = 800
-DEFAULT_MODEL = 'claude-sonnet-4-6'
 
-# Gateway routing (S13 pattern). When AI_GATEWAY_URL + AI_GATEWAY_API_KEY are set,
-# vision review routes through leartech-ai-gateway (/v1/chat/completions, OpenAI
-# image_url + tool-calling) to a vision-capable model — GATEWAY_VISION_MODEL, default
-# the gateway's gpt-4o (logical `azure-openai`, proven vision over the OpenAI seam).
-# Unset → direct Anthropic (laptop mode), unchanged. Additive; no flag day.
+# Gateway routing (S13 pattern). Vision review ALWAYS routes through
+# leartech-ai-gateway (/v1/chat/completions, OpenAI image_url + tool-calling) to a
+# vision-capable model — GATEWAY_VISION_MODEL, default the gateway's gpt-4o (logical
+# `azure-openai`, proven vision over the OpenAI seam), authed with the dedicated
+# `agent-gate` key. Fail-closed: if AI_GATEWAY_URL + AI_GATEWAY_API_KEY are unset,
+# review_video errors — there is NO direct-to-Anthropic path (everything via the
+# gateway; see Hub/status/ai-client-architecture.md).
 GATEWAY_URL = os.environ.get('AI_GATEWAY_URL', '').rstrip('/')
 GATEWAY_KEY = os.environ.get('AI_GATEWAY_API_KEY', '')
 GATEWAY_VISION_MODEL = os.environ.get('GATEWAY_VISION_MODEL', 'azure-openai')
@@ -123,8 +124,8 @@ class VideoVerdict:
 @dataclass(frozen=True)
 class Prerequisites:
     ffmpeg_path: str | None
-    # credentials for EITHER path: the gateway (in-cluster) or a direct Anthropic
-    # key (laptop). Named api_key_present for back-compat; true if either is usable.
+    # The gateway is the ONLY credential path (fail-closed — no direct Anthropic).
+    # Named api_key_present for back-compat; true when the gateway is configured.
     api_key_present: bool
 
     @property
@@ -136,17 +137,17 @@ class Prerequisites:
         if self.ffmpeg_path is None:
             m.append('ffmpeg (install: `brew install ffmpeg`)')
         if not self.api_key_present:
-            m.append('AI_GATEWAY_URL + AI_GATEWAY_API_KEY (in-cluster) OR ANTHROPIC_API_KEY '
-                     '(laptop — fetch from cluster, see memory/anthropic_api_key.md)')
+            m.append('AI_GATEWAY_URL + AI_GATEWAY_API_KEY (vision review is gateway-only; '
+                     'point AI_GATEWAY_URL at the ai-gateway — no direct-Anthropic path)')
         return m
 
 
 def check_prerequisites() -> Prerequisites:
-    # Either credential path counts — otherwise this silently skips the criterion
-    # in-cluster, where the gateway (not ANTHROPIC_API_KEY) is what's configured.
+    # Gateway-only: without it the criterion is skipped rather than falling back to
+    # a direct provider (everything goes through the ai-gateway).
     return Prerequisites(
         ffmpeg_path=shutil.which('ffmpeg'),
-        api_key_present=_gateway_configured() or bool(os.environ.get('ANTHROPIC_API_KEY')),
+        api_key_present=_gateway_configured(),
     )
 
 
@@ -202,23 +203,6 @@ def _intro_text(spec_name: str, frames: list[bytes], expected_flow: str | None) 
     return '\n'.join(lines)
 
 
-def build_user_message(spec_name: str, frames: list[bytes], expected_flow: str | None) -> list[dict[str, Any]]:
-    """Anthropic content blocks — text intro + frames as image blocks (direct SDK path)."""
-    blocks: list[dict[str, Any]] = [{'type': 'text', 'text': _intro_text(spec_name, frames, expected_flow)}]
-    for frame in frames:
-        blocks.append(
-            {
-                'type': 'image',
-                'source': {
-                    'type': 'base64',
-                    'media_type': 'image/png',
-                    'data': base64.standard_b64encode(frame).decode('ascii'),
-                },
-            }
-        )
-    return blocks
-
-
 def build_openai_user_message(spec_name: str, frames: list[bytes], expected_flow: str | None) -> list[dict[str, Any]]:
     """OpenAI multimodal content — text intro + frames as image_url data URIs (gateway path)."""
     blocks: list[dict[str, Any]] = [{'type': 'text', 'text': _intro_text(spec_name, frames, expected_flow)}]
@@ -226,21 +210,6 @@ def build_openai_user_message(spec_name: str, frames: list[bytes], expected_flow
         b64 = base64.standard_b64encode(frame).decode('ascii')
         blocks.append({'type': 'image_url', 'image_url': {'url': f'data:image/png;base64,{b64}'}})
     return blocks
-
-
-def parse_tool_use_response(response_content: list[dict[str, Any]], spec_name: str) -> VideoVerdict:
-    """Walk the assistant's content blocks for the tool_use result and build a VideoVerdict."""
-    for block in response_content:
-        if block.get('type') != 'tool_use' or block.get('name') != 'report_anomalies':
-            continue
-        tool_input = block.get('input', {})
-        return VideoVerdict(
-            spec_name=spec_name,
-            anomalies_found=bool(tool_input.get('anomalies_found', False)),
-            summary=str(tool_input.get('summary', '')),
-            flagged_frames=tuple(int(i) for i in tool_input.get('flagged_frames', [])),
-        )
-    raise RuntimeError(f'No report_anomalies tool_use block in response: {json.dumps(response_content)[:200]}')
 
 
 def parse_openai_tool_call(resp: dict[str, Any], spec_name: str) -> VideoVerdict:
@@ -285,24 +254,6 @@ def review_video_gateway(spec_name: str, frames: list[bytes], expected_flow: str
     return parse_openai_tool_call(r.json(), spec_name)
 
 
-def review_video_anthropic(spec_name: str, frames: list[bytes], expected_flow: str | None, model: str) -> VideoVerdict:
-    """Direct Anthropic SDK path (laptop mode / no gateway)."""
-    from anthropic import Anthropic
-
-    client = Anthropic()
-    messages = [{'role': 'user', 'content': build_user_message(spec_name, frames, expected_flow)}]
-    response = client.messages.create(
-        model=model,
-        max_tokens=1024,
-        system=VIDEO_REVIEW_SYSTEM_PROMPT,
-        tools=cast(Any, [REPORT_ANOMALIES_TOOL]),
-        tool_choice=cast(Any, {'type': 'tool', 'name': 'report_anomalies'}),
-        messages=cast(Any, messages),
-    )
-    blocks = [block.model_dump() for block in response.content]
-    return parse_tool_use_response(blocks, spec_name)
-
-
 def review_video(
     spec_name: str,
     frames: list[bytes],
@@ -312,10 +263,14 @@ def review_video(
 ) -> VideoVerdict:
     """Send frames for vision + structured review; return the VideoVerdict.
 
-    Routes through leartech-ai-gateway when AI_GATEWAY_URL + AI_GATEWAY_API_KEY are
-    set (gpt-4o via the OpenAI seam, egress at the gateway), else the direct
-    Anthropic SDK. Gate with check_prerequisites().
+    Routes ALWAYS through leartech-ai-gateway (gpt-4o via the OpenAI seam, egress at
+    the gateway, authed with the `agent-gate` key). Fail-closed: if the gateway is
+    not configured (AI_GATEWAY_URL + AI_GATEWAY_API_KEY) this raises — there is no
+    direct-to-provider path. Gate with check_prerequisites() to skip cleanly.
     """
-    if _gateway_configured():
-        return review_video_gateway(spec_name, frames, expected_flow, model or GATEWAY_VISION_MODEL)
-    return review_video_anthropic(spec_name, frames, expected_flow, model or DEFAULT_MODEL)
+    if not _gateway_configured():
+        raise RuntimeError(
+            'video review requires the ai-gateway (AI_GATEWAY_URL + AI_GATEWAY_API_KEY); '
+            'there is no direct-Anthropic path — everything routes through the gateway'
+        )
+    return review_video_gateway(spec_name, frames, expected_flow, model or GATEWAY_VISION_MODEL)
