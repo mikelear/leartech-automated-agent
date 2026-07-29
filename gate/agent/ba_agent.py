@@ -68,6 +68,7 @@ import asyncio
 import json
 import os
 import sys
+from pathlib import Path
 
 import click
 import yaml
@@ -265,9 +266,11 @@ BA_SYSTEM_PROMPT = f"""\
 You are the leartech BA (Business Analyst) AGENT. You take a BRIEF and produce
 one or more DRAFT Plan CRDs — you do NOT open a PR and you do NOT write code.
 
-You have ZERO infra-specific knowledge. You consume the brief only. Do not
-guess at cluster names, deploy topologies, or repo layouts — the brief tells
-you what to target, and the MCPs let you look up live state.
+You have ZERO infra-specific knowledge beyond the AUTHORABLE CAPABILITIES
+catalog (above) — that catalog is the ONLY source of what a plan step can do.
+You consume the brief for WHAT to remediate. Do not guess at cluster names,
+deploy topologies, or repo layouts — the brief tells you what to target, and
+the MCPs let you look up live state.
 
 GROUND RULES
 
@@ -311,11 +314,28 @@ Step 3 — RESEARCH (optional). If the brief references upstream fixes, error
 messages, or third-party behaviour, use `web_search` and `web_fetch` to
 verify. Skip this step when the brief is self-contained.
 
-Step 4 — AUTHOR. Call `create_plan` (or `amend_plan`) with:
-   - The plan spec including steps for the remediation.
-   - A final step that VERIFIES the brief's `successCriteria`.
-   - `hold: true` and the `{DRAFT_ANNOTATION_KEY}` annotation set to
-     `{DRAFT_ANNOTATION_VALUE}`.
+Step 4 — AUTHOR. Every step MUST come from AUTHORABLE CAPABILITIES:
+   - Pick `agentType` per that catalog's `routing` — an in-repo change (code,
+     chart/values, tests) is a DEV agent PR (leartech-agent-<lang>) with
+     {{name, goal, repo, branch}}; a cluster-side/privileged op is
+     leartech-agent-infra with `inputs.action` set to one of its `available`
+     actions (+ that action's params). NEVER author an infra step without a
+     valid `action`, and NEVER invent an agentType/action not in the catalog.
+   - If the fix needs a power that is NOT an `available` action (e.g. provisioning
+     a backend secret today), do NOT author a phantom step. Do BOTH: (1) author
+     the executable fix that unblocks it NOW if one exists — usually a DEV PR
+     that removes the need (e.g. set database.enabled=false) — AND (2) report the
+     matching `capability_gaps` id (needs-infra:<action> / needs-human) in your
+     summary so the infra surface grows to cover it properly. The gap is a
+     REPORTED line, never a plan step, so it can't compete with the executable
+     fix. If no executable fix exists at all, author just the verify step and
+     report the gap alone.
+   Then call `create_plan` (or `amend_plan`) with:
+   - The executable remediation steps.
+   - A final step that VERIFIES the brief's `successCriteria` (typically an
+     infra `release-health-check`).
+   - `hold: true` (the tool maps this to the CRD's spec.paused gate) and the
+     `{DRAFT_ANNOTATION_KEY}={DRAFT_ANNOTATION_VALUE}` annotation.
    - `remediates: [...]` populated from the brief's `resolves`.
 
 Step 5 — REPORT. End your final message with a short summary — one line
@@ -333,12 +353,44 @@ to any non-MCP path — the MCPs are the only authoring surface.
 # --- Runtime wiring -----------------------------------------------------------
 
 
+# The authorable capability surface (AgentTypes + infra actions + gaps). Kept as
+# a data file (not hardcoded here) so infra can grow the surface without a
+# ba_agent code change — add an action there, the BA can author it next deploy.
+CAPABILITIES_PATH = Path(__file__).parent / 'authoring_capabilities.yaml'
+
+
+def _render_authoring_capabilities() -> str:
+    """Render authoring_capabilities.yaml into the system prompt so every step the
+    BA authors is EXECUTABLE. Re-emitted as canonical (comment-free, alias-expanded)
+    YAML so it always tracks the file. Degrades to empty on read/parse error — the
+    BA still runs, just without the capability guard (logged)."""
+    try:
+        data = yaml.safe_load(CAPABILITIES_PATH.read_text(encoding='utf-8'))
+    except (OSError, yaml.YAMLError) as exc:  # pragma: no cover - defensive
+        obslog.error('capabilities_load_failed', f'could not load {CAPABILITIES_PATH.name}: {exc}', logger='ba')
+        return ''
+    body = yaml.safe_dump(data, sort_keys=False, default_flow_style=False)
+    return (
+        'AUTHORABLE CAPABILITIES\n\n'
+        'Author plan steps ONLY within this surface. Choose agent_type per `routing`; '
+        "every step's inputs MUST match the chosen type's (or infra action's) contract. "
+        'If a remediation needs a power that is not an `available` action, do NOT author '
+        'a phantom step — author only the executable steps and report the matching '
+        '`capability_gaps` entry (needs-infra / needs-human). Infra is the restricted '
+        'capability-holder; its `actions` list grows over time.\n\n' + body
+    )
+
+
 def _build_system_prompt() -> str:
-    """JX3 calibration + any encoded ba_agent lessons + the BA system prompt."""
+    """JX3 calibration + any encoded ba_agent lessons + the authorable-capability
+    catalog + the BA system prompt."""
     blocks: list[str] = [load_jx3_calibration()]
     lessons = render_for('ba_agent')
     if lessons:
         blocks.append(lessons)
+    capabilities = _render_authoring_capabilities()
+    if capabilities:
+        blocks.append(capabilities)
     blocks.append(BA_SYSTEM_PROMPT)
     return '\n\n---\n\n'.join(blocks)
 

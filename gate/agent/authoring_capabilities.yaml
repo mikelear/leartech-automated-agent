@@ -1,0 +1,87 @@
+# Authorable capability surface — what the BA agent may put in a plan STEP.
+#
+# The BA reads this (rendered into its system prompt by ba_agent._build_system_prompt)
+# so every step it authors is EXECUTABLE. Without it the BA authored phantom steps —
+# e.g. an infra `provision-db-secret` that no agent action implements — which crash on
+# spawn (see project_ba_agent_event_remediation 12th/13th seams).
+#
+# ── EXTENDING (the whole point) ────────────────────────────────────────────────
+# To give the BA a new remediation power, do TWO things:
+#   1. implement the action in the owning agent's entrypoint
+#      (dev: gate/agent/main.py contract; infra: gate/agent/infra_agent.py ACTIONS), and
+#   2. add an entry under that agent_type here (flip a `planned` action to `available`).
+# The BA can author it the NEXT deploy — no ba_agent code change. Infra is the
+# privileged / restricted agent, so most new cluster-side powers (secrets, config,
+# provider ops) land as new infra ACTIONS. Keep this file in sync with the controller
+# chart's agentTypes.defaults + each agent entrypoint's real contract.
+#
+# ── ROUTING (how the BA picks an agent_type for a step) ─────────────────────────
+routing:
+  - "In-repo change (code, chart/values edits, tests) -> a DEV agent (leartech-agent-<lang>) as a PR. e.g. 'set database.enabled=false in the hello-go7 chart' is a dev PR."
+  - "Cluster-side / privileged op (source-config, deploy-config, release verification, and — in future — secret/config/provider wiring) -> leartech-agent-infra via an ACTION. Infra is the restricted capability-holder."
+  - "If the fix needs a power that is NOT an `available` action below (e.g. provisioning a secret today): do NOT author a phantom step. Do BOTH — (1) author the executable fix that unblocks it NOW if one exists (usually a DEV PR that removes the need, e.g. database.enabled=false), AND (2) REPORT the matching capability-gap (needs-infra:<action>) so the infra surface grows to cover it properly later. The gap is a REPORTED line in your summary, not a plan step, so it never competes with the executable fix. If no executable fix exists at all, author only the verify step and report the gap alone."
+
+# ── AGENT TYPES ────────────────────────────────────────────────────────────────
+agent_types:
+  # Dev family — same contract, one image per language. Sandboxed: opens PRs on repos.
+  leartech-agent-py: &dev
+    kind: dev
+    purpose: "Make an in-repo change and open a PR (code, chart/values, tests). Sandboxed to the target repo."
+    inputs:
+      name: "step name (unique within the plan)"
+      goal: "the change to make = the PR objective. Be specific and self-contained."
+      repo: "owner/name of the target repo"
+      branch: "feat/<slug> (required — the working branch)"
+    use_for:
+      - "code changes"
+      - "chart / values / config edits that live IN A REPO (e.g. set database.enabled=false)"
+      - "adding or extending tests / criteria"
+  leartech-agent-go: *dev
+  leartech-agent-ng: *dev
+  leartech-agent-rust: *dev
+
+  # Infra — the PRIVILEGED / RESTRICTED agent. Action-driven. This `actions` list is
+  # the authoritative surface of what infra can do; it GROWS over time (see EXTENDING).
+  leartech-agent-infra:
+    kind: infra
+    restricted: true
+    purpose: "Cluster-side wiring + release verification. Action-driven — inputs MUST include `action`."
+    inputs:
+      action: "one of the `available` actions below (REQUIRED — omitting it usage-errors the agent)"
+      # plus each action's own params (see below)
+    actions:
+      register-source-config:
+        status: available
+        inputs: {repo: "owner/name", cluster: "gcp|az"}
+        does: "Register the repo in a cluster's source-config (one PR per cluster; idempotent, merge-gated)."
+      deploy-config:
+        status: available
+        inputs: {repo: "owner/name", cluster: "gcp|az"}
+        does: "Land the deploy/helmfile config for a cluster."
+      release-health-check:
+        status: available
+        inputs: {service: "service name", cluster: "gcp|az"}
+        does: "Verify a release deployed HEALTHY. Use this as the FINAL verify step of every remediation plan."
+      # --- PLANNED (not yet implemented — do NOT author; report as a capability-gap) ---
+      # When one of these ships (entrypoint + status: available), the BA can author it.
+      provision-secret:
+        status: planned
+        would_do: "Provision/sync a secret into a cluster's backend (GSM/Vault/AKV) + its ExternalSecret."
+
+  # The BA itself — never author steps targeting leartech-agent-ba.
+  leartech-agent-ba:
+    kind: meta
+    purpose: "(you) — do not author plan steps that target yourself."
+
+# ── CAPABILITY GAPS ─────────────────────────────────────────────────────────────
+# Remediations NO agent can perform today. Never author a phantom step for these —
+# author the executable steps you CAN, and end your report with a `needs-infra` /
+# `needs-human` line naming the gap. Each gap is a candidate to become an infra action
+# (that's how the infra surface grows to make future remediations fully automatable).
+capability_gaps:
+  - id: needs-infra:provision-secret
+    when: "the fix requires creating/rotating a secret in the backend (GSM/Vault/AKV)"
+    today: "no infra action yet (see infra.actions.provision-secret: planned). AUTHOR BOTH: the executable dev PR that removes the need now (e.g. database.enabled=false) AND report this gap so provision-secret gets built as a real infra action."
+  - id: needs-human:gitops-overlay
+    when: "the fix requires editing a cluster GitOps overlay directly (helmfiles / config-root) or a cloud console / IAM change"
+    today: "operator/GitOps only — report it as needs-human"
