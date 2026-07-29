@@ -335,6 +335,12 @@ _JOB_FORWARDED_ENV_KEYS = (
     # models as the API pod. Harmless when unset.
     'LEARTECH_SPEC_SUGGESTER_MODEL',
     'LEARTECH_VIDEO_REVIEW_MODEL',
+    # video_review's vision path (OpenAI seam) — non-secret base URL + logical
+    # vision model. The key flows as a secret_ref (AI_GATEWAY_API_KEY, see
+    # _initiative_secret_refs). All harmless when unset (gate path off → Job's
+    # video_review falls back to direct Anthropic exactly as before).
+    'AI_GATEWAY_URL',
+    'GATEWAY_VISION_MODEL',
 )
 
 
@@ -378,6 +384,17 @@ def _initiative_secret_refs() -> dict[str, dict[str, str]]:
             'key': os.environ.get('LEARTECH_JOB_GH_TOKEN_SECRET_KEY', 'password'),
         },
     }
+    # video_review's SEPARATE gateway key (agent-gate) — injected as
+    # AI_GATEWAY_API_KEY so the Job's vision path meters distinctly from the
+    # agent's own key. Gated on AI_GATEWAY_URL: only clusters that turned the
+    # vision gateway path on (gateway.videoReviewUrl) forward this, so a Job on
+    # a cluster without the gate-key ExternalSecret never references a missing
+    # Secret. Secret name/key overridable via LEARTECH_JOB_GATE_SECRET_*.
+    if os.environ.get('AI_GATEWAY_URL'):
+        refs['AI_GATEWAY_API_KEY'] = {
+            'secret': os.environ.get('LEARTECH_JOB_GATE_SECRET_NAME', 'leartech-ai-gateway-gate-key'),
+            'key': os.environ.get('LEARTECH_JOB_GATE_SECRET_KEY', 'AI_GATEWAY_API_KEY'),
+        }
     # Propagate the Postgres DSN only when the API pod knows about it
     # (gated on the chart's postgresql.enabled). Without it the Job
     # falls back to filesystem-only mode, same as the API pod.

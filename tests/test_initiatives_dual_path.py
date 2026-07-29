@@ -233,6 +233,53 @@ def test_initiative_env_forwards_gateway_base_url(monkeypatch: pytest.MonkeyPatc
     assert env['ANTHROPIC_BASE_URL'] == 'http://leartech-ai-gateway.ai-gateway.svc:8080'
 
 
+def test_initiative_env_forwards_video_review_gateway(monkeypatch: pytest.MonkeyPatch) -> None:
+    """video_review's OpenAI-seam vision path in a spawned Job needs the (non-secret)
+    AI_GATEWAY_URL + GATEWAY_VISION_MODEL forwarded from the API pod. If they drop off
+    the list, Jobs silently fall back to direct Anthropic — the gate's gpt-4o spend
+    stops metering to agent-gate. This guard makes that a red test."""
+    from app.routers.initiatives import _JOB_FORWARDED_ENV_KEYS, _initiative_env
+
+    assert 'AI_GATEWAY_URL' in _JOB_FORWARDED_ENV_KEYS
+    assert 'GATEWAY_VISION_MODEL' in _JOB_FORWARDED_ENV_KEYS
+    monkeypatch.setenv('AI_GATEWAY_URL', 'http://leartech-ai-gateway.ai-gateway.svc:8080')
+    monkeypatch.setenv('GATEWAY_VISION_MODEL', 'azure-openai')
+    env = _initiative_env()
+    assert env['AI_GATEWAY_URL'] == 'http://leartech-ai-gateway.ai-gateway.svc:8080'
+    assert env['GATEWAY_VISION_MODEL'] == 'azure-openai'
+
+
+def test_initiative_secret_refs_gate_key_gated_on_gateway_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The agent-gate key (AI_GATEWAY_API_KEY → leartech-ai-gateway-gate-key) is
+    forwarded to Jobs ONLY when the vision gateway path is on (AI_GATEWAY_URL set).
+    Off → no ref, so a Job on a cluster without the gate-key ExternalSecret never
+    references a missing Secret and crashloops. On → the dedicated key (overridable
+    via LEARTECH_JOB_GATE_SECRET_*)."""
+    from app.routers.initiatives import _initiative_secret_refs
+
+    for key in ('LEARTECH_JOB_GATE_SECRET_NAME', 'LEARTECH_JOB_GATE_SECRET_KEY'):
+        monkeypatch.delenv(key, raising=False)
+
+    # Off (no AI_GATEWAY_URL) → no gate-key ref.
+    monkeypatch.delenv('AI_GATEWAY_URL', raising=False)
+    assert 'AI_GATEWAY_API_KEY' not in _initiative_secret_refs()
+
+    # On → dedicated gate-key secret by default.
+    monkeypatch.setenv('AI_GATEWAY_URL', 'http://leartech-ai-gateway.ai-gateway.svc:8080')
+    assert _initiative_secret_refs()['AI_GATEWAY_API_KEY'] == {
+        'secret': 'leartech-ai-gateway-gate-key',
+        'key': 'AI_GATEWAY_API_KEY',
+    }
+
+    # Per-cluster override honoured.
+    monkeypatch.setenv('LEARTECH_JOB_GATE_SECRET_NAME', 'custom-gate-secret')
+    monkeypatch.setenv('LEARTECH_JOB_GATE_SECRET_KEY', 'CUSTOM_KEY')
+    assert _initiative_secret_refs()['AI_GATEWAY_API_KEY'] == {
+        'secret': 'custom-gate-secret',
+        'key': 'CUSTOM_KEY',
+    }
+
+
 def test_initiative_secret_refs_uses_chart_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """Without env overrides the secret refs must match the chart's
     `secrets.*` defaults (leartech-ai-gateway-key + tekton-git)."""

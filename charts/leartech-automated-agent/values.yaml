@@ -155,9 +155,32 @@ secrets:
   aiGatewayKey:
     secretName: leartech-ai-gateway-key
     secretKey: AI_GATEWAY_API_KEY
+  # gatewayApiKey — a SEPARATE gateway virtual key (`agent-gate`) used only by
+  # gate.tools.video_review's vision path, so the gate's gpt-4o spend meters
+  # distinctly from the agent's own key above. Same convention as aiGatewayKey /
+  # BA's leartech-ai-gateway-ba-key: a dedicated leartech-ai-gateway-*-key secret
+  # exposing a neutral AI_GATEWAY_API_KEY. Materialised by the externalSecrets
+  # list; the deployment's AI_GATEWAY_API_KEY secretRef is optional:true so a
+  # preview / overlay-lag SKIPS video review (check_prerequisites) rather than
+  # falling back to a direct provider — video review is gateway-only (fail-closed).
+  gatewayApiKey:
+    secretName: leartech-ai-gateway-gate-key
+    secretKey: AI_GATEWAY_API_KEY
   ghToken:
     secretName: tekton-git
     secretKey: password
+
+# gateway — gate.tools.video_review's vision path (OpenAI seam / gpt-4o). Kept
+# SEPARATE from agent.aiGateway.baseUrl on purpose: flipping baseUrl repoints the
+# whole agent's Anthropic-seam traffic (a heavier cutover that first needs the
+# agent's own key source repointed to a virtual key), whereas video_review's
+# vision path is self-contained and can be turned on independently. Empty
+# videoReviewUrl (default) → video review is SKIPPED (gateway-only, fail-closed —
+# no direct-Anthropic path). GitOps configs/<chart>.yaml set videoReviewUrl to the
+# in-cluster gateway to activate it.
+gateway:
+  videoReviewUrl: ""
+  visionModel: azure-openai
 
 # Phase B (B.3+B.4) — V2 plumbing. Admin-token gate for POST /admin/cleanup.
 # Lifted out of `.Values.secrets` into a top-level block so it sits next to
@@ -217,6 +240,13 @@ externalSecrets:
           # is flipped on. See docs/AI-GATEWAY-MIGRATION-PLAN.md ("Naming").
           - name: AI_GATEWAY_API_KEY
             key: claude-api-key
+      # Dedicated gateway virtual key for gate.tools.video_review vision — its
+      # SOURCE is already a real gateway key (agent-gate, minted ai-bus-side), so
+      # the gate's gpt-4o spend meters separately from the agent's key.
+      - name: leartech-ai-gateway-gate-key
+        data:
+          - name: AI_GATEWAY_API_KEY
+            key: agent-gate-gateway-key
 
   azure:
     enabled: false  # set true on AZ via configs/leartech-automated-agent.yaml
@@ -229,6 +259,14 @@ externalSecrets:
           # GitOps cutover repoints it at the gateway virtual key.
           - name: AI_GATEWAY_API_KEY
             key: secret/data/ai/claude
+            property: apiKey
+      # Dedicated gateway virtual key for gate.tools.video_review vision — SOURCE
+      # is the agent-gate key (KV ai-agent-gate-gateway; transform maps
+      # secret/data/ai/agent-gate-gateway → ai-agent-gate-gateway).
+      - name: leartech-ai-gateway-gate-key
+        data:
+          - name: AI_GATEWAY_API_KEY
+            key: secret/data/ai/agent-gate-gateway
             property: apiKey
 
 # tekton-git — materialises the basic-auth Secret used by `gh` / git inside
