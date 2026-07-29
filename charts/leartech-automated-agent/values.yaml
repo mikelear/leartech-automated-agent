@@ -161,7 +161,8 @@ secrets:
   # BA's leartech-ai-gateway-ba-key: a dedicated leartech-ai-gateway-*-key secret
   # exposing a neutral AI_GATEWAY_API_KEY. Materialised by the externalSecrets
   # list; the deployment's AI_GATEWAY_API_KEY secretRef is optional:true so a
-  # preview / overlay-lag degrades to the ANTHROPIC_API_KEY fallback in-code.
+  # preview / overlay-lag SKIPS video review (check_prerequisites) rather than
+  # falling back to a direct provider — video review is gateway-only (fail-closed).
   gatewayApiKey:
     secretName: leartech-ai-gateway-gate-key
     secretKey: AI_GATEWAY_API_KEY
@@ -174,8 +175,9 @@ secrets:
 # whole agent's Anthropic-seam traffic (a heavier cutover that first needs the
 # agent's own key source repointed to a virtual key), whereas video_review's
 # vision path is self-contained and can be turned on independently. Empty
-# videoReviewUrl (default) → video_review falls back to direct Anthropic.
-# GitOps configs/<chart>.yaml set videoReviewUrl to the in-cluster gateway.
+# videoReviewUrl (default) → video review is SKIPPED (gateway-only, fail-closed —
+# no direct-Anthropic path). GitOps configs/<chart>.yaml set videoReviewUrl to the
+# in-cluster gateway to activate it.
 gateway:
   videoReviewUrl: ""
   visionModel: azure-openai
