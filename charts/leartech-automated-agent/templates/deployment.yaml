@@ -116,14 +116,6 @@ spec:
           valueFrom:
             fieldRef:
               fieldPath: metadata.namespace
-        # Phase F: runtime is always 'job' now (in-code constant); the env
-        # var is rendered for observability + back-compat with any operator
-        # tooling that reads it, but it no longer influences the spawn path.
-        # Empty/unset is fine — the code ignores it.
-        {{- if .Values.agent.runtime }}
-        - name: LEARTECH_INITIATIVE_RUNTIME
-          value: {{ .Values.agent.runtime | quote }}
-        {{- end }}
         # D.4.4: Job-pod image registry derived from the API image so no
         # per-cluster hardcoded registry default lives in the chart.
         # release.yaml kaniko-mirrors leartech-agent-runtime to the cluster's
@@ -253,19 +245,16 @@ spec:
         - name: LEARTECH_AGENT_MODEL
           value: {{ .Values.agent.model | quote }}
         {{- end }}
-        # v7-P1 step 2 — OIDC bearer validation. The whole block is gated on
-        # `agent.auth.enabled` so a cluster can flip the feature off
-        # atomically (no env vars rendered → middleware loads with empty
-        # settings → behaves as required=false). Inside the gated block,
-        # `required: true` is what makes 401 fire on missing / invalid
-        # tokens. Issuer is shared Hydra (same as orchestrator); audience
-        # is agent-specific (different from orchestrator's so a token
-        # issued for one service can't be replayed at the other).
-        {{- if .Values.agent.auth.enabled }}
-        {{- if .Values.agent.auth.required }}
+        # OIDC bearer validation (v7-P1 step 2, hardened to permanent by C1
+        # 2026-07). Auth is ALWAYS on — every cluster + preview boots
+        # fail-closed; the former `agent.auth.enabled`/`required` toggles were
+        # removed once C1 made anonymous mode dead everywhere. Issuer is shared
+        # Hydra (same as orchestrator); audience is agent-specific (different
+        # from orchestrator's so a token issued for one service can't be
+        # replayed at the other). The middleware still defaults fail-closed in
+        # code, so this is belt-and-braces.
         - name: LEARTECH_AUTH_REQUIRED
           value: "true"
-        {{- end }}
         {{- if .Values.agent.auth.issuer }}
         - name: LEARTECH_AUTH_ISSUER
           value: {{ .Values.agent.auth.issuer | quote }}
@@ -281,7 +270,6 @@ spec:
         {{- if .Values.agent.auth.jwksTtlSeconds }}
         - name: LEARTECH_AUTH_JWKS_TTL
           value: {{ .Values.agent.auth.jwksTtlSeconds | quote }}
-        {{- end }}
         {{- end }}
         {{- if .Values.postgresql.enabled }}
         # DB-backed initiative catalog DSN — flows from the in-namespace

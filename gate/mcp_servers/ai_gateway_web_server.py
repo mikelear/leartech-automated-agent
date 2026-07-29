@@ -11,11 +11,18 @@ upstream fixed X?", "what's the current release cadence for Y?"). Rather than
 give the agent raw HTTP + credential handling, we surface the ai-gateway's
 tool-agnostic web layer as MCP tools — same governance / metering as LLM turns.
 
-The underlying HTTP is in ``gate.tools.ai_gateway_web``; this module is just the
-SDK-MCP wrapper. In-process (not remote) because it holds no long-lived state
-and the ai-gateway itself is the network boundary. Portability: the wrapper
-stays because it's just an httpx client + a small JSON schema — if the LLM
-runtime changes, the tool still works.
+**Bucket: GAP** (in-process only). The underlying HTTP is in
+:mod:`gate.tools.ai_gateway_web`; this module is just the SDK-MCP wrapper.
+There is currently no Go equivalent in ``leartech-mcp-servers``, so per the
+Go-first rule the shim stays until one lands. When a Go server ships (name
+TBD; likely ``ai_gateway_web`` or similar), add it to ``WANTED_MCP_SERVERS``
+in :mod:`gate.mcp_servers.remote`, delete this module, and remove the
+``leartech-ai-gateway-web`` entry from ``gate/agent/mcp_catalog.yaml``.
+
+Portability note: the wrapper is deliberately thin — an httpx client + a
+small JSON schema — so a runtime swap doesn't strand the tool. The
+ai-gateway itself is the network boundary the BA agent's search/fetch
+traffic crosses; this module just gives the LLM a typed MCP surface over it.
 """
 
 from __future__ import annotations
