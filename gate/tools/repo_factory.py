@@ -272,9 +272,18 @@ def open_scaffold_pr(
     run(['git', 'push', '-u', 'origin', branch], cwd=target)
     pr_url = run(
         [
-            'gh', 'pr', 'create', '--repo', slug, '--head', branch,
-            '--title', title or f'feat: scaffold {new_name} from template',
-            '--body', body or (
+            'gh',
+            'pr',
+            'create',
+            '--repo',
+            slug,
+            '--head',
+            branch,
+            '--title',
+            title or f'feat: scaffold {new_name} from template',
+            '--body',
+            body
+            or (
                 f'Deterministic scaffold of `{new_name}` from its language template '
                 f'(gate.tools.repo_factory — literal rename, no LLM grep). The preview '
                 f'on this PR exercises every Tekton step before merge.'

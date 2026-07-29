@@ -48,6 +48,7 @@ GATEWAY_VISION_MODEL = os.environ.get('GATEWAY_VISION_MODEL', 'azure-openai')
 def _gateway_configured() -> bool:
     return bool(GATEWAY_URL and GATEWAY_KEY)
 
+
 VIDEO_REVIEW_SYSTEM_PROMPT = (
     'You are a visual reviewer for Playwright end-to-end browser test videos. '
     'You receive frames sampled evenly in temporal order from a recorded test run. '
@@ -137,8 +138,10 @@ class Prerequisites:
         if self.ffmpeg_path is None:
             m.append('ffmpeg (install: `brew install ffmpeg`)')
         if not self.api_key_present:
-            m.append('AI_GATEWAY_URL + AI_GATEWAY_API_KEY (vision review is gateway-only; '
-                     'point AI_GATEWAY_URL at the ai-gateway — no direct-Anthropic path)')
+            m.append(
+                'AI_GATEWAY_URL + AI_GATEWAY_API_KEY (vision review is gateway-only; '
+                'point AI_GATEWAY_URL at the ai-gateway — no direct-Anthropic path)'
+            )
         return m
 
 
@@ -248,7 +251,8 @@ def review_video_gateway(spec_name: str, frames: list[bytes], expected_flow: str
     r = httpx.post(
         f'{GATEWAY_URL}/v1/chat/completions',
         headers={'Authorization': f'Bearer {GATEWAY_KEY}', 'Content-Type': 'application/json'},
-        json=body, timeout=180,
+        json=body,
+        timeout=180,
     )
     r.raise_for_status()
     return parse_openai_tool_call(r.json(), spec_name)

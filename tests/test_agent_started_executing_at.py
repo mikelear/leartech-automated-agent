@@ -82,6 +82,9 @@ class _FakeInitiative:
     # field to decide whether to render the `/hold` posting instruction.
     # Default False mirrors the "let Tide auto-merge on green" shape.
     hold: bool = False
+    # Test-mode directive — default None so these tests hit the real SDK
+    # loop path instead of the test-mode short-circuit added later.
+    test_mode: dict[str, object] | None = None
 
     @property
     def primary(self) -> _FakeRepo:

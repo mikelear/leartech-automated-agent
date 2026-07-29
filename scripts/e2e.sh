@@ -1105,6 +1105,106 @@ else
   echo "✓ BA --dry-run rejects invalid brief (missing goal/successCriteria)"
 fi
 
+# ── TEST-MODE surface — module imports, guard-strict-boolean, parse rules ──
+# Exercises the ``gate.agent.test_mode`` module in-process so a packaging
+# regression (missing __init__.py, wrong wheel includes) OR a guard-parse
+# regression fails here. Every assertion protects a load-bearing invariant:
+#   - Guard defaults OFF and only case-insensitive "true" flips it on.
+#   - Flag off + testMode present → parse returns None (a stray directive in
+#     a production plan CANNOT no-op a real run).
+#   - Flag on + testMode present → parse returns a validated TestModeSpec.
+#   - The Initiative loader accepts `testMode:` at the top level and reads
+#     the raw dict back through the alias.
+#   - run_test_mode returns 0 for Succeeded / 1 for Failed regardless of
+#     whether the agent pod has AgentRun CR patching wired.
+# See gate/agent/lessons/catalog/every-initiative-extends-the-e2e-script.md
+# for the contract this exercise satisfies.
+if uv run python -c "
+import asyncio
+import os
+
+from gate.agent.test_mode import (
+    TEST_MODE_ANNOTATION_KEY,
+    TEST_MODE_ANNOTATION_VALUE,
+    TEST_MODE_GUARD_ENV,
+    TestModeSpec,
+    is_test_mode_allowed,
+    parse_test_mode,
+    run_test_mode,
+)
+
+# The env-name and annotation shape are wire-contract with the chart + with
+# forensic-query tooling. Guard against silent renames here.
+assert TEST_MODE_GUARD_ENV == 'LEARTECH_AGENT_TEST_MODE_ALLOWED'
+assert TEST_MODE_ANNOTATION_KEY == 'leartech.io/test-mode'
+assert TEST_MODE_ANNOTATION_VALUE == 'true'
+
+# Guard defaults OFF.
+env_off = {}
+assert is_test_mode_allowed(env=env_off) is False
+# Only case-insensitive 'true' flips it — permissive parses are the
+# exact accident this guard is designed to prevent.
+for value in ('false', '1', 'yes', 'True1', ''):
+    assert is_test_mode_allowed(env={TEST_MODE_GUARD_ENV: value}) is False, value
+for value in ('true', 'True', 'TRUE', ' true '):
+    assert is_test_mode_allowed(env={TEST_MODE_GUARD_ENV: value}) is True, value
+
+# Flag off + testMode present → IGNORED. This is the safety invariant.
+os.environ.pop(TEST_MODE_GUARD_ENV, None)
+assert parse_test_mode({'testMode': {'finishAs': 'Succeeded'}}) is None
+
+# Flag on + testMode present → parsed spec.
+os.environ[TEST_MODE_GUARD_ENV] = 'true'
+try:
+    spec = parse_test_mode({
+        'testMode': {
+            'finishAs': 'Succeeded',
+            'prOutcome': 'merged',
+            'message': 'hello',
+            'delaySeconds': 2,
+        }
+    })
+    assert spec is not None
+    assert spec.finish_as == 'Succeeded'
+    assert spec.pr_outcome == 'merged'
+    assert spec.delay_seconds == 2
+finally:
+    os.environ.pop(TEST_MODE_GUARD_ENV, None)
+
+# Initiative loader accepts testMode as a top-level field.
+from gate.initiatives import load_initiative_from_yaml
+initiative = load_initiative_from_yaml(
+    'name: t\nrepo: leartech-x\nbranch: agent/t\ngoal: g\n'
+    'testMode:\n  finishAs: Failed\n  prOutcome: closed\n'
+)
+assert initiative.test_mode == {'finishAs': 'Failed', 'prOutcome': 'closed'}
+
+# run_test_mode exit codes reflect the plan's declared intent regardless of
+# whether AgentRun CR patching is available. LEARTECH_RUN_ID + namespace are
+# absent here so the patches are skipped — the exit code MUST still be right.
+os.environ.pop('LEARTECH_RUN_ID', None)
+os.environ.pop('AGENT_RUN_NAMESPACE', None)
+async def _run():
+    async def no_sleep(_s):
+        pass
+    ok_spec = TestModeSpec(finishAs='Succeeded', prOutcome='none')
+    bad_spec = TestModeSpec(finishAs='Failed', prOutcome='none')
+    ok = await run_test_mode(ok_spec, sleep=no_sleep)
+    bad = await run_test_mode(bad_spec, sleep=no_sleep)
+    return ok, bad
+ok, bad = asyncio.run(_run())
+assert ok == 0, ok
+assert bad == 1, bad
+
+print('OK: test-mode surface (guard-strict + parse + loader + run_test_mode exit codes)')
+" > /tmp/e2e-test-mode.txt 2>&1; then
+  echo "✓ test-mode surface (guard-strict + parse + loader wiring + run_test_mode exit codes)"
+else
+  echo "✗ test-mode surface smoke failed" >&2
+  cat /tmp/e2e-test-mode.txt >&2
+  failures=$((failures + 1))
+fi
+
 if [ "${failures}" -gt 0 ]; then
   echo
   echo "✗ ${failures} e2e check(s) failed" >&2

@@ -53,9 +53,7 @@ def test_emit_is_valid_json_with_schema_fields(cap_obslog: io.StringIO) -> None:
     assert 'time' in rec  # ISO8601 timestamp present
 
 
-def test_context_env_included_and_absent_omitted(
-    cap_obslog: io.StringIO, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_context_env_included_and_absent_omitted(cap_obslog: io.StringIO, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv('LEARTECH_RUN_ID', 's0-run-x')
     monkeypatch.setenv('AGENT_RUN_NAMESPACE', 'jx-staging')
     monkeypatch.delenv('CLUSTER', raising=False)

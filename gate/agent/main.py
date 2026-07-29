@@ -25,6 +25,7 @@ from claude_agent_sdk.types import (
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.lessons import render_for
 from gate.agent.system_prompt import REVIEW_SYSTEM_PROMPT
+from gate.agent.test_mode import parse_test_mode, run_test_mode
 from gate.mcp_servers import (
     build_artifacts_server,
     build_criteria_server,
@@ -107,10 +108,48 @@ def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
     )
 
 
+def _read_test_mode_inputs_from_env() -> dict[str, object] | None:
+    """Parse an optional test-mode inputs JSON from ``LEARTECH_INITIATIVE_YAML``.
+
+    The review agent has no dedicated inputs surface (CLI args only), but the
+    shared shape used by the infra + BA agents inlines the plan step's inputs
+    JSON into ``$LEARTECH_INITIATIVE_YAML``. When present AND that JSON has
+    a ``testMode`` key, we honor it here too so the review agent shares the
+    same short-circuit as its siblings. Returns None when the env var is
+    unset / not JSON / not a dict.
+    """
+    raw = os.environ.get('LEARTECH_INITIATIVE_YAML', '').strip()
+    if not raw:
+        return None
+    try:
+        # Deliberate: json.loads instead of yaml.safe_load — a JSON body is
+        # what the controller inlines. The review agent doesn't take a YAML
+        # initiative, so we only need the strict-JSON subset.
+        import json
+
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(parsed, dict):
+        return None
+    return parsed
+
+
 async def review_pr(
     repo: str, pr_number: int, *, model: str = DEFAULT_MODEL, max_turns: int = DEFAULT_MAX_TURNS
 ) -> int:
     """Drive Claude through a PR review using the gate's MCP servers. Returns exit code."""
+    # ── TEST-MODE short-circuit ────────────────────────────────────────────
+    # The review agent has no PR-open path (it's read-only) so open_pr is
+    # NEVER called from here even in test-mode. ONLY honored when
+    # LEARTECH_AGENT_TEST_MODE_ALLOWED=true; a stray directive in the env is
+    # ignored otherwise. Placed BEFORE the API-key check so a test-mode run
+    # with no key still succeeds.
+    test_mode_inputs = _read_test_mode_inputs_from_env()
+    test_mode_spec = parse_test_mode(test_mode_inputs)
+    if test_mode_spec is not None:
+        return await run_test_mode(test_mode_spec, open_pr_args=None)
+
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
             'ANTHROPIC_API_KEY not set. Run `leartech-claude-key` to fetch from the cluster.',

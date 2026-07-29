@@ -245,6 +245,17 @@ spec:
         - name: LEARTECH_AGENT_MODEL
           value: {{ .Values.agent.model | quote }}
         {{- end }}
+        # TEST-MODE guard — when set to "true" the agent honors ``inputs.testMode``
+        # directives to skip the LLM/SDK loop and self-report a directed phase.
+        # DEFAULT: only rendered when explicitly enabled in values.yaml. Absent
+        # env => absent gate.agent.test_mode.is_test_mode_allowed => testMode
+        # blocks are IGNORED even if a stray plan step carries one. This is the
+        # safety invariant that lets production clusters ship the test-mode code
+        # path without any risk of accidental no-ops. See gate/agent/test_mode.py.
+        {{- if .Values.agent.testModeAllowed }}
+        - name: LEARTECH_AGENT_TEST_MODE_ALLOWED
+          value: "true"
+        {{- end }}
         # OIDC bearer validation (v7-P1 step 2, hardened to permanent by C1
         # 2026-07). Auth is ALWAYS on — every cluster + preview boots
         # fail-closed; the former `agent.auth.enabled`/`required` toggles were

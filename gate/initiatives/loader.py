@@ -64,7 +64,12 @@ class RepoTarget(BaseModel):
 class Initiative(BaseModel):
     """A single deliverable: scope + intent + acceptance for the agent to drive."""
 
-    model_config = ConfigDict(extra='forbid')
+    # ``populate_by_name=True`` so aliased fields (currently just ``test_mode``
+    # ↔ ``testMode``) can be set via EITHER form. The YAML canonical shape uses
+    # the alias (``testMode``, matching the plan-step ``inputs.testMode`` idiom);
+    # Python code can still write ``initiative.test_mode`` without knowing about
+    # the alias.
+    model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
     name: str = Field(min_length=1, description='Short kebab-case identifier — also the branch suffix.')
     description: str = Field(default='', description='Why this initiative exists. For humans, not the agent.')
@@ -168,6 +173,28 @@ class Initiative(BaseModel):
             "discriminator (`end2end_failure` / `ai_review_finding`); the agent's prompt "
             'construction surfaces it as a "fix this before iterating" block. Populated '
             "by the PR watcher's re-spawn path; defaults to empty for fresh runs."
+        ),
+    )
+
+    # TEST-MODE directive — a plan step may set ``testMode`` to short-circuit
+    # the SDK/LLM loop for orchestration testing. Actual honoring is gated on
+    # ``LEARTECH_AGENT_TEST_MODE_ALLOWED=true`` in the agent's runtime env — a
+    # stray directive in a production plan MUST be ignored. The chart defaults
+    # the env off; only test-shaped deployments turn it on. See
+    # :mod:`gate.agent.test_mode` for the guard + parse + run path.
+    #
+    # Stored as a raw dict here (not a nested pydantic model) so the initiative
+    # YAML shape isn't coupled to test_mode's implementation — the guarded
+    # parse happens inside ``parse_test_mode`` and can evolve without a schema
+    # migration on every consumer.
+    test_mode: dict[str, object] | None = Field(
+        default=None,
+        alias='testMode',
+        description=(
+            'Optional test-mode directive: {finishAs, prOutcome, message?, delaySeconds?}. '
+            'Only honored when LEARTECH_AGENT_TEST_MODE_ALLOWED=true is set in the agent '
+            "runtime env; otherwise IGNORED so a stray directive can't no-op a real run. "
+            'See gate.agent.test_mode for the full contract.'
         ),
     )
 

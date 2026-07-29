@@ -72,6 +72,12 @@ class _FakeInitiative:
     # instruction. Fakes default to False so the compose call matches the
     # historical (no-hold) prompt shape.
     hold: bool = False
+    # Test-mode directive — the loader's Initiative now carries an opt-in
+    # ``test_mode: dict | None`` field (default None); the agent's run path
+    # reads it to decide whether to short-circuit the SDK loop for
+    # orchestration testing. Fakes default to None so these tests exercise
+    # the real SDK-loop path unchanged.
+    test_mode: dict[str, object] | None = None
 
     @property
     def primary(self) -> _FakeRepo:

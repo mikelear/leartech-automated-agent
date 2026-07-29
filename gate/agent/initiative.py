@@ -53,6 +53,11 @@ from gate.agent.initiative_prompt import render_initiative_system_prompt
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
 from gate.agent.run_driver import mark_first_turn, update_run_progress
+from gate.agent.test_mode import (
+    maybe_open_pr_args_for_initiative,
+    parse_test_mode,
+    run_test_mode,
+)
 from gate.initiatives import load_initiative
 from gate.mcp_servers import (
     build_agent_local_server,
@@ -670,14 +675,47 @@ async def run_initiative(
     max_turns: int = DEFAULT_INITIATIVE_MAX_TURNS,
 ) -> RunSummary:
     """Drive a single initiative end-to-end. Returns a summary of the run."""
+    initiative = load_initiative(initiative_path)
+
+    # ── TEST-MODE short-circuit ────────────────────────────────────────────
+    # A plan step may set ``initiative.testMode`` to skip the LLM/SDK loop
+    # entirely and directly self-report a Succeeded/Failed phase (with
+    # optional open_pr exercise). ONLY honored when the guard env
+    # ``LEARTECH_AGENT_TEST_MODE_ALLOWED=true`` is set — otherwise the
+    # directive is IGNORED and the agent runs normally. Placed BEFORE the
+    # ANTHROPIC_API_KEY check because test-mode's whole point is to skip the
+    # LLM: a test-mode run with no key should still succeed.
+    inputs_for_test_mode: dict[str, object] = {}
+    if initiative.test_mode is not None:
+        inputs_for_test_mode['testMode'] = initiative.test_mode
+    test_mode_spec = parse_test_mode(inputs_for_test_mode)
+    if test_mode_spec is not None:
+        # Build open_pr args for the PR-backed dev-agent step — the real
+        # path opens a PR on ``initiative.primary`` (repo + head branch), so
+        # test-mode does too. The MCP tool's own test-mode support returns
+        # a synthetic PR and still patches ``AgentRun.status.targetPR``.
+        pr_target = initiative.primary
+        open_pr_args = maybe_open_pr_args_for_initiative(
+            qualified_repo=pr_target.qualified_repo,
+            base_branch=pr_target.base or 'main',
+            head_branch=pr_target.branch,
+            title=f'[test-mode] {initiative.name}',
+            body=(
+                'This PR was opened by the agent in TEST-MODE. The MCP tool '
+                'produces a synthetic PR (real GitHub call is bypassed by '
+                'leartech-mcp-servers) — the point is to exercise the '
+                'PR-capture path end-to-end without doing real work.'
+            ),
+        )
+        exit_code = await run_test_mode(test_mode_spec, open_pr_args=open_pr_args)
+        return RunSummary(exit_code=exit_code)
+
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
             'ANTHROPIC_API_KEY not set. Run `leartech-claude-key` to fetch from the cluster.',
             err=True,
         )
         return RunSummary(exit_code=2)
-
-    initiative = load_initiative(initiative_path)
 
     # Multi-repo execution (coordinated changes across multiple PRs in a single
     # agent session) is a follow-up slice. Schema accepts the shape today; the
@@ -1453,21 +1491,33 @@ def main(initiative_path: Path, repo_root: Path | None, model: str, max_turns: i
     # refactor. run_end is THE authoritative per-run outcome line (one per run),
     # queryable in Loki: {namespace="jx-staging"} | json | event="run_end"
     obslog.info(
-        'run_start', 'initiative run starting', logger='agent.initiative',
-        model=model, initiative=str(initiative_path),
+        'run_start',
+        'initiative run starting',
+        logger='agent.initiative',
+        model=model,
+        initiative=str(initiative_path),
     )
     try:
         summary = asyncio.run(run_initiative(initiative_path, repo_root=repo_root, model=model, max_turns=max_turns))
     except Exception as exc:
         obslog.error(
-            'run_end', f'initiative run crashed: {exc}', logger='agent.initiative',
-            exit_code=1, reason='crashed', error=str(exc),
+            'run_end',
+            f'initiative run crashed: {exc}',
+            logger='agent.initiative',
+            exit_code=1,
+            reason='crashed',
+            error=str(exc),
         )
         raise
     obslog.emit(
-        'INFO' if summary.exit_code == 0 else 'ERROR', 'run_end', 'initiative run finished',
-        logger='agent.initiative', exit_code=summary.exit_code, targetPR=summary.pr_number,
-        turns=summary.turns, cost_usd=summary.cost_usd,
+        'INFO' if summary.exit_code == 0 else 'ERROR',
+        'run_end',
+        'initiative run finished',
+        logger='agent.initiative',
+        exit_code=summary.exit_code,
+        targetPR=summary.pr_number,
+        turns=summary.turns,
+        cost_usd=summary.cost_usd,
     )
     sys.exit(summary.exit_code)
 
