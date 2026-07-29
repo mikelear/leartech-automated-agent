@@ -453,3 +453,40 @@ def test_dry_run_summary_names_multi_resolve_case() -> None:
     # The individual PlanRefs get listed so operators can eyeball typos.
     assert 'foo-service-release in jx-staging' in summary
     assert 'foo-service-release in jx-production' in summary
+
+
+# --- Authorable capability catalog --------------------------------------------
+
+
+def test_authoring_capabilities_render_has_surface_and_gaps() -> None:
+    """The capability catalog renders with the routing, the infra action
+    vocabulary, and the capability-gaps — the surface the BA authors within."""
+    cap = ba_agent._render_authoring_capabilities()
+    assert 'AUTHORABLE CAPABILITIES' in cap
+    assert 'routing' in cap
+    # infra is the restricted, extensible capability-holder
+    assert 'leartech-agent-infra' in cap
+    assert 'register-source-config' in cap and 'release-health-check' in cap
+    # gaps are reported, not authored as phantom steps
+    assert 'capability_gaps' in cap
+    assert 'needs-infra:provision-secret' in cap
+
+
+def test_capabilities_injected_into_system_prompt() -> None:
+    """_build_system_prompt must carry the capability catalog so the BA only
+    authors executable steps (regression guard for the 12th/13th seams)."""
+    sp = ba_agent._build_system_prompt()
+    assert 'AUTHORABLE CAPABILITIES' in sp
+    assert 'leartech-agent-infra' in sp
+
+
+def test_capabilities_file_shape() -> None:
+    """Pin the catalog's structure so infra can extend it safely."""
+    import yaml
+
+    data = yaml.safe_load(ba_agent.CAPABILITIES_PATH.read_text(encoding='utf-8'))
+    assert set(data) >= {'routing', 'agent_types', 'capability_gaps'}
+    infra = data['agent_types']['leartech-agent-infra']
+    assert infra.get('restricted') is True
+    available = [k for k, v in infra['actions'].items() if v.get('status') == 'available']
+    assert {'register-source-config', 'deploy-config', 'release-health-check'} <= set(available)
