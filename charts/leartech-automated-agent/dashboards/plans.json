@@ -1,0 +1,178 @@
+{
+  "uid": "leartech-plans",
+  "title": "Leartech — Plans",
+  "tags": ["leartech", "plans", "loki"],
+  "editable": true,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-24h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "ns",
+        "label": "Namespace",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values(namespace)",
+        "refresh": 2,
+        "includeAll": false,
+        "multi": false,
+        "current": { "text": "jx-staging", "value": "jx-staging" }
+      },
+      {
+        "name": "plan",
+        "label": "Plan",
+        "type": "query",
+        "datasource": { "type": "loki", "uid": "loki" },
+        "query": "label_values({namespace=\"$ns\"} |~ \"plan\" | json | plan=~\".+\", plan)",
+        "refresh": 2,
+        "includeAll": true,
+        "multi": false,
+        "allValue": ".+",
+        "current": { "text": "All", "value": "$__all" }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Tier 1 — Plans (event-sourced, cross-service)",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Plans succeeded (window)",
+      "description": "Count of `plan.completed` events with phase=Succeeded in the dashboard time-range.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [ { "color": "green", "value": null } ] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"plan\\\\.completed\" | json | event=\"plan.completed\" | phase=~\"(?i)succeeded|success\" [$__range]))", "instant": true }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Plans failed (window)",
+      "description": "Count of `plan.completed` events with phase=Failed in the dashboard time-range.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"plan\\\\.completed\" | json | event=\"plan.completed\" | phase=~\"(?i)failed|failure\" [$__range]))", "instant": true }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Plans resolved (window)",
+      "description": "Count of `plan.completed` events with phase=Resolved (the BA-loop closure phase) in the dashboard time-range.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [ { "color": "green", "value": null } ] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"plan\\\\.completed\" | json | event=\"plan.completed\" | phase=~\"(?i)resolved\" [$__range]))", "instant": true }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Plans in flight",
+      "description": "Distinct plans with `plan.step_started` in the window (proxy for currently-active plans). Zero-boundary means idle.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "thresholds" },
+          "thresholds": { "steps": [ { "color": "green", "value": null } ] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "count(count by (plan) (count_over_time({namespace=\"$ns\"} |~ \"plan\\\\.step_started\" | json | event=\"plan.step_started\" [$__range])))", "instant": true }
+      ]
+    },
+    {
+      "id": 6,
+      "type": "logs",
+      "title": "Recent plan lifecycle events",
+      "description": "All `plan.*` events (step_started / step_done / completed) across the window — reverse-chronological. Filter by $plan to focus a single plan. Uses `| json` for structured field extraction with a `|~ \"plan\\.\"` line-prefilter so unstructured lines are already excluded (and the panel degrades gracefully if a stream isn't JSON yet: the JSON-parsed fields will simply be empty on those lines).",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 6 },
+      "options": { "showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Descending" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{namespace=\"$ns\"} |~ \"plan\\\\.(step_started|step_done|completed)\" | json | event=~\"plan\\\\.(step_started|step_done|completed)\" | plan=~\"$plan\"" }
+      ]
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Plan step throughput (steps started/done over time)",
+      "description": "Per-event rate of `plan.step_started` vs `plan.step_done` — a widening gap between started and done indicates piling-up in-flight steps.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 18 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "none" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"plan\\\\.step_started\" | json | event=\"plan.step_started\" | plan=~\"$plan\" [$__interval]))", "legendFormat": "step_started" },
+        { "refId": "B", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"plan\\\\.step_done\" | json | event=\"plan.step_done\" | plan=~\"$plan\" [$__interval]))", "legendFormat": "step_done" }
+      ]
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Plan.completed by phase",
+      "description": "Rate of terminal `plan.completed` events broken out by phase (Succeeded / Failed / Resolved).",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 18 },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "normal" } } }, "overrides": [] },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum by (phase) (count_over_time({namespace=\"$ns\"} |~ \"plan\\\\.completed\" | json | event=\"plan.completed\" | plan=~\"$plan\" [$__interval]))", "legendFormat": "{{phase}}" }
+      ]
+    },
+    {
+      "id": 9,
+      "type": "logs",
+      "title": "Per-step timeline for $plan",
+      "description": "Filtered to $plan — `plan.step_started` and `plan.step_done` with `step` + `phase`, one line per hop. Use this as the plan's audit log; each line's JSON details expose the step's inputs/outcome.",
+      "datasource": { "type": "loki", "uid": "loki" },
+      "gridPos": { "h": 12, "w": 24, "x": 0, "y": 26 },
+      "options": { "showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Ascending" },
+      "targets": [
+        { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{namespace=\"$ns\"} |~ \"plan\\\\.(step_started|step_done)\" | json | event=~\"plan\\\\.step_(started|done)\" | plan=~\"$plan\"" }
+      ]
+    }
+  ]
+}
