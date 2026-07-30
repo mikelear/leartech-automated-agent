@@ -147,6 +147,7 @@ markers = [
     "integration: tier 2 — mock-based integration tests",
     "e2e: tier 3 — end2end/run.sh style scripts",
     "playwright: tier 4 — UI browser tests with artifact analysis",
+    "dashboards: opt-in dashboard↔Loki contract test (needs live Loki; gated by LOKI_ENABLE_DASHBOARD_CONTRACT_TEST=1)",
 ]
 
 [tool.coverage.run]

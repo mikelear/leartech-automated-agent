@@ -1205,6 +1205,113 @@ else
   failures=$((failures + 1))
 fi
 
+# ---------------------------------------------------------------------
+# Grafana dashboards — vocabulary + shape smoke (fix/dashboard-query-vocabulary).
+# ---------------------------------------------------------------------
+# This is an OFFLINE check: it does NOT hit Loki. The live-Loki contract
+# test lives at tests/dashboards/test_dashboard_queries.py and is opt-in
+# (LOKI_ENABLE_DASHBOARD_CONTRACT_TEST=1) — see tests/dashboards/README.md.
+#
+# Here we just assert that the JSON parses AND carries the corrected
+# vocabulary the initiative introduced:
+#   • plans.json uses `app="leartech-maestro-service"` (maestro stream)
+#     with `eventName="plan.completed"` (NOT the old `event=...` on the
+#     controller stream that made the panels "no data").
+#   • plan-and-loop.json keeps the loop_hop / event_id vocabulary
+#     (correct as-is per FIX 3).
+#   • agent-runs.json's $run/$run_id dropdowns are constrained to
+#     agent-run Job pods (`[0-9a-f]{12}-[a-z0-9]{5}`) so they don't
+#     enumerate every pod ever.
+if uv run python -c "
+import json, re
+from pathlib import Path
+
+root = Path('charts/leartech-automated-agent/dashboards')
+
+# 1. All three dashboards parse and are non-empty.
+plans = json.loads((root / 'plans.json').read_text())
+loop = json.loads((root / 'plan-and-loop.json').read_text())
+runs = json.loads((root / 'agent-runs.json').read_text())
+assert plans.get('uid') == 'leartech-plans'
+assert loop.get('uid') == 'leartech-plan-and-loop'
+assert runs.get('uid') == 'leartech-agent-runs'
+
+# 2. plans.json — every non-row panel target queries the MAESTRO stream
+#    with the CORRECT vocabulary. This catches a regression back to the
+#    old controller-stream / event= form.
+plan_targets = [
+    t.get('expr', '')
+    for pan in plans.get('panels', [])
+    for t in pan.get('targets', [])
+    if pan.get('type') != 'row'
+]
+assert plan_targets, 'plans.json: no panel targets discovered'
+for expr in plan_targets:
+    assert 'app=\"leartech-maestro-service\"' in expr, (
+        'plans.json regressed: panel target does not scope to maestro app label:\\n  '
+        + expr
+    )
+    # At least one of eventName= / plan= must appear — every panel is one
+    # or the other flavour.
+    assert 'eventName=' in expr or 'plan=~' in expr, (
+        'plans.json regressed: panel target missing eventName= or plan= filter:\\n  '
+        + expr
+    )
+# Guard the specific vocabulary tokens the initiative fixed.
+plans_text = (root / 'plans.json').read_text()
+assert 'eventName=\"plan.completed\"' in plans_text, (
+    'plans.json regressed: expected eventName=\"plan.completed\" (was event=\"plan.completed\" pre-fix)'
+)
+# Guard against the OLD form sneaking back in.
+assert '| event=\"plan.completed\"' not in plans_text, (
+    'plans.json regressed: OLD event=\"plan.completed\" vocabulary reappeared (should be eventName= on the maestro stream)'
+)
+
+# 3. plan-and-loop.json — loop_hop vocabulary preserved.
+loop_text = (root / 'plan-and-loop.json').read_text()
+assert 'loop_hop=\"maestro_receive\"' in loop_text, (
+    'plan-and-loop.json regressed: loop_hop=\"maestro_receive\" vocabulary missing'
+)
+assert 'loop_hop=\"resolved\"' in loop_text, (
+    'plan-and-loop.json regressed: loop_hop=\"resolved\" vocabulary missing'
+)
+# Template vars scoped to maestro app label (FIX 2).
+event_id_var = next(v for v in loop['templating']['list'] if v['name'] == 'event_id')
+assert 'app=\"leartech-maestro-service\"' in event_id_var['query'], (
+    'plan-and-loop.json regressed: $event_id template var not scoped to maestro app label'
+)
+
+# 4. agent-runs.json — $run/$run_id dropdowns restricted to Job pods.
+runs_vars = {v['name']: v for v in runs['templating']['list']}
+for name in ('run', 'run_id'):
+    q = runs_vars[name]['query']
+    assert '[0-9a-f]{12}-[a-z0-9]{5}' in q, (
+        f'agent-runs.json regressed: ${name} template var not restricted to '
+        f'agent-run Job pod pattern; would enumerate every pod ever'
+    )
+
+# 5. The contract test file exists with the dashboards marker.
+contract = Path('tests/dashboards/test_dashboard_queries.py').read_text()
+assert 'pytest.mark.dashboards' in contract, (
+    'tests/dashboards/test_dashboard_queries.py: dashboards marker missing'
+)
+assert 'LOKI_ENABLE_DASHBOARD_CONTRACT_TEST' in contract, (
+    'tests/dashboards/test_dashboard_queries.py: opt-in env var guard missing'
+)
+readme = Path('tests/dashboards/README.md').read_text()
+assert 'LOKI_ENABLE_DASHBOARD_CONTRACT_TEST' in readme, (
+    'tests/dashboards/README.md: manual invocation env var missing'
+)
+
+print('OK: dashboards vocabulary + shape smoke (plans/plan-and-loop/agent-runs + contract test)')
+" > /tmp/e2e-dashboards.txt 2>&1; then
+  echo "✓ dashboards vocabulary + shape smoke (plans/loop/runs + contract test opt-in)"
+else
+  echo "✗ dashboards vocabulary smoke failed" >&2
+  cat /tmp/e2e-dashboards.txt >&2
+  failures=$((failures + 1))
+fi
+
 if [ "${failures}" -gt 0 ]; then
   echo
   echo "✗ ${failures} e2e check(s) failed" >&2

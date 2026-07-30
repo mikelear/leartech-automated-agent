@@ -4,7 +4,7 @@
   "tags": ["leartech", "loop", "ba", "maestro", "loki"],
   "editable": true,
   "schemaVersion": 39,
-  "version": 1,
+  "version": 2,
   "refresh": "30s",
   "time": { "from": "now-6h", "to": "now" },
   "templating": {
@@ -23,10 +23,10 @@
       {
         "name": "event_id",
         "label": "Event id",
-        "description": "Correlates mid-loop hops (maestro_receive → resolved). Optional — leave as `.+` to see all loops.",
+        "description": "Correlates mid-loop hops (maestro_receive → resolved). Scoped to the maestro app label so the dropdown doesn't scan the whole namespace. Leave as `.+` to see all loops.",
         "type": "query",
         "datasource": { "type": "loki", "uid": "loki" },
-        "query": "label_values({namespace=\"$ns\"} |~ \"loop_hop\" | json | event_id=~\".+\", event_id)",
+        "query": "label_values({namespace=\"$ns\", app=\"leartech-maestro-service\"} |~ \"loop_hop\" | json | event_id=~\".+\", event_id)",
         "refresh": 2,
         "includeAll": true,
         "multi": false,
@@ -36,10 +36,10 @@
       {
         "name": "plan",
         "label": "Plan",
-        "description": "Correlates the outer boundaries of a loop (emit + resolved carry `plan`, not event_id). Optional — leave as `.+` for all.",
+        "description": "Correlates the outer boundaries of a loop (emit + resolved carry `plan`, not event_id). Scoped to the maestro app label. Leave as `.+` for all.",
         "type": "query",
         "datasource": { "type": "loki", "uid": "loki" },
-        "query": "label_values({namespace=\"$ns\"} |~ \"loop_hop\" | json | plan=~\".+\", plan)",
+        "query": "label_values({namespace=\"$ns\", app=\"leartech-maestro-service\"} |~ \"loop_hop\" | json | plan=~\".+\", plan)",
         "refresh": 2,
         "includeAll": true,
         "multi": false,
@@ -61,14 +61,15 @@
       "id": 2,
       "type": "stat",
       "title": "release.deploy_failed emitted",
-      "description": "Count of loop `emit` hops (release.deploy_failed) in the window. This is what starts the loop.",
+      "description": "Count of loop `emit` hops (release.deploy_failed) in the window. This is what starts the loop. Empty window is legitimate — hops populate only when loops fire; stat shows 0, not \"No data\".",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 5, "w": 6, "x": 0, "y": 1 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
           "thresholds": { "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 } ] },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -81,14 +82,15 @@
       "id": 3,
       "type": "stat",
       "title": "Loops resolved",
-      "description": "Count of loop `resolved` hops (loop closure) in the window.",
+      "description": "Count of loop `resolved` hops (loop closure) in the window. Empty window is legitimate — hops populate only when loops fire; stat shows 0, not \"No data\".",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 5, "w": 6, "x": 6, "y": 1 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
           "thresholds": { "steps": [ { "color": "green", "value": null } ] },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -101,14 +103,15 @@
       "id": 4,
       "type": "stat",
       "title": "Remediations authored",
-      "description": "Count of loop `remediation_authored` hops — the BA agent finished writing a remediation.",
+      "description": "Count of loop `remediation_authored` hops — the BA agent finished writing a remediation. Empty window is legitimate — hops populate only when loops fire; stat shows 0, not \"No data\".",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 5, "w": 6, "x": 12, "y": 1 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
           "thresholds": { "steps": [ { "color": "green", "value": null } ] },
-          "unit": "short"
+          "unit": "short",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -121,14 +124,15 @@
       "id": 5,
       "type": "stat",
       "title": "Loop-closure ratio (resolved / emit)",
-      "description": "Fraction of `release.deploy_failed` emits that reached `resolved` in the window. Under 1.0 = open loops. Over 1.0 = late resolutions of loops emitted before the window.",
+      "description": "Fraction of `release.deploy_failed` emits that reached `resolved` in the window. Under 1.0 = open loops. Over 1.0 = late resolutions of loops emitted before the window. Panel shows 0.0 when no loops have fired.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 5, "w": 6, "x": 18, "y": 1 },
       "fieldConfig": {
         "defaults": {
           "color": { "mode": "thresholds" },
           "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 0.5 }, { "color": "green", "value": 1 } ] },
-          "unit": "percentunit"
+          "unit": "percentunit",
+          "noValue": "0"
         },
         "overrides": []
       },
@@ -141,7 +145,7 @@
       "id": 6,
       "type": "logs",
       "title": "Loop trace — hops in time order (filter by $event_id / $plan)",
-      "description": "The headline panel. Every loop hop — emit → maestro_receive → maestro_dispatch → consume → ba_spawn → remediation_authored → resolved — in time order. Correlate mid-loop hops by $event_id; the outer emit + resolved carry `plan` so also filter by $plan when needed. Line-prefilter `|~ \"loop_hop\"` narrows the stream before JSON parsing.",
+      "description": "The headline panel. Every loop hop — emit → maestro_receive → maestro_dispatch → consume → ba_spawn → remediation_authored → resolved — in time order. Correlate mid-loop hops by $event_id; the outer emit + resolved carry `plan` so also filter by $plan when needed. Line-prefilter `|~ \"loop_hop\"` narrows the stream before JSON parsing. Empty output is legitimate — loops populate the panel only when they fire.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 14, "w": 24, "x": 0, "y": 6 },
       "options": { "showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Ascending" },
@@ -156,7 +160,7 @@
       "description": "Rate of loop-opening `emit` hops (the release.deploy_failed events reaching maestro). Spikes = surge of deploy failures; steady baseline = normal reconcile pressure.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 20 },
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "none" } } }, "overrides": [] },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "bars", "fillOpacity": 60, "stacking": { "mode": "none" } }, "noValue": "0" }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"emit\" | plan=~\"$plan\" [$__interval]))", "legendFormat": "release.deploy_failed" }
@@ -169,7 +173,7 @@
       "description": "Side-by-side rate of `emit` and `resolved` hops. If `resolved` trails `emit` persistently, loops are hanging.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 20 },
-      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "none" } } }, "overrides": [] },
+      "fieldConfig": { "defaults": { "custom": { "drawStyle": "line", "fillOpacity": 10, "stacking": { "mode": "none" } }, "noValue": "0" }, "overrides": [] },
       "options": { "legend": { "displayMode": "table", "placement": "bottom", "calcs": ["sum"] }, "tooltip": { "mode": "multi" } },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"emit\" | plan=~\"$plan\" [$__interval]))", "legendFormat": "emit" },
@@ -188,10 +192,10 @@
       "id": 10,
       "type": "stat",
       "title": "emit",
-      "description": "Loop-start hop. Ties to `release.deploy_failed`. Missing → nothing is publishing the event.",
+      "description": "Loop-start hop. Ties to `release.deploy_failed`. Missing → nothing is publishing the event. Panel shows 0 when the hop hasn't fired in the window.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 4, "w": 3, "x": 0, "y": 29 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "noValue": "0" } },
       "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"emit\" | plan=~\"$plan\" [$__range]))", "instant": true, "legendFormat": "emit" }
@@ -201,10 +205,10 @@
       "id": 11,
       "type": "stat",
       "title": "maestro_receive",
-      "description": "Maestro received the event. Missing → maestro isn't subscribed / topic misrouting.",
+      "description": "Maestro received the event. Missing → maestro isn't subscribed / topic misrouting. Panel shows 0 when the hop hasn't fired in the window.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 4, "w": 3, "x": 3, "y": 29 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "noValue": "0" } },
       "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"maestro_receive\" | event_id=~\"$event_id\" [$__range]))", "instant": true, "legendFormat": "maestro_receive" }
@@ -214,10 +218,10 @@
       "id": 12,
       "type": "stat",
       "title": "maestro_dispatch",
-      "description": "Maestro dispatched to a subscriber (typically consume/ba_spawn). Missing after receive → no matching subscription.",
+      "description": "Maestro dispatched to a subscriber (typically consume/ba_spawn). Missing after receive → no matching subscription. Panel shows 0 when the hop hasn't fired in the window.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 4, "w": 3, "x": 6, "y": 29 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "noValue": "0" } },
       "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"maestro_dispatch\" | event_id=~\"$event_id\" [$__range]))", "instant": true, "legendFormat": "maestro_dispatch" }
@@ -227,10 +231,10 @@
       "id": 13,
       "type": "stat",
       "title": "consume",
-      "description": "Subscriber pulled the message off the bus. Missing after dispatch → consumer is unhealthy / backlogged.",
+      "description": "Subscriber pulled the message off the bus. Missing after dispatch → consumer is unhealthy / backlogged. Panel shows 0 when the hop hasn't fired in the window.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 4, "w": 3, "x": 9, "y": 29 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "noValue": "0" } },
       "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"consume\" | event_id=~\"$event_id\" [$__range]))", "instant": true, "legendFormat": "consume" }
@@ -240,10 +244,10 @@
       "id": 14,
       "type": "stat",
       "title": "ba_spawn",
-      "description": "BA agent Job spawned. Missing after consume → jobspawn error / RBAC drop.",
+      "description": "BA agent Job spawned. Missing after consume → jobspawn error / RBAC drop. Panel shows 0 when the hop hasn't fired in the window.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 4, "w": 3, "x": 12, "y": 29 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "noValue": "0" } },
       "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"ba_spawn\" | event_id=~\"$event_id\" [$__range]))", "instant": true, "legendFormat": "ba_spawn" }
@@ -253,10 +257,10 @@
       "id": 15,
       "type": "stat",
       "title": "remediation_authored",
-      "description": "BA finished authoring a remediation Plan. Missing after ba_spawn → BA crashed or exited non-zero.",
+      "description": "BA finished authoring a remediation Plan. Missing after ba_spawn → BA crashed or exited non-zero. Panel shows 0 when the hop hasn't fired in the window.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 4, "w": 3, "x": 15, "y": 29 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "noValue": "0" } },
       "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"remediation_authored\" | event_id=~\"$event_id\" [$__range]))", "instant": true, "legendFormat": "remediation_authored" }
@@ -266,10 +270,10 @@
       "id": 16,
       "type": "stat",
       "title": "resolved",
-      "description": "Loop closure — the remediation Plan reached a terminal Succeeded/Resolved phase. Missing → loop never closed.",
+      "description": "Loop closure — the remediation Plan reached a terminal Succeeded/Resolved phase. Missing → loop never closed. Panel shows 0 when the hop hasn't fired in the window.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 4, "w": 3, "x": 18, "y": 29 },
-      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] } } },
+      "fieldConfig": { "defaults": { "color": { "mode": "thresholds" }, "thresholds": { "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }, "noValue": "0" } },
       "options": { "reduceOptions": { "calcs": ["sum"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "none", "textMode": "value_and_name" },
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"resolved\" | plan=~\"$plan\" [$__range]))", "instant": true, "legendFormat": "resolved" }
@@ -279,7 +283,7 @@
       "id": 17,
       "type": "logs",
       "title": "loop-forensics quick-view — hops for $event_id (verbose JSON)",
-      "description": "Mirror of `scripts/loop-forensics.sh` output — same hop vocabulary, filtered to $event_id, showing every field the log line carried. Use to diagnose a specific stuck loop.",
+      "description": "Mirror of `scripts/loop-forensics.sh` output — same hop vocabulary, filtered to $event_id, showing every field the log line carried. Use to diagnose a specific stuck loop. Empty output is legitimate — hops populate only when loops fire; keeps a `| json` pipeline so structured fields are exposed in details.",
       "datasource": { "type": "loki", "uid": "loki" },
       "gridPos": { "h": 10, "w": 24, "x": 0, "y": 33 },
       "options": { "showTime": true, "wrapLogMessage": true, "prettifyLogMessage": true, "enableLogDetails": true, "dedupStrategy": "none", "sortOrder": "Ascending" },
