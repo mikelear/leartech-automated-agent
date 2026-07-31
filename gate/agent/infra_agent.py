@@ -26,6 +26,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Callable
 
 import click
 from claude_agent_sdk import ClaudeAgentOptions, query
@@ -43,6 +44,11 @@ from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative import INITIATIVE_TEKTON_TOOLS, WRITE_MODE_TOOLS
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
+from gate.agent.release_health import (
+    ProbeResult,
+    probe_health_targets,
+    resolve_targets_from_inputs,
+)
 from gate.agent.test_mode import parse_test_mode, run_test_mode
 from gate.mcp_servers import build_remote_mcp_servers
 
@@ -135,7 +141,17 @@ ACTIONS (your inputs include `action` + its params):
   jx-release MCP (do NOT hand-scrape Tekton). Bounded by `budgetMinutes` from your inputs
   (default 60 if unset) — a real cold-repo multi-cluster release+promote+deploy can take
   40-50 min, so do NOT give up early. Poll ~60s between checks (`sleep 60`) — never one giant
-  sleep. Stages (stop + FAIL closed only once the budget elapses):
+  sleep.
+
+  IMPORTANT — the /health probe is CODIFIED, not up to you. Stages 1-3 are yours to drive via
+  the jx-release MCP; the health check itself is DETERMINISTIC Python that runs after this
+  message loop returns. You do NOT run kubectl and you do NOT curl /health yourself: the
+  agent-py image has no kubectl (SA=default), and past runs have improvised opposite verdicts
+  from the same setup (one curled the ingress and PASSED; another gave up and FAILED closed).
+  Your job on stage 4 is to DISCOVER the hosts and emit a machine-readable target line —
+  Python probes them.
+
+  Stages (stop + FAIL closed only once the budget elapses):
     1. RELEASE FIRED — poll mcp__leartech-jx-release__release_status(repo=mikelear/<service>)
        until released=true (the dev PR merged and the release Tekton produced a release).
     2. PROMOTE PRs — poll mcp__leartech-jx-release__promote_status(service) (both clusters):
@@ -144,22 +160,42 @@ ACTIONS (your inputs include `action` + its params):
          mcp__leartech-jx-release__retest_promote(cluster, pr_number) ONCE for that PR, then
          keep polling. Do NOT retest-loop.
        * any_gate_failed=true → STOP. This is a real qa-gate failure that may need other plans:
-         FAIL with reason "needs-cross-plan-Infra-agent: <cluster> qa-gate failed on promote PR
-         #<n>". Do NOT try to fix it yourself.
+         end your final message with exactly one line
+             RELEASE_HEALTH: FAIL: needs-cross-plan-Infra-agent: <cluster> qa-gate failed on promote PR #<n>
+         Do NOT try to fix it yourself.
     3. MERGED — keep polling until all_merged=true (Tide auto-merges the promote PRs on green).
-    4. HEALTH (optional tail) — once merged, best-effort confirm the Deployment `service` in
-       `namespace` is rolling out; if you can quickly curl https://<host><healthPath> for 200
-       via kubectl-discovered Ingress, note it. Do not fail solely on this tail if all_merged.
-  PASS only when all_merged=true (stage 3). Params: service, namespace, healthPath.
-  You MUST end your final message with EXACTLY ONE verdict line, on its own line:
-      RELEASE_HEALTH: PASS
-  or
-      RELEASE_HEALTH: FAIL: <one-line reason>
-  Output PASS ONLY if you OBSERVED all of: the Deployment exists with >=1 available replica
-  AND an HTTP 200 from the health endpoint. If the Deployment/Ingress is missing, the rollout
-  is incomplete, the curl is non-200, or you could NOT confirm for ANY reason, output FAIL.
-  A merged PR, a queued release, or "not deployed yet" is a FAIL, never a PASS — the step's
-  success is decided by this verdict, not by whether you finished exploring.
+       If stages 1-3 do NOT complete within the budget, end your final message with exactly:
+           RELEASE_HEALTH: FAIL: <one-line reason describing what stalled>
+       (e.g. "release did not fire within 60min", "GCP promote PR #123 stuck non-green").
+    4. HEALTH TARGETS — once all_merged=true, DISCOVER the ingress host(s) that a /health probe
+       will hit and emit them on ONE line for the deterministic Python probe:
+           HEALTH_TARGETS: https://<host1><healthPath>[, https://<host2><healthPath>]
+       Discovery order:
+         * If `healthUrl` or `host` is in your inputs, PRINT the line using those values
+           verbatim — do not discover further (inputs override discovery).
+         * Otherwise, read the merged GitOps Ingress YAML for the service on each cluster:
+           `gh api repos/mikelear/jx-build-cluster-gsm/contents/<service>/ingress.yaml`
+           and its `jx-build-cluster-akv` twin, extract the `spec.rules[0].host`, and print
+           BOTH hosts joined with `<healthPath>`. If only ONE cluster has a merged ingress
+           (e.g. single-cluster service), emit that one host — the probe still verdicts on
+           what was emitted.
+       Do NOT emit a `RELEASE_HEALTH:` line in this stage — the Python probe writes the final
+       verdict from the target list you emit. If you cannot discover any host at all, emit
+           RELEASE_HEALTH: FAIL: could not discover any /health host from inputs or GitOps
+       (that fail-closes; do NOT invent a hostname).
+
+  kubectl is OPTIONAL. If your image somehow has it, `kubectl rollout status` may be
+  additional narrated context, but its ABSENCE is NEVER a reason to fail — the HTTP probe is
+  authoritative. Do not emit FAIL because "kubectl is unavailable".
+
+  Params: service, namespace, healthPath (default /health), optional healthUrl, optional host
+  (single string or list — one per cluster). The Python probe:
+    * requests each URL, retrying every ~10s within the budget;
+    * treats 502/503/504 and transport errors as transient (jx-boot still reconciling);
+    * treats any other non-200 as an IMMEDIATE hard fail (a 404 means the app didn't wire
+      /health; retrying won't fix that);
+    * verdicts PASS iff every target returned 200 within the budget.
+  The verdict PASS/FAIL is decided by the probe, not by whether you finished exploring.
 
 Report concisely what you did, which PRs you opened (numbers), and the pass/fail outcome.
 """
@@ -195,27 +231,81 @@ def _task_prompt(action: str, inputs: dict[str, object]) -> str:
     )
 
 
-# Machine-readable verdict the release-health-check action must emit; the LAST match wins
-# (the agent may narrate before its final verdict line). Absent => treated as FAIL.
-_HEALTH_VERDICT_RE = re.compile(r'^\s*RELEASE_HEALTH:\s*(PASS|FAIL)\b', re.MULTILINE)
+# Machine-readable early-exit verdict the LLM emits when stages 1-3 fail (release didn't
+# fire within budget, promote gate-failed, etc.). Stage-4 PASS is decided by the Python
+# probe, NOT by the LLM — so this regex only matches FAIL. A stray PASS from the LLM is
+# ignored (defence in depth against the historical "kubectl unavailable => FAIL" or
+# "curled once and claimed PASS" improvisation).
+_HEALTH_FAIL_RE = re.compile(r'^\s*RELEASE_HEALTH:\s*FAIL(?:\s*:\s*(.+))?$', re.MULTILINE)
 
 
-def _last_health_verdict(text: str) -> str | None:
-    """Return the last RELEASE_HEALTH verdict (PASS/FAIL) in the agent transcript, or None."""
-    matches = _HEALTH_VERDICT_RE.findall(text)
-    return matches[-1].upper() if matches else None
+def _last_llm_fail_reason(text: str) -> str | None:
+    """Return the LAST ``RELEASE_HEALTH: FAIL: <reason>`` reason string, or None.
 
-
-def _resolve_exit_code(action: str, sdk_exit_code: int, health_verdict: str | None) -> int:
-    """Fold the outcome-verdict into the exit code for judgment actions.
-
-    For release-health-check, ONLY an explicit PASS keeps success; FAIL or a MISSING verdict
-    forces exit 1 (a merged PR / undeployed release must never read as healthy). Other actions
-    keep the SDK-derived code (is_error).
+    Used only to surface a pre-stage-4 failure reason emitted by the LLM (release
+    didn't fire, promote gate-failed). Stage-4 PASS is NEVER read from the transcript —
+    the Python probe verdicts that. ``None`` means the LLM did not declare an early-exit
+    failure; the probe (or absent-target FAIL) decides the outcome.
     """
-    if action == 'release-health-check' and health_verdict != 'PASS':
-        return 1
-    return sdk_exit_code
+    matches = _HEALTH_FAIL_RE.findall(text)
+    if not matches:
+        return None
+    # findall returns the capture group (may be empty string if no reason was given).
+    last = matches[-1].strip()
+    return last or 'LLM declared FAIL without a reason'
+
+
+def _health_check_verdict(
+    inputs: dict[str, object],
+    transcript: str,
+    *,
+    probe: Callable[..., ProbeResult] = probe_health_targets,
+    budget_seconds: float | None = None,
+) -> tuple[ProbeResult, list[str]]:
+    """Compute the DETERMINISTIC release-health-check verdict.
+
+    Contract:
+      * If the LLM emitted ``RELEASE_HEALTH: FAIL: <reason>``, propagate that as
+        the verdict (stages 1-3 failed — no probe needed).
+      * Otherwise, resolve targets from inputs (healthUrl / host) or from the LLM's
+        ``HEALTH_TARGETS:`` line, then RUN THE PYTHON PROBE. The verdict is a
+        function of endpoint responses, not model narration.
+      * No kubectl. Absence of kubectl is never a reason to FAIL — the HTTP probe
+        is authoritative (closes the historical asymmetry).
+
+    Returns ``(ProbeResult, targets)`` so the caller can log both the verdict and the
+    targets it was computed against.
+    """
+    llm_fail = _last_llm_fail_reason(transcript)
+    if llm_fail is not None:
+        # Pre-stage-4 failure. Present the reason as the probe verdict for a
+        # single ProbeResult shape downstream.
+        return (
+            ProbeResult(verdict='FAIL', reason=f'stage 1-3: {llm_fail}', probes=()),
+            [],
+        )
+    targets = resolve_targets_from_inputs(inputs, transcript)
+    kwargs: dict[str, object] = {}
+    if budget_seconds is not None:
+        kwargs['budget_seconds'] = budget_seconds
+    result = probe(targets, **kwargs)
+    return result, targets
+
+
+def _release_health_budget_seconds(inputs: dict[str, object]) -> float | None:
+    """Compute the probe budget in seconds from ``inputs['budgetMinutes']``.
+
+    Returns None when unset so the probe uses its own default (300s). The LLM
+    already spent time on stages 1-3, so the probe budget is intentionally the
+    stage-4 tail — the caller can pin it via inputs (``probeBudgetSeconds``) if
+    they want tighter control than the plan-level ``budgetMinutes``.
+    """
+    if 'probeBudgetSeconds' in inputs:
+        try:
+            return float(inputs['probeBudgetSeconds'])  # type: ignore[arg-type]
+        except (TypeError, ValueError):
+            return None
+    return None
 
 
 async def run_infra_task(
@@ -288,18 +378,28 @@ async def run_infra_task(
         raise
 
     # Judgment actions must drive the exit code from the OUTCOME, not just SDK errors.
-    # release-health-check emits a machine-readable verdict; anything but an explicit PASS
-    # (incl. a MISSING verdict) FAILS the step — a merged PR / undeployed release must never
-    # read as healthy (closes the false-success where exit_code tracked only is_error).
+    # release-health-check: verdict is DETERMINISTIC — the Python probe (or an LLM-declared
+    # stage-1-3 FAIL) decides PASS/FAIL, not the model's narration. A merged PR / undeployed
+    # release / non-200 /health must never read as healthy (closes both the false-success
+    # where exit_code tracked only is_error AND the cluster-asymmetric "kubectl unavailable
+    # => FAIL" improvisation the historical LLM-driven check produced).
     if action == 'release-health-check':
-        verdict = _last_health_verdict('\n'.join(transcript))
-        exit_code = _resolve_exit_code(action, exit_code, verdict)
+        result, targets = _health_check_verdict(
+            inputs,
+            '\n'.join(transcript),
+            budget_seconds=_release_health_budget_seconds(inputs),
+        )
+        # Exit code: only an explicit PASS survives; FAIL forces 1.
+        exit_code = 0 if result.verdict == 'PASS' else 1
         obslog.info(
             'health_verdict',
-            f'release-health-check verdict={verdict or "MISSING"}',
+            f'release-health-check verdict={result.verdict}',
             logger='infra',
             action=action,
-            verdict=verdict or 'MISSING',
+            verdict=result.verdict,
+            reason=result.reason,
+            targets=targets,
+            probes=[p.as_dict() for p in result.probes],
             exit_code=exit_code,
         )
 
