@@ -4,6 +4,15 @@ Cluster CoS (deferred): the infra agent runs the repo-factory Plan end-to-end an
 hello-world service reaches /health=200 on both clusters. Here we prove the entrypoint is
 wired: write-mode + MCP tools granted, the deterministic-scaffold rule is in the prompt,
 the infra_agent role exists in the catalog and references only real MCPs.
+
+The release-health-check verdict is pinned deterministic:
+    * given release fired + promotes merged + a stubbed HTTP endpoint returning 200 →
+      verdict is PASS with NO kubectl available;
+    * given the endpoint returning 502 then 200 → retries then PASSES;
+    * given persistent non-200 → FAILS with a clear reason;
+    * verdict does NOT depend on kubectl availability.
+See ``tests/test_release_health.py`` for the probe-level pins; here we focus on the
+infra-agent-wired verdict function.
 """
 
 from __future__ import annotations
@@ -15,6 +24,7 @@ import pytest
 
 from gate.agent import infra_agent
 from gate.agent.mcp_catalog import load_catalog
+from gate.agent.release_health import ProbeResult
 
 
 def test_infra_role_in_catalog_references_real_mcps() -> None:
@@ -76,31 +86,105 @@ def test_run_infra_task_reraises_sdk_exception(monkeypatch: pytest.MonkeyPatch) 
         asyncio.run(infra_agent.run_infra_task('create-repo', {'newRepo': 'x'}))
 
 
-def test_last_health_verdict_parses_and_takes_last() -> None:
-    assert infra_agent._last_health_verdict('all good\nRELEASE_HEALTH: PASS') == 'PASS'
-    assert infra_agent._last_health_verdict('RELEASE_HEALTH: FAIL: no deployment') == 'FAIL'
-    assert infra_agent._last_health_verdict('nothing to see here') is None
-    # narration before the verdict, and the LAST verdict wins
-    multi = 'RELEASE_HEALTH: FAIL: rollout incomplete\n...retried...\nRELEASE_HEALTH: PASS'
-    assert infra_agent._last_health_verdict(multi) == 'PASS'
+# ── release-health-check: deterministic verdict path ──────────────────────────
+#
+# The whole point of moving the verdict off the LLM is that the outcome must be a
+# function of endpoint responses (or an explicit stage-1-3 LLM FAIL), never of what
+# the model decided to say. These pins guard that.
 
 
-def test_resolve_exit_code_health_check_fails_closed() -> None:
-    # release-health-check: only an explicit PASS survives; FAIL/MISSING force 1 even when the
-    # SDK loop reported success (is_error=False -> sdk_exit_code=0). Closes the false-success.
-    assert infra_agent._resolve_exit_code('release-health-check', 0, 'PASS') == 0
-    assert infra_agent._resolve_exit_code('release-health-check', 0, 'FAIL') == 1
-    assert infra_agent._resolve_exit_code('release-health-check', 0, None) == 1
-    # other actions keep the SDK-derived code untouched
-    assert infra_agent._resolve_exit_code('create-repo', 0, None) == 0
-    assert infra_agent._resolve_exit_code('create-repo', 1, 'PASS') == 1
+def test_last_llm_fail_reason_captures_stage_1_3_failures() -> None:
+    """LLM can only DECLARE FAIL from the transcript — PASS is never accepted there."""
+    assert infra_agent._last_llm_fail_reason('RELEASE_HEALTH: FAIL: release did not fire') == 'release did not fire'
+    # No reason after the colon → placeholder, still recognised as FAIL.
+    assert infra_agent._last_llm_fail_reason('RELEASE_HEALTH: FAIL') is not None
+    # Nothing at all → the probe decides.
+    assert infra_agent._last_llm_fail_reason('all good') is None
+    # A stray "PASS" from the LLM is IGNORED — determinism guardrail.
+    assert infra_agent._last_llm_fail_reason('RELEASE_HEALTH: PASS') is None
+    # Last FAIL wins.
+    multi = 'RELEASE_HEALTH: FAIL: transient\n...retried...\nRELEASE_HEALTH: FAIL: final'
+    assert infra_agent._last_llm_fail_reason(multi) == 'final'
 
 
-def test_release_health_check_prompt_demands_verdict_and_fails_closed() -> None:
+def test_health_check_verdict_uses_llm_fail_and_skips_probe() -> None:
+    """When the LLM declares a stage-1-3 FAIL, the probe is NOT called — no targets to probe."""
+    probes_called: list[list[str]] = []
+
+    def _fake_probe(targets: list[str], **_: object) -> ProbeResult:
+        probes_called.append(targets)
+        return ProbeResult(verdict='PASS', reason=None, probes=())
+
+    result, targets = infra_agent._health_check_verdict(
+        {'service': 'hello-go'},
+        'RELEASE_HEALTH: FAIL: release did not fire within 60min',
+        probe=_fake_probe,
+    )
+    assert result.verdict == 'FAIL'
+    assert 'release did not fire' in (result.reason or '')
+    assert targets == []
+    assert probes_called == []  # probe never invoked
+
+
+def test_health_check_verdict_runs_probe_when_stages_1_3_ok() -> None:
+    """No LLM FAIL declared → resolve targets, run the deterministic probe."""
+
+    def _fake_probe(targets: list[str], **_: object) -> ProbeResult:
+        assert targets == ['https://hello-go.example.com/health']
+        return ProbeResult(verdict='PASS', reason=None, probes=())
+
+    result, targets = infra_agent._health_check_verdict(
+        {'host': 'hello-go.example.com', 'healthPath': '/health'},
+        'HEALTH_TARGETS: https://hello-go.example.com/health',
+        probe=_fake_probe,
+    )
+    assert result.verdict == 'PASS'
+    assert targets == ['https://hello-go.example.com/health']
+
+
+def test_health_check_verdict_probe_fail_makes_verdict_fail() -> None:
+    """A probe FAIL becomes the verdict — the LLM has no say."""
+
+    def _fake_probe(_targets: list[str], **_: object) -> ProbeResult:
+        return ProbeResult(verdict='FAIL', reason='HTTP 500 from …/health', probes=())
+
+    result, _ = infra_agent._health_check_verdict(
+        {'host': 'hello-go.example.com'},
+        'HEALTH_TARGETS: https://hello-go.example.com/health',
+        probe=_fake_probe,
+    )
+    assert result.verdict == 'FAIL'
+    assert 'HTTP 500' in (result.reason or '')
+
+
+def test_health_check_verdict_no_targets_fails() -> None:
+    """Missing HEALTH_TARGETS and no inputs → FAIL (no PASS by silence)."""
+    result, targets = infra_agent._health_check_verdict(
+        {'service': 'hello-go'},  # no healthUrl / host
+        'stages completed but I forgot to emit targets',
+    )
+    assert result.verdict == 'FAIL'
+    assert targets == []
+
+
+def test_release_health_check_prompt_demands_targets_and_disowns_stage_4_verdict() -> None:
+    """Prompt: LLM emits HEALTH_TARGETS on stage 4 and does NOT decide PASS itself."""
     prompt = infra_agent.INFRA_SYSTEM_PROMPT
-    assert 'RELEASE_HEALTH: PASS' in prompt
-    assert 'RELEASE_HEALTH: FAIL' in prompt
-    assert 'never a PASS' in prompt  # "not deployed yet" is a FAIL
+    assert 'HEALTH_TARGETS:' in prompt
+    # The historical "output PASS if you observed ..." improvisation path must be gone.
+    assert 'RELEASE_HEALTH: FAIL' in prompt  # early-exit still allowed
+    assert 'DETERMINISTIC' in prompt or 'deterministic' in prompt
+    # kubectl-absent is explicitly not-a-fail (closes the LLM asymmetry). Case-insensitive
+    # so a future re-word of "NEVER a reason to fail" -> "never a reason to fail" still passes.
+    lowered = prompt.lower()
+    assert 'never a reason to fail' in lowered or 'never let its absence' in lowered
+
+
+def test_release_health_budget_seconds_reads_probe_budget() -> None:
+    assert infra_agent._release_health_budget_seconds({}) is None
+    assert infra_agent._release_health_budget_seconds({'probeBudgetSeconds': 45}) == 45.0
+    # Malformed → None (probe uses its own default).
+    assert infra_agent._release_health_budget_seconds({'probeBudgetSeconds': 'nope'}) is None
 
 
 def test_main_rejects_invalid_json_inputs() -> None:
