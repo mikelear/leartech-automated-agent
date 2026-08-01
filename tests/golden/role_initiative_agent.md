@@ -567,7 +567,7 @@ mapping (updated as new repos come online):
 |---|---|---|
 | **Go** | See "Go: run the catalog make targets" below — do NOT reproduce bare commands | image-scan, dynamic-scan, end2end |
 | **Python** | `ruff format --check <dirs>`, `ruff check <dirs>`, `mypy <dirs>`, `pytest` (or `uv run ...` equivalents) | image-scan, dynamic-scan, end2end |
-| **Angular** | `ng lint`, `ng test --watch=false`, `npm audit` | image-scan, dynamic-scan, end2end-ui |
+| **Angular** | `npm ci --legacy-peer-deps` (fallback `npm install --legacy-peer-deps`), `npm run lint` (or `npx ng lint`), `npm test` (headless via `ChromeHeadlessNoSandbox`) + parse `coverage/**/lcov.info` and enforce ≥ 60% floor, `npm audit` | image-scan, dynamic-scan, end2end-ui (iterative — see below) |
 | **Rust** | `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` | image-scan, dynamic-scan, end2end |
 
 The gate pipeline files are the authoritative source. This table is a
@@ -686,6 +686,59 @@ reproducing the full gate.
 With `uv` available in the agent image, all of these are locally runnable via
 `uv run ruff ...` / `uv run mypy ...` / `uv run pytest`. Run them before
 pushing any self-modification PR.
+
+## Angular details
+
+The Angular agent image (`leartech-agent-ng`) now ships Chromium with
+`CHROME_BIN` pre-set, so the CI unit `test` gate can (and MUST) be
+reproduced locally before every push. Previously the agent had no browser
+and silently skipped `ng test`, letting unit-test bugs ship to CI.
+
+### Pre-push procedure for Angular repos
+
+1. **Install deps** — try `npm ci --legacy-peer-deps` first; on failure
+   (e.g. lockfile drift) fall back to `npm install --legacy-peer-deps`.
+   `--legacy-peer-deps` is required across leartech Angular repos; do NOT
+   drop it.
+2. **Lint** — `npm run lint` (or `npx ng lint`). Non-zero → do NOT push.
+3. **Unit tests + coverage** — `npm test`. The repo's `test` script
+   already targets `--watch=false --code-coverage
+   --browsers=ChromeHeadlessNoSandbox`; don't second-guess it. Non-zero →
+   do NOT push.
+4. **Enforce the same 60% coverage floor CI enforces.** After `npm test`
+   emits `coverage/**/lcov.info`, sum `LF:` (lines found) and `LH:`
+   (lines hit) across every record and require
+   `LH / LF * 100 >= ${COVERAGE_THRESHOLD:-60.0}`. Below floor → do NOT
+   push. Same threshold, same source-of-truth as CI — no divergence.
+5. **Build** (optional but cheap sanity) — `npm run build`. Non-zero → do
+   NOT push.
+
+### Prefer the repo's own tooling over the global CLI
+
+Always drive Angular commands through `npm run …` / `npx …` so the
+**project-local** Angular CLI (from the repo's `package.json`
+devDependencies) is what actually runs. The image ships a global `ng`
+(currently 18.x) purely as a convenience; when a consumer repo pins
+`@angular/cli@^20`, running the global `ng` produces mysterious
+"schematic not found" / API-shape errors. `npm run lint`, `npm run
+build`, `npm test`, and `npx ng …` all resolve to the pinned local CLI
+and Just Work.
+
+Mirrors the Go single-source principle in the row above: `go test ./...`
+uses the repo's own module toolchain, not a globally-installed helper.
+
+### End2end-ui stays iterative — do NOT gate pushes on it locally
+
+`end2end-ui` (Playwright against the preview deploy) is the
+**look-and-feel feedback loop** where multiple PR pushes are expected
+and wanted — it's the only way to see the change rendered in a real
+preview. Keep it in the "skip pre-push" column with `image-scan` /
+`dynamic-scan` / `end2end`. Iterate on it via PR-comment `/test
+end2end-ui` after the deterministic unit gate is green.
+
+The scope of this lesson is the **deterministic unit `test` gate** —
+lint + unit tests + coverage. Push-blocking those is safe and cheap
+locally; push-blocking end2end-ui is neither.
 
 ## Layer 1 vs Layer 2
 
