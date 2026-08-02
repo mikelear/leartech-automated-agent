@@ -93,6 +93,33 @@ mcp_servers:
       lives in the platform-mcps host, NOT the agent. New features land in the
       leartech-mcp-servers repo (internal/repofactory).
 
+  leartech-jx-release:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/jx_release/sse
+    description: |
+      JX3 release-check primitives the infra agent composes for
+      release-health-check: release_status (did the release Tekton pipeline fire
+      + succeed on the repo?), promote_status (jx-promote PRs across both
+      clusters + qa-gate / verify / merged state), retest_promote (chatops
+      /retest on a single-cluster flake). Served remotely by
+      leartech-mcp-servers/jx_release. Composed WITH leartech-tekton (release
+      PipelineRun outcome cross-check) + leartech-k8s (boot job + deploy_health)
+      to make the release-health-check verdict deterministic.
+
+  leartech-k8s:
+    type: http_sse
+    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/k8s/sse
+    description: |
+      In-cluster Kubernetes read surface — no kubectl needed on the agent side.
+      Exposes deploy_health (Deployment healthy iff >=1 available replica, the
+      authoritative stage-4 signal for release-health-check), get_job_state
+      + list_jobs_by_label (jx-boot Job succeeded, the stage-3 signal), and
+      get_pod_state (used by the stale-progress detector). Runs from inside a
+      cluster with a ServiceAccount scoped to the read verbs, so the agent
+      doesn't need kubectl / cluster credentials of its own — replacing the
+      historical httpx /health probe that couldn't reach the ingress from the
+      infra sandbox and produced false FAILs.
+
   leartech-agent-local:
     type: sdk
     builder: gate.mcp_servers.agent_local:build_agent_local_server
@@ -313,6 +340,12 @@ roles:
       - leartech-tekton
       - leartech-pr-context
       - leartech-repo-factory
+      # jx-release + k8s compose the DETERMINISTIC release-health-check verdict:
+      # jx_release (stages 1-2 — release fired + promotes merged), tekton (stage 1
+      # cross-check on the release PipelineRun outcome), k8s (stage 3 boot job +
+      # stage 4 deploy_health, replacing the unreachable-from-sandbox HTTP probe).
+      - leartech-jx-release
+      - leartech-k8s
     tools:
       - Read
       - Write

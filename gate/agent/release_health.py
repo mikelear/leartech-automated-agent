@@ -1,292 +1,339 @@
-"""Deterministic /health probe for the infra agent's release-health-check action.
+"""Deterministic verdict aggregator for the infra release-health-check action.
 
-Root cause this closes (verified live 2026-07-30): the infra agent has no
-kubectl (SA=default, agent-py image), so the historical stage-4
-"confirm Deployment replicas + /health 200" relied on the LLM to IMPROVISE how
-to verify. One run curled the ingress /health and PASSED; another concluded
-"kubectl not available" and FAILED closed. Same setup, opposite verdicts.
+Root cause this closes (verified live 2026-07-30): the historical stage-4
+"confirm the deploy is healthy" step relied on an httpx GET against the
+ingress /health URL from the infra sandbox. The sandbox cannot reach the
+ingress (no cluster DNS, no in-cluster routing), so the probe returned
+transport errors even when the deploy was perfectly healthy — the same run
+would FAIL on GCP and PASS on AZ depending on which cluster's ingress the
+sandbox happened to be closest to. Spurious FAILs → spurious BA
+escalations → alert fatigue → real incidents missed.
 
-This module CODIFIES the probe so the verdict is a function of what the
-endpoints returned within the budget, not model whim. It:
+The fix — driven by the initiative wiring the ``leartech-k8s`` MCP
+(``deploy_health``, ``get_job_state``, ``list_jobs_by_label``) into the
+infra agent — makes stage 4 an **in-cluster** MCP call that reports
+``healthy=true`` iff the Deployment has >=1 available replica. No ingress,
+no /health HTTP GET, no kubectl. This module CODIFIES how the LLM's stage
+transcript is parsed into a verdict:
 
-* takes a fixed list of targets (URLs) discovered upstream (from an explicit
-  ``healthUrl``/``host`` input, or by the LLM reading the merged GitOps YAML —
-  discovery is separate from decision);
-* HTTP GETs each target with retry + backoff within a caller-supplied budget;
-* treats 502/503/504 and transport errors as **transient** (jx-boot is
-  reconciling / LB is warming) and keeps retrying until the budget expires;
-* treats any other non-200 as an **immediate** hard failure (deterministic —
-  no "maybe the app is coming up", the app returned 404/500);
-* verdicts PASS iff **every** required target returned 200 within the budget;
-* is provider-agnostic Python — no ``claude_agent_sdk`` / ``anthropic`` imports,
-  no shell-outs, no kubectl. Runs the same on Anthropic, DeepSeek, or a laptop.
+* the LLM drives stages 1..4 via the ``jx_release`` / ``tekton`` / ``k8s``
+  MCPs (see the ``INFRA_SYSTEM_PROMPT`` in :mod:`gate.agent.infra_agent`);
+* after each stage per cluster, it emits ONE machine-readable line:
 
-kubectl is deliberately NOT touched: its absence must not cause a FAIL (this
-lesson comes from the observed asymmetry). If a future step wants a
-corroborating ``kubectl rollout status`` signal, it must live in a separate
-optional helper and can only DOWNGRADE a PASS to WARN — never turn PASS into
-FAIL.
+      STAGE_STATUS: stage=<n> cluster=<gcp|az|-> verdict=<PASS|FAIL|SKIP> reason=<one-line>
+
+  where ``cluster=-`` means the stage is not cluster-scoped (e.g. stage 1
+  release-fired is per repo, not per cluster);
+* this module parses those lines from the transcript and computes the final
+  verdict — PASS iff every required (stage, cluster) pair reports PASS,
+  FAIL otherwise, naming the first failing (stage, cluster) with its reason;
+* the LLM MAY ALSO emit an early-exit ``RELEASE_HEALTH: FAIL: <reason>``
+  when a stage produces a signal it cannot proceed past (release did not
+  fire within budget, qa-gate failed on promote), and that line short-
+  circuits the aggregator with a specific ``stage=?`` reason.
+
+Provider-agnostic Python — no ``claude_agent_sdk`` / ``anthropic`` imports,
+no shell-outs, no kubectl, no httpx. Runs the same on Anthropic, DeepSeek,
+or a laptop. Determinism is CODE-ENFORCED (a stray narrated "looks healthy"
+is ignored — only STAGE_STATUS lines count).
 """
 
 from __future__ import annotations
 
 import re
-import time
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-import httpx
+# Stage numbers the aggregator expects to see. Each is emitted at least
+# once per applicable cluster (stage 1 is per repo, so cluster='-'; the
+# rest are per cluster).
+#
+# Stage 1 — RELEASE FIRED: jx_release.release_status(repo) says released=true
+#   AND (cross-check) the release Tekton PipelineRun outcome is Succeeded
+#   (not just "tag missing"). Emitted once, cluster='-'.
+# Stage 2 — PROMOTE/VERIFY/GATE/MERGED: jx_release.promote_status per
+#   cluster says found + all_green + not gate_failed + all_merged.
+#   Emitted per cluster; the LLM may retest_promote ONCE on a flake.
+# Stage 3 — BOOT DEPLOYED: k8s.list_jobs_by_label / get_job_state per
+#   cluster shows the jx-boot Job for this release ran and succeeded.
+# Stage 4 — DEPLOY HEALTHY: k8s.deploy_health(service, namespace, cluster)
+#   per cluster returns healthy=true (>=1 available replica). This is the
+#   authoritative, in-cluster verdict — replaces the historical httpx probe.
+REQUIRED_STAGES: tuple[int, ...] = (1, 2, 3, 4)
 
-# HTTP statuses we treat as transient (jx-boot reconciling, ingress LB warming).
-# Anything outside this set that isn't 200 is an immediate hard failure — a 404
-# means the app didn't wire /health, a 500 means it crashed; retrying won't fix
-# either. This is deliberately fixed, not a config: the point of the module is
-# that the verdict is a function of what the endpoint returns, so the transient
-# set is part of the spec.
-TRANSIENT_STATUSES: frozenset[int] = frozenset({502, 503, 504})
+# The two clusters the platform runs on. Stage 1 emits cluster='-' (not
+# cluster-scoped); stages 2/3/4 emit one line per cluster.
+DEFAULT_CLUSTERS: tuple[str, ...] = ('gcp', 'az')
 
-# Machine-readable line the LLM emits after stages 1-3 pass; the LAST match
-# wins (the model may narrate before its final line). Format:
-#     HEALTH_TARGETS: https://host1.example/health, https://host2.example/health
-_HEALTH_TARGETS_RE = re.compile(r'^\s*HEALTH_TARGETS:\s*(.+)$', re.MULTILINE)
+# Machine-readable stage-per-stage line. Case + spacing are pinned so the
+# LLM's habit of "extra whitespace before/after tokens" doesn't drop lines.
+# Format:
+#     STAGE_STATUS: stage=<n> cluster=<gcp|az|-> verdict=<PASS|FAIL|SKIP> [reason=<...>]
+_STAGE_STATUS_RE = re.compile(
+    r'^\s*STAGE_STATUS:\s*'
+    r'stage\s*=\s*(?P<stage>\d+)\s+'
+    r'cluster\s*=\s*(?P<cluster>[a-zA-Z0-9\-_]+)\s+'
+    r'verdict\s*=\s*(?P<verdict>PASS|FAIL|SKIP)'
+    r'(?:\s+reason\s*=\s*(?P<reason>.+?))?\s*$',
+    re.MULTILINE,
+)
+
+# Early-exit failure line the LLM may emit when it cannot proceed past a
+# stage (release didn't fire in the budget, qa-gate failed on promote). If
+# present, it short-circuits the aggregator to FAIL with the reason.
+#
+# Grammar (either):
+#     RELEASE_HEALTH: FAIL: <reason>
+#     RELEASE_HEALTH: FAIL: stage=<n> cluster=<gcp|az|-> reason=<...>
+#
+# The stage= / cluster= form is preferred (deterministic ``stage`` on the
+# ProbeResult); the free-form is accepted for early runs.
+_HEALTH_FAIL_RE = re.compile(
+    r'^\s*RELEASE_HEALTH:\s*FAIL(?:\s*:\s*(?P<detail>.+))?\s*$',
+    re.MULTILINE,
+)
 
 
 @dataclass(frozen=True)
-class HostProbe:
-    """Outcome of probing ONE host — kept structured so the verdict reason
-    stays specific ("HTTP 404 from https://…/health after 1 attempt in 0.2s"),
-    which is what the infra-remediation loop needs to decide next actions.
+class StageVerdict:
+    """One (stage, cluster) verdict emitted by the LLM.
+
+    Kept structured so the failure reason stays specific (e.g. "stage=4
+    cluster=az reason=deployment has 0/1 available replicas"), which is
+    what the infra-remediation loop needs to decide next actions.
     """
 
-    url: str
-    ok: bool
-    last_status: int | None
-    attempts: int
-    elapsed_seconds: float
-    reason: str | None = None  # populated on failure; None on PASS
+    stage: int
+    cluster: str  # 'gcp' | 'az' | '-' (stage 1 is per repo)
+    verdict: str  # 'PASS' | 'FAIL' | 'SKIP'
+    reason: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
-        """Structured logging shape."""
         return {
-            'url': self.url,
-            'ok': self.ok,
-            'last_status': self.last_status,
-            'attempts': self.attempts,
-            'elapsed_seconds': round(self.elapsed_seconds, 3),
+            'stage': self.stage,
+            'cluster': self.cluster,
+            'verdict': self.verdict,
             'reason': self.reason,
         }
 
 
 @dataclass(frozen=True)
 class ProbeResult:
-    """Rolled-up verdict over every target — PASS iff every probe is ok."""
+    """Rolled-up release-health verdict.
+
+    Named ``ProbeResult`` for continuity with callers (``_health_check_verdict``
+    still returns this shape), even though the stage-4 signal is no longer an
+    HTTP probe — the LLM composes ``k8s.deploy_health`` for that.
+
+    * ``verdict`` is 'PASS' iff every required (stage, cluster) pair reports
+      PASS AND the LLM did not emit an early-exit ``RELEASE_HEALTH: FAIL``.
+    * ``reason`` is None on PASS; on FAIL it names the FIRST failing stage +
+      cluster with its LLM-emitted reason (or, when the LLM emitted a bare
+      ``RELEASE_HEALTH: FAIL: <reason>``, the reason verbatim).
+    * ``stages`` preserves every parsed STAGE_STATUS line in emission order
+      so the caller can log the full stage-by-stage narrative.
+    * ``failing_stage`` is a convenience field: the first failing stage
+      number, or None on PASS. Used by structured logs so downstream
+      dashboards can group failures by stage without re-parsing ``reason``.
+    """
 
     verdict: str  # 'PASS' | 'FAIL'
-    reason: str | None  # None on PASS; concatenated failure reasons otherwise
-    probes: tuple[HostProbe, ...] = field(default_factory=tuple)
+    reason: str | None
+    stages: tuple[StageVerdict, ...] = field(default_factory=tuple)
+    failing_stage: int | None = None
+    failing_cluster: str | None = None
 
     def as_dict(self) -> dict[str, Any]:
         return {
             'verdict': self.verdict,
             'reason': self.reason,
-            'probes': [p.as_dict() for p in self.probes],
+            'stages': [s.as_dict() for s in self.stages],
+            'failing_stage': self.failing_stage,
+            'failing_cluster': self.failing_cluster,
         }
 
 
-def parse_health_targets(transcript: str) -> list[str]:
-    """Extract targets from the LAST ``HEALTH_TARGETS: url[, url ...]`` line.
-
-    The LLM emits this after stages 1-3 pass. We take the LAST occurrence so a
-    retry/narration earlier in the transcript doesn't win over the final list.
-    URLs are trimmed; empty entries are dropped. An unrecognised or missing
-    line yields an empty list — the caller treats that as "no targets" and
-    FAILs (deterministic — no targets, no PASS).
-    """
-    matches = _HEALTH_TARGETS_RE.findall(transcript)
-    if not matches:
-        return []
-    return [u.strip() for u in matches[-1].split(',') if u.strip()]
-
-
-def resolve_targets_from_inputs(inputs: dict[str, Any], transcript: str) -> list[str]:
-    """Pick the deterministic target list for the probe.
-
-    Precedence (highest wins):
-        1. ``inputs['healthUrl']`` — a fully-qualified URL, used verbatim.
-        2. ``inputs['host']`` — hostname, joined with ``healthPath`` (default
-           ``/health``) and ``https://`` scheme. Accepts a list for both
-           clusters, or a comma-separated string, or a single string.
-        3. ``HEALTH_TARGETS:`` line in the LLM transcript.
-
-    Inputs take precedence over the transcript so a Plan author can pin the
-    probe to a known host and bypass discovery entirely — the most
-    deterministic path.
-    """
-    if url := inputs.get('healthUrl'):
-        if isinstance(url, str) and url.strip():
-            return [url.strip()]
-    hosts_raw = inputs.get('host') or inputs.get('hosts')
-    health_path = str(inputs.get('healthPath') or '/health')
-    if not health_path.startswith('/'):
-        health_path = '/' + health_path
-    hosts: list[str] = []
-    if isinstance(hosts_raw, str) and hosts_raw.strip():
-        hosts = [h.strip() for h in hosts_raw.split(',') if h.strip()]
-    elif isinstance(hosts_raw, list):
-        hosts = [str(h).strip() for h in hosts_raw if str(h).strip()]
-    if hosts:
-        return [_host_to_url(h, health_path) for h in hosts]
-    return parse_health_targets(transcript)
-
-
-def _host_to_url(host: str, health_path: str) -> str:
-    """Normalise a bare host to a full URL. Idempotent for already-qualified URLs."""
-    if host.startswith(('http://', 'https://')):
-        # Already a URL. If it has no path, tack the health_path on.
-        # Otherwise leave it verbatim — the caller specified a full URL on purpose.
-        # Detect "no path" by the absence of '/' after the scheme+host.
-        stripped = host.rstrip('/')
-        # Trim '<scheme>://' then look for a '/'.
-        after_scheme = stripped.split('://', 1)[1] if '://' in stripped else stripped
-        if '/' not in after_scheme:
-            return f'{stripped}{health_path}'
-        return host
-    return f'https://{host.rstrip("/")}{health_path}'
-
-
-def _probe_one(
-    url: str,
-    *,
-    budget_seconds: float,
-    request_timeout_seconds: float,
-    backoff_seconds: float,
-    now: Callable[[], float],
-    sleep: Callable[[float], None],
-    client: httpx.Client,
-) -> HostProbe:
-    """Retry GET url until 200, hard-fail, or budget elapses.
-
-    Determinism: the outcome is a function of ``(url, endpoint responses,
-    budget, backoff, now/sleep)``. Injected ``now``/``sleep``/``client`` make
-    the whole state machine testable without real time or real HTTP.
-    """
-    start = now()
-    deadline = start + budget_seconds
-    attempts = 0
-    last_status: int | None = None
-    last_transport_error: str | None = None
-    while True:
-        attempts += 1
+def parse_stage_verdicts(transcript: str) -> list[StageVerdict]:
+    """Extract every ``STAGE_STATUS:`` line from the LLM transcript in emission
+    order. A bad line (unknown verdict, missing fields) is dropped silently —
+    the aggregator FAILs later because required stages will be missing, which
+    is the right behaviour (no "PASS by silence")."""
+    out: list[StageVerdict] = []
+    for match in _STAGE_STATUS_RE.finditer(transcript):
         try:
-            response = client.get(url, timeout=request_timeout_seconds)
-            last_status = response.status_code
-            last_transport_error = None
-            if response.status_code == 200:
-                return HostProbe(
-                    url=url,
-                    ok=True,
-                    last_status=200,
-                    attempts=attempts,
-                    elapsed_seconds=max(0.0, now() - start),
-                )
-            if response.status_code not in TRANSIENT_STATUSES:
-                # Non-200, non-transient: deterministic hard fail. A 404
-                # /health didn't ship a route; a 500 means the app crashed —
-                # retrying won't fix either.
-                return HostProbe(
-                    url=url,
-                    ok=False,
-                    last_status=response.status_code,
-                    attempts=attempts,
-                    elapsed_seconds=max(0.0, now() - start),
-                    reason=f'HTTP {response.status_code} from {url} (non-transient)',
-                )
-        except httpx.HTTPError as exc:
-            # Transport errors (DNS, connect refused, TLS, timeout) during a
-            # rollout are the same shape as 502/503 — the LB isn't answering
-            # yet. Keep retrying within the budget.
-            last_status = None
-            last_transport_error = type(exc).__name__
-
-        if now() >= deadline:
-            if last_status is not None:
-                last = f'HTTP {last_status}'
-            elif last_transport_error is not None:
-                last = last_transport_error
-            else:
-                last = 'no response'
-            reason = f'no 200 from {url} within {budget_seconds:.0f}s (last={last}, attempts={attempts})'
-            return HostProbe(
-                url=url,
-                ok=False,
-                last_status=last_status,
-                attempts=attempts,
-                elapsed_seconds=max(0.0, now() - start),
-                reason=reason,
-            )
-        sleep(backoff_seconds)
+            stage_num = int(match.group('stage'))
+        except (TypeError, ValueError):
+            continue
+        cluster = match.group('cluster').strip()
+        verdict = match.group('verdict').strip()
+        reason = match.group('reason')
+        reason = reason.strip() if reason else None
+        # Trim a trailing double-quote-style wrap the LLM sometimes emits
+        # ("reason=\"deployment not ready\""), so consumers see a clean string.
+        if reason and len(reason) >= 2 and reason[0] == reason[-1] == '"':
+            reason = reason[1:-1]
+        out.append(StageVerdict(stage=stage_num, cluster=cluster, verdict=verdict, reason=reason))
+    return out
 
 
-def probe_health_targets(
-    targets: list[str],
-    *,
-    budget_seconds: float = 300.0,
-    request_timeout_seconds: float = 10.0,
-    backoff_seconds: float = 10.0,
-    now: Callable[[], float] = time.monotonic,
-    sleep: Callable[[float], None] = time.sleep,
-    client: httpx.Client | None = None,
-) -> ProbeResult:
-    """Probe every target; PASS iff every one returned 200 within the budget.
+def parse_early_exit_fail(transcript: str) -> tuple[int | None, str | None, str | None]:
+    """If the LLM emitted ``RELEASE_HEALTH: FAIL: ...``, return ``(stage,
+    cluster, reason)``. Returns ``(None, None, None)`` when absent.
 
-    ``now`` / ``sleep`` / ``client`` are injected so tests pin the whole
-    schedule without real time or real HTTP. ``budget_seconds`` is applied
-    PER TARGET (so probing GCP + AZ concurrently would each get the full
-    budget); the probes run sequentially in this implementation because a
-    healthy cluster returns 200 in <1s, so serial cost is negligible when
-    healthy, and the failure-budget cost is bounded to N × budget only in
-    the pathological "everything failing" case.
+    Supports two grammars:
+      1. ``RELEASE_HEALTH: FAIL: <reason>`` — reason returned as-is, stage +
+         cluster None (the aggregator surfaces this as a whole-run FAIL).
+      2. ``RELEASE_HEALTH: FAIL: stage=<n> cluster=<c> reason=<r>`` — parsed
+         into structured fields for logging + BA correlation.
 
-    ``client`` is created + closed here when the caller doesn't pass one, so
-    live callers don't leak connections; tests pass an ``httpx.Client(
-    transport=httpx.MockTransport(...))`` and manage its lifetime themselves.
+    LAST match wins so a narrated retry earlier in the transcript doesn't
+    override the final line. A stray ``RELEASE_HEALTH: PASS`` from the LLM
+    is IGNORED — PASS is decided by parsed STAGE_STATUS lines, never by the
+    LLM saying so.
     """
-    if not targets:
+    matches = list(_HEALTH_FAIL_RE.finditer(transcript))
+    if not matches:
+        return (None, None, None)
+    last = matches[-1]
+    detail = last.group('detail')
+    if not detail:
+        return (None, None, 'LLM declared FAIL without a reason')
+    detail = detail.strip()
+    # Structured form? stage=... cluster=... reason=...
+    struct_re = re.compile(r'stage\s*=\s*(\d+)\s+cluster\s*=\s*([a-zA-Z0-9\-_]+)\s+reason\s*=\s*(.+)$')
+    struct_match = struct_re.match(detail)
+    if struct_match:
+        try:
+            stage_num = int(struct_match.group(1))
+        except (TypeError, ValueError):
+            stage_num = None
+        cluster = struct_match.group(2).strip()
+        reason = struct_match.group(3).strip()
+        return (stage_num, cluster or None, reason)
+    return (None, None, detail)
+
+
+def compute_release_health(
+    transcript: str,
+    *,
+    required_clusters: tuple[str, ...] = DEFAULT_CLUSTERS,
+    required_stages: tuple[int, ...] = REQUIRED_STAGES,
+) -> ProbeResult:
+    """Compose the deterministic release-health verdict from an LLM transcript.
+
+    Contract:
+
+    * If the LLM emitted an early-exit ``RELEASE_HEALTH: FAIL`` line, the
+      verdict is FAIL with that reason. This is the "genuine failure" path —
+      stage 1-3 signals that the aggregator cannot proceed past (release did
+      not fire in the budget, qa-gate failed on promote).
+    * Otherwise, every required (stage, cluster) pair MUST have a
+      ``STAGE_STATUS: ... verdict=PASS`` line. Stage 1 is per repo
+      (``cluster='-'`` accepted). Stages 2/3/4 must have a PASS per required
+      cluster.
+    * On FAIL the aggregator names the FIRST failing (stage, cluster) with
+      its LLM-emitted reason; on missing coverage it names the FIRST missing
+      (stage, cluster) as the failure. No "PASS by silence".
+    * SKIP is treated as a soft SKIP (not a FAIL, not a PASS) — used only for
+      stages the LLM explicitly declared not applicable in this run (e.g. a
+      single-cluster service where az was intentionally not probed). The
+      aggregator still requires SOME PASS/FAIL coverage on each required
+      pair, so a SKIP without a corresponding PASS is a coverage gap → FAIL.
+    """
+    stages_seen = parse_stage_verdicts(transcript)
+
+    # Early-exit FAIL short-circuits before we count STAGE_STATUS lines.
+    early_stage, early_cluster, early_reason = parse_early_exit_fail(transcript)
+    if early_reason is not None:
         return ProbeResult(
             verdict='FAIL',
-            reason='no health targets discovered (release stages 1-3 must complete first)',
-            probes=(),
+            reason=_format_early_exit_reason(early_stage, early_cluster, early_reason),
+            stages=tuple(stages_seen),
+            failing_stage=early_stage,
+            failing_cluster=early_cluster,
         )
 
-    close_client = False
-    if client is None:
-        client = httpx.Client()
-        close_client = True
-    try:
-        probes: list[HostProbe] = []
-        for url in targets:
-            probes.append(
-                _probe_one(
-                    url,
-                    budget_seconds=budget_seconds,
-                    request_timeout_seconds=request_timeout_seconds,
-                    backoff_seconds=backoff_seconds,
-                    now=now,
-                    sleep=sleep,
-                    client=client,
-                )
-            )
-    finally:
-        if close_client:
-            client.close()
+    # Aggregate: build an index of PASSing (stage, cluster) pairs, and note
+    # the first FAIL we encounter for a specific reason.
+    passing: set[tuple[int, str]] = set()
+    first_fail: StageVerdict | None = None
+    for sv in stages_seen:
+        if sv.verdict == 'PASS':
+            passing.add((sv.stage, sv.cluster))
+        elif sv.verdict == 'FAIL' and first_fail is None:
+            first_fail = sv
+        # SKIP: no-op (coverage-required pairs still must have PASS).
 
-    failed = [p for p in probes if not p.ok]
-    if not failed:
-        return ProbeResult(verdict='PASS', reason=None, probes=tuple(probes))
-    reasons = [p.reason for p in failed if p.reason]
-    return ProbeResult(
-        verdict='FAIL',
-        reason='; '.join(reasons) if reasons else 'one or more targets did not return 200',
-        probes=tuple(probes),
-    )
+    if first_fail is not None:
+        return ProbeResult(
+            verdict='FAIL',
+            reason=_format_stage_fail(first_fail),
+            stages=tuple(stages_seen),
+            failing_stage=first_fail.stage,
+            failing_cluster=first_fail.cluster,
+        )
+
+    # No FAIL emitted; check coverage. Stage 1 requires cluster='-' (or any
+    # of the required clusters — the LLM may accidentally set a cluster on
+    # the not-cluster-scoped stage; both accepted). Stages 2/3/4 require a
+    # PASS per required cluster.
+    missing = _first_missing_coverage(passing, required_stages, required_clusters)
+    if missing is not None:
+        stage_num, cluster = missing
+        return ProbeResult(
+            verdict='FAIL',
+            reason=(
+                f'stage {stage_num} cluster={cluster}: no STAGE_STATUS PASS emitted '
+                '(aggregator requires an explicit PASS per required (stage, cluster))'
+            ),
+            stages=tuple(stages_seen),
+            failing_stage=stage_num,
+            failing_cluster=cluster,
+        )
+
+    return ProbeResult(verdict='PASS', reason=None, stages=tuple(stages_seen))
+
+
+def _first_missing_coverage(
+    passing: set[tuple[int, str]],
+    required_stages: tuple[int, ...],
+    required_clusters: tuple[str, ...],
+) -> tuple[int, str] | None:
+    """Return the first (stage, cluster) required but not PASSing.
+
+    Stage 1 is per-repo: accept cluster='-' OR any required cluster (the LLM
+    is permitted to attribute the stage-1 PASS to either shape).
+    Stages 2..N are per-cluster: require a PASS for each required cluster.
+    """
+    for stage_num in required_stages:
+        if stage_num == 1:
+            # Any of {'-', *required_clusters} satisfies stage-1 coverage.
+            candidates = {'-', *required_clusters}
+            if not any((stage_num, c) in passing for c in candidates):
+                return (stage_num, '-')
+            continue
+        for cluster in required_clusters:
+            if (stage_num, cluster) not in passing:
+                return (stage_num, cluster)
+    return None
+
+
+def _format_stage_fail(sv: StageVerdict) -> str:
+    """Render a STAGE_STATUS FAIL into the verdict's ``reason``."""
+    base = f'stage {sv.stage} cluster={sv.cluster}'
+    if sv.reason:
+        return f'{base}: {sv.reason}'
+    return f'{base}: FAIL (no reason given)'
+
+
+def _format_early_exit_reason(stage: int | None, cluster: str | None, reason: str) -> str:
+    """Render an early-exit RELEASE_HEALTH: FAIL into the verdict's ``reason``.
+
+    Includes the structured ``stage=<n> cluster=<c>`` prefix when the LLM
+    supplied them, so ``reason`` is diagnosable in isolation.
+    """
+    if stage is not None and cluster is not None:
+        return f'stage {stage} cluster={cluster}: {reason}'
+    if stage is not None:
+        return f'stage {stage}: {reason}'
+    return reason

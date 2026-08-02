@@ -24,7 +24,6 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import re
 import sys
 from collections.abc import Callable
 
@@ -45,9 +44,9 @@ from gate.agent.initiative import INITIATIVE_TEKTON_TOOLS, WRITE_MODE_TOOLS
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
 from gate.agent.release_health import (
+    DEFAULT_CLUSTERS,
     ProbeResult,
-    probe_health_targets,
-    resolve_targets_from_inputs,
+    compute_release_health,
 )
 from gate.agent.test_mode import parse_test_mode, run_test_mode
 from gate.mcp_servers import build_remote_mcp_servers
@@ -71,15 +70,29 @@ JX_RELEASE_TOOLS = [
     'mcp__leartech-jx-release__retest_promote',
 ]
 
-# Write-mode built-ins + the shared MCP surface + step-aware Tekton tools + the repo-factory
-# and jx-release MCPs. Deterministic repo ops go through repo-factory (server-side); the
-# release check goes through jx-release; Bash is for the optional /health tail (kubectl/curl).
+# k8s MCP — in-cluster read surface (no kubectl needed on the agent side). The
+# release-health-check action composes these for stages 3 + 4:
+#   * list_jobs_by_label / get_job_state — did the jx-boot Job for this release
+#     run and succeed on each cluster? (stage 3)
+#   * deploy_health — is the Deployment healthy (>=1 available replica) on each
+#     cluster? (stage 4 — replaces the historical unreachable HTTP /health probe)
+K8S_TOOLS = [
+    'mcp__leartech-k8s__deploy_health',
+    'mcp__leartech-k8s__get_job_state',
+    'mcp__leartech-k8s__list_jobs_by_label',
+]
+
+# Write-mode built-ins + the shared MCP surface + step-aware Tekton tools + the repo-factory,
+# jx-release, and k8s MCPs. Deterministic repo ops go through repo-factory (server-side); the
+# release check composes jx-release + tekton + k8s (no httpx probe, no kubectl on the agent
+# side — the k8s MCP host runs in-cluster with a read-scoped ServiceAccount).
 INFRA_ALLOWED_TOOLS = [
     *WRITE_MODE_TOOLS,
     *MCP_ALLOWED_TOOLS,
     *INITIATIVE_TEKTON_TOOLS,
     *REPO_FACTORY_TOOLS,
     *JX_RELEASE_TOOLS,
+    *K8S_TOOLS,
 ]
 
 INFRA_SYSTEM_PROMPT = """\
@@ -101,12 +114,23 @@ GROUND RULES
       repo's PR pipelines fire (main now has .lighthouse/ triggers).
   The high-privilege owner credential lives in the MCP host, NOT here. If a tool errors or a
   rename looks wrong, report it as a TOOL bug — do not patch by hand.
-- The JX3 release check is DETERMINISTIC too — go through the jx-release MCP, never hand-scrape
-  Tekton or GitHub:
+- The JX3 release check is DETERMINISTIC — go through the jx-release, tekton, and k8s MCPs,
+  never hand-scrape Tekton, GitHub, or attempt a kubectl or /health HTTP probe from this
+  sandbox. The infra sandbox CANNOT reach the ingress (no cluster DNS / routing); any HTTP
+  probe you attempt against /health will fail transport even on a perfectly healthy deploy.
+  The k8s MCP host runs in-cluster with a read-scoped ServiceAccount and gives you the
+  authoritative signals directly:
     * mcp__leartech-jx-release__release_status — did the release fire on the repo?
     * mcp__leartech-jx-release__promote_status — promote PRs across both clusters + verify/gate
       state (all_green / gate_failed / merged / all_merged).
     * mcp__leartech-jx-release__retest_promote — chatops /retest to clear ONE flake.
+    * mcp__leartech-tekton__list_pipelineruns_for_pr / step_status — cross-check the
+      RELEASE PipelineRun's outcome (Succeeded / Failed / Running), so stage 1 fails
+      closed when the release pipeline failed rather than merely lacking a tag.
+    * mcp__leartech-k8s__list_jobs_by_label / get_job_state — did the jx-boot Job for this
+      release run and succeed on each cluster (stage 3)?
+    * mcp__leartech-k8s__deploy_health — is the Deployment healthy on each cluster (>=1
+      available replica) (stage 4 — replaces the unreachable HTTP probe)?
 - The platform runs on TWO clusters (GCP gitops `jx-build-cluster-gsm`, Azure
   `jx-build-cluster-akv`). Registration is ONE PR PER CLUSTER — do the cluster in your inputs;
   a Plan runs one register step per cluster.
@@ -136,66 +160,94 @@ ACTIONS (your inputs include `action` + its params):
   Infra opens + verifies the plumbing; the Dev agent drives the PR. Params: target_repo =
   mikelear/<name>, name.
 - release-health-check: shepherd the service THROUGH the JX3 release pipeline to a landed,
-  healthy release — the automation of the manual release watch. You are triggered when the dev
-  PR OPENS (AwaitingReview), so nothing has released yet; you WAIT and drive it, using the
-  jx-release MCP (do NOT hand-scrape Tekton). Bounded by `budgetMinutes` from your inputs
-  (default 60 if unset) — a real cold-repo multi-cluster release+promote+deploy can take
-  40-50 min, so do NOT give up early. Poll ~60s between checks (`sleep 60`) — never one giant
-  sleep.
+  HEALTHY release — the automation of the manual release watch. You are triggered when the
+  dev PR OPENS (AwaitingReview), so nothing has released yet; you WAIT and drive it using
+  the jx-release + tekton + k8s MCPs. Bounded by `budgetMinutes` from your inputs (default
+  60 if unset) — a real cold-repo multi-cluster release+promote+deploy can take 40-50 min,
+  so do NOT give up early. Poll ~60s between checks (`sleep 60`) — never one giant sleep.
 
-  IMPORTANT — the /health probe is CODIFIED, not up to you. Stages 1-3 are yours to drive via
-  the jx-release MCP; the health check itself is DETERMINISTIC Python that runs after this
-  message loop returns. You do NOT run kubectl and you do NOT curl /health yourself: the
-  agent-py image has no kubectl (SA=default), and past runs have improvised opposite verdicts
-  from the same setup (one curled the ingress and PASSED; another gave up and FAILED closed).
-  Your job on stage 4 is to DISCOVER the hosts and emit a machine-readable target line —
-  Python probes them.
+  DETERMINISM CONTRACT — this is the WHOLE POINT of the refactor. Every stage is composed
+  from MCP calls that return a structured verdict, and you emit ONE MACHINE-READABLE LINE
+  per (stage, cluster) that Python then aggregates into the final PASS/FAIL. No httpx probe,
+  no kubectl, no ingress /health GET, no free-form narration deciding the outcome. Failing
+  to emit a required STAGE_STATUS line is a FAIL (no PASS-by-silence).
 
-  Stages (stop + FAIL closed only once the budget elapses):
-    1. RELEASE FIRED — poll mcp__leartech-jx-release__release_status(repo=mikelear/<service>)
-       until released=true (the dev PR merged and the release Tekton produced a release).
-    2. PROMOTE PRs — poll mcp__leartech-jx-release__promote_status(service) (both clusters):
-       * found=false on a cluster → keep polling (jx-promote hasn't opened it yet).
-       * a cluster check is non-green but NOT gate_failed (a flake) → call
-         mcp__leartech-jx-release__retest_promote(cluster, pr_number) ONCE for that PR, then
-         keep polling. Do NOT retest-loop.
-       * any_gate_failed=true → STOP. This is a real qa-gate failure that may need other plans:
-         end your final message with exactly one line
-             RELEASE_HEALTH: FAIL: needs-cross-plan-Infra-agent: <cluster> qa-gate failed on promote PR #<n>
-         Do NOT try to fix it yourself.
-    3. MERGED — keep polling until all_merged=true (Tide auto-merges the promote PRs on green).
-       If stages 1-3 do NOT complete within the budget, end your final message with exactly:
-           RELEASE_HEALTH: FAIL: <one-line reason describing what stalled>
-       (e.g. "release did not fire within 60min", "GCP promote PR #123 stuck non-green").
-    4. HEALTH TARGETS — once all_merged=true, DISCOVER the ingress host(s) that a /health probe
-       will hit and emit them on ONE line for the deterministic Python probe:
-           HEALTH_TARGETS: https://<host1><healthPath>[, https://<host2><healthPath>]
-       Discovery order:
-         * If `healthUrl` or `host` is in your inputs, PRINT the line using those values
-           verbatim — do not discover further (inputs override discovery).
-         * Otherwise, read the merged GitOps Ingress YAML for the service on each cluster:
-           `gh api repos/mikelear/jx-build-cluster-gsm/contents/<service>/ingress.yaml`
-           and its `jx-build-cluster-akv` twin, extract the `spec.rules[0].host`, and print
-           BOTH hosts joined with `<healthPath>`. If only ONE cluster has a merged ingress
-           (e.g. single-cluster service), emit that one host — the probe still verdicts on
-           what was emitted.
-       Do NOT emit a `RELEASE_HEALTH:` line in this stage — the Python probe writes the final
-       verdict from the target list you emit. If you cannot discover any host at all, emit
-           RELEASE_HEALTH: FAIL: could not discover any /health host from inputs or GitOps
-       (that fail-closes; do NOT invent a hostname).
+  Emit the line EXACTLY in this shape (case + spacing pinned):
 
-  kubectl is OPTIONAL. If your image somehow has it, `kubectl rollout status` may be
-  additional narrated context, but its ABSENCE is NEVER a reason to fail — the HTTP probe is
-  authoritative. Do not emit FAIL because "kubectl is unavailable".
+      STAGE_STATUS: stage=<n> cluster=<gcp|az|-> verdict=<PASS|FAIL|SKIP> reason=<one-line>
 
-  Params: service, namespace, healthPath (default /health), optional healthUrl, optional host
-  (single string or list — one per cluster). The Python probe:
-    * requests each URL, retrying every ~10s within the budget;
-    * treats 502/503/504 and transport errors as transient (jx-boot still reconciling);
-    * treats any other non-200 as an IMMEDIATE hard fail (a 404 means the app didn't wire
-      /health; retrying won't fix that);
-    * verdicts PASS iff every target returned 200 within the budget.
-  The verdict PASS/FAIL is decided by the probe, not by whether you finished exploring.
+  where cluster='-' is used ONLY for stage 1 (per-repo). The optional reason=... is
+  REQUIRED on FAIL and SKIP; on PASS it is optional but helpful (`healthy=true replicas=2`).
+
+  Stages (drive them in order; stop + emit RELEASE_HEALTH: FAIL only when a stage cannot
+  progress before the budget elapses):
+
+    1. RELEASE FIRED (per repo, cluster='-') — poll
+       mcp__leartech-jx-release__release_status(repo=mikelear/<service>) until released=true
+       AND cross-check the release PipelineRun's OUTCOME via
+       mcp__leartech-tekton__list_pipelineruns_for_pr / step_status: the release
+       PipelineRun must have completed Succeeded (not just "tag missing"). If the release
+       PipelineRun FAILED, emit
+           STAGE_STATUS: stage=1 cluster=- verdict=FAIL reason=release PipelineRun <name> failed at step <step>
+       and STOP (do NOT proceed to later stages). On success emit
+           STAGE_STATUS: stage=1 cluster=- verdict=PASS reason=release <tag> Succeeded
+
+    2. PROMOTE / VERIFY / GATE / MERGED (per cluster) — poll
+       mcp__leartech-jx-release__promote_status(service, clusters=[gcp,az]). For each
+       cluster:
+         * found=false → keep polling; do not emit STAGE_STATUS yet.
+         * non-green but NOT gate_failed (flake) → call
+           mcp__leartech-jx-release__retest_promote(cluster, pr_number) ONCE, then keep
+           polling. Do NOT retest-loop.
+         * gate_failed=true → this is a real qa-gate failure needing a cross-plan
+           remediation. Emit
+               STAGE_STATUS: stage=2 cluster=<c> verdict=FAIL reason=qa-gate failed on promote PR #<n>
+           followed by
+               RELEASE_HEALTH: FAIL: stage=2 cluster=<c> reason=needs-cross-plan-Infra-agent: qa-gate failed on promote PR #<n>
+           and STOP. Do NOT try to fix it yourself.
+         * merged=true (Tide auto-merged the promote PR on green) → emit
+               STAGE_STATUS: stage=2 cluster=<c> verdict=PASS reason=promote PR #<n> merged
+
+    3. BOOT DEPLOYED (per cluster) — call
+       mcp__leartech-k8s__list_jobs_by_label(cluster=<c>, namespace=<ns>, label=<selector>)
+       (or get_job_state with the specific jx-boot Job name) to confirm the jx-boot Job
+       for this release ran and succeeded on the cluster. Poll ~60s if it's still Active.
+       On completion:
+         * succeeded=true → STAGE_STATUS: stage=3 cluster=<c> verdict=PASS reason=jx-boot Job <name> succeeded
+         * failed=true → STAGE_STATUS: stage=3 cluster=<c> verdict=FAIL reason=jx-boot Job <name> failed
+
+    4. DEPLOY HEALTHY (per cluster) — call
+       mcp__leartech-k8s__deploy_health(service=<s>, namespace=<ns>, cluster=<c>).
+       The MCP returns a structured verdict (healthy=true/false, available_replicas=N,
+       desired_replicas=M, reason=?). Emit VERBATIM (do NOT re-interpret):
+         * healthy=true → STAGE_STATUS: stage=4 cluster=<c> verdict=PASS reason=healthy=true available_replicas=<N>
+         * healthy=false → STAGE_STATUS: stage=4 cluster=<c> verdict=FAIL reason=healthy=false available_replicas=<N> desired_replicas=<M> <deploy_health reason>
+
+       If the k8s MCP cannot reach a cluster (host returns isError, or deploy_health
+       explicitly reports "cluster unreachable"), emit
+           STAGE_STATUS: stage=4 cluster=<c> verdict=FAIL reason=k8s MCP could not reach cluster <c>: <error>
+       — the aggregator FAILs. Do NOT silently PASS or SKIP an unreachable cluster.
+
+  Two-cluster coverage is REQUIRED for stages 2, 3, 4 (verdict PASS iff both gcp AND az
+  report PASS). If your inputs pin ONE cluster (`cluster: gcp|az`), you only need coverage
+  for that cluster; treat the other as SKIP with
+      STAGE_STATUS: stage=<n> cluster=<other> verdict=SKIP reason=single-cluster run (inputs.cluster=<c>)
+  and set the aggregator's required_clusters accordingly via inputs (`clusters: [gcp]`).
+
+  BUDGET FAIL — if stages 1-3 do NOT complete within `budgetMinutes`, end with
+      RELEASE_HEALTH: FAIL: stage=<n> cluster=<c> reason=<one-line what stalled>
+  (e.g. "release did not fire within 60min", "GCP promote PR #123 stuck non-green").
+
+  NEVER attempt an HTTP GET against a /health URL from this sandbox. The infra sandbox
+  cannot reach the ingress; every such probe returns transport error even when the deploy
+  is perfectly healthy. This is the specific bug this refactor closes. deploy_health from
+  the k8s MCP is the authoritative signal — it reads Deployment status from inside the
+  cluster, no HTTP required.
+
+  Params: service, namespace, cluster (default: both gcp+az), optional clusters (list),
+  optional budgetMinutes (default 60). The Python aggregator reads STAGE_STATUS + any
+  early-exit RELEASE_HEALTH: FAIL from your transcript; it fails closed on any FAIL
+  emitted, any missing (stage, cluster) coverage, or any early-exit line.
 
 Report concisely what you did, which PRs you opened (numbers), and the pass/fail outcome.
 """
@@ -231,81 +283,50 @@ def _task_prompt(action: str, inputs: dict[str, object]) -> str:
     )
 
 
-# Machine-readable early-exit verdict the LLM emits when stages 1-3 fail (release didn't
-# fire within budget, promote gate-failed, etc.). Stage-4 PASS is decided by the Python
-# probe, NOT by the LLM — so this regex only matches FAIL. A stray PASS from the LLM is
-# ignored (defence in depth against the historical "kubectl unavailable => FAIL" or
-# "curled once and claimed PASS" improvisation).
-_HEALTH_FAIL_RE = re.compile(r'^\s*RELEASE_HEALTH:\s*FAIL(?:\s*:\s*(.+))?$', re.MULTILINE)
+def _resolve_required_clusters(inputs: dict[str, object]) -> tuple[str, ...]:
+    """Determine which clusters the aggregator requires PASS coverage on.
 
+    Precedence:
+      * ``inputs['clusters']`` (list of strings) — explicit set of clusters.
+      * ``inputs['cluster']`` (single string) — single-cluster plan step;
+        aggregator requires PASS for that cluster only.
+      * Default: both ``gcp`` + ``az`` (from :data:`release_health.DEFAULT_CLUSTERS`).
 
-def _last_llm_fail_reason(text: str) -> str | None:
-    """Return the LAST ``RELEASE_HEALTH: FAIL: <reason>`` reason string, or None.
-
-    Used only to surface a pre-stage-4 failure reason emitted by the LLM (release
-    didn't fire, promote gate-failed). Stage-4 PASS is NEVER read from the transcript —
-    the Python probe verdicts that. ``None`` means the LLM did not declare an early-exit
-    failure; the probe (or absent-target FAIL) decides the outcome.
+    Malformed inputs fall back to the default rather than crashing — the
+    aggregator's fail-closed semantics still apply on missing coverage.
     """
-    matches = _HEALTH_FAIL_RE.findall(text)
-    if not matches:
-        return None
-    # findall returns the capture group (may be empty string if no reason was given).
-    last = matches[-1].strip()
-    return last or 'LLM declared FAIL without a reason'
+    raw_list = inputs.get('clusters')
+    if isinstance(raw_list, list) and raw_list:
+        out = tuple(str(c).strip() for c in raw_list if str(c).strip())
+        if out:
+            return out
+    raw_one = inputs.get('cluster')
+    if isinstance(raw_one, str) and raw_one.strip():
+        return (raw_one.strip(),)
+    return tuple(DEFAULT_CLUSTERS)
 
 
 def _health_check_verdict(
     inputs: dict[str, object],
     transcript: str,
     *,
-    probe: Callable[..., ProbeResult] = probe_health_targets,
-    budget_seconds: float | None = None,
-) -> tuple[ProbeResult, list[str]]:
+    aggregator: Callable[..., ProbeResult] = compute_release_health,
+) -> ProbeResult:
     """Compute the DETERMINISTIC release-health-check verdict.
 
     Contract:
-      * If the LLM emitted ``RELEASE_HEALTH: FAIL: <reason>``, propagate that as
-        the verdict (stages 1-3 failed — no probe needed).
-      * Otherwise, resolve targets from inputs (healthUrl / host) or from the LLM's
-        ``HEALTH_TARGETS:`` line, then RUN THE PYTHON PROBE. The verdict is a
-        function of endpoint responses, not model narration.
-      * No kubectl. Absence of kubectl is never a reason to FAIL — the HTTP probe
-        is authoritative (closes the historical asymmetry).
-
-    Returns ``(ProbeResult, targets)`` so the caller can log both the verdict and the
-    targets it was computed against.
+      * The verdict is a function of the LLM's ``STAGE_STATUS:`` lines +
+        any early-exit ``RELEASE_HEALTH: FAIL`` line — not of free-form
+        narration. See :func:`gate.agent.release_health.compute_release_health`
+        for the full rules.
+      * No httpx probe, no kubectl, no ingress /health GET — the k8s MCP's
+        ``deploy_health`` is the authoritative stage-4 signal, called by
+        the LLM in-cluster (see the release-health-check procedure in the
+        system prompt).
+      * Missing (stage, cluster) coverage is a FAIL (no PASS-by-silence).
     """
-    llm_fail = _last_llm_fail_reason(transcript)
-    if llm_fail is not None:
-        # Pre-stage-4 failure. Present the reason as the probe verdict for a
-        # single ProbeResult shape downstream.
-        return (
-            ProbeResult(verdict='FAIL', reason=f'stage 1-3: {llm_fail}', probes=()),
-            [],
-        )
-    targets = resolve_targets_from_inputs(inputs, transcript)
-    kwargs: dict[str, object] = {}
-    if budget_seconds is not None:
-        kwargs['budget_seconds'] = budget_seconds
-    result = probe(targets, **kwargs)
-    return result, targets
-
-
-def _release_health_budget_seconds(inputs: dict[str, object]) -> float | None:
-    """Compute the probe budget in seconds from ``inputs['budgetMinutes']``.
-
-    Returns None when unset so the probe uses its own default (300s). The LLM
-    already spent time on stages 1-3, so the probe budget is intentionally the
-    stage-4 tail — the caller can pin it via inputs (``probeBudgetSeconds``) if
-    they want tighter control than the plan-level ``budgetMinutes``.
-    """
-    if 'probeBudgetSeconds' in inputs:
-        try:
-            return float(inputs['probeBudgetSeconds'])  # type: ignore[arg-type]
-        except (TypeError, ValueError):
-            return None
-    return None
+    required_clusters = _resolve_required_clusters(inputs)
+    return aggregator(transcript, required_clusters=required_clusters)
 
 
 async def run_infra_task(
@@ -378,16 +399,16 @@ async def run_infra_task(
         raise
 
     # Judgment actions must drive the exit code from the OUTCOME, not just SDK errors.
-    # release-health-check: verdict is DETERMINISTIC — the Python probe (or an LLM-declared
-    # stage-1-3 FAIL) decides PASS/FAIL, not the model's narration. A merged PR / undeployed
-    # release / non-200 /health must never read as healthy (closes both the false-success
-    # where exit_code tracked only is_error AND the cluster-asymmetric "kubectl unavailable
-    # => FAIL" improvisation the historical LLM-driven check produced).
+    # release-health-check: verdict is DETERMINISTIC — the Python aggregator reads the LLM's
+    # per-stage STAGE_STATUS lines + any early-exit RELEASE_HEALTH: FAIL line and computes
+    # PASS/FAIL from them. A merged PR / undeployed release / unhealthy Deployment must
+    # never read as healthy (closes the historical false-success where exit_code tracked
+    # only is_error, AND the "kubectl unavailable => FAIL" / "curled once and PASSED"
+    # cluster-asymmetric improvisation of the httpx probe).
     if action == 'release-health-check':
-        result, targets = _health_check_verdict(
+        result = _health_check_verdict(
             inputs,
             '\n'.join(transcript),
-            budget_seconds=_release_health_budget_seconds(inputs),
         )
         # Exit code: only an explicit PASS survives; FAIL forces 1.
         exit_code = 0 if result.verdict == 'PASS' else 1
@@ -398,8 +419,9 @@ async def run_infra_task(
             action=action,
             verdict=result.verdict,
             reason=result.reason,
-            targets=targets,
-            probes=[p.as_dict() for p in result.probes],
+            failing_stage=result.failing_stage,
+            failing_cluster=result.failing_cluster,
+            stages=[s.as_dict() for s in result.stages],
             exit_code=exit_code,
         )
 
