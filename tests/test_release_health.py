@@ -1,366 +1,424 @@
-"""Determinism pins for the scripted /health probe.
+"""Determinism pins for the release-health verdict aggregator.
 
-These tests are the whole point of the fix: the same setup MUST produce the same
-verdict every time. Historically the LLM improvised — one run curled the ingress
-/health and PASSED, another concluded "kubectl not available" and FAILED closed.
-The verdict now comes from Python responding to HTTP status codes, on injected
-``now``/``sleep``/``client`` so the schedule is fully pinned.
+These tests are the whole point of the fix: the same setup MUST produce the
+same verdict every time. Historically the LLM improvised — one run curled the
+ingress /health and PASSED, another concluded "kubectl not available" and
+FAILED closed. Even after that was moved to an httpx probe the probe itself
+was unreachable from the infra sandbox → same cluster-asymmetric FAILs.
+
+The verdict now comes from Python parsing the LLM's per-stage
+``STAGE_STATUS:`` lines (emitted after each MCP call) and any early-exit
+``RELEASE_HEALTH: FAIL`` line. No httpx probe, no kubectl, no shell-outs.
 
 Key invariants:
 
-* endpoint returning 200 → PASS with NO kubectl (this is the fix's headline);
-* endpoint returning 502 then 200 → retries then PASSES (transient during
-  jx-boot reconcile);
-* endpoint returning persistent non-200 → FAILS with a clear reason;
-* verdict does NOT depend on kubectl (the module simply never touches it).
+* every required (stage, cluster) pair reports PASS → verdict PASS;
+* any required pair missing a PASS → verdict FAIL with the missing pair
+  named (no PASS-by-silence);
+* any explicit STAGE_STATUS FAIL → verdict FAIL naming the first failing
+  (stage, cluster) with its reason;
+* any explicit ``RELEASE_HEALTH: FAIL: ...`` → verdict FAIL with that reason
+  (early-exit short-circuit for gate-fails / stalled promotes);
+* a stray ``RELEASE_HEALTH: PASS`` from the LLM is IGNORED — PASS is decided
+  by parsed STAGE_STATUS lines, never by the LLM saying so;
+* the module NEVER shells out or touches kubectl / httpx (asymmetry closed).
 """
 
 from __future__ import annotations
 
-import sys
-
-import httpx
-import pytest
-
 from gate.agent import release_health
 from gate.agent.release_health import (
-    HostProbe,
+    DEFAULT_CLUSTERS,
+    REQUIRED_STAGES,
     ProbeResult,
-    parse_health_targets,
-    probe_health_targets,
-    resolve_targets_from_inputs,
+    StageVerdict,
+    compute_release_health,
+    parse_early_exit_fail,
+    parse_stage_verdicts,
 )
 
-# ── virtual clock / sleep so tests never touch real time ──────────────────────
+# ── stage-emission builders ───────────────────────────────────────────────────
+#
+# Small helpers so tests read as *scenarios* rather than newline-string
+# soup. Emissions match the exact grammar the LLM is instructed to produce.
 
 
-class _FakeClock:
-    """Deterministic time source paired with a sleep that advances it."""
-
-    def __init__(self) -> None:
-        self.t = 0.0
-        self.sleeps: list[float] = []
-
-    def now(self) -> float:
-        return self.t
-
-    def sleep(self, secs: float) -> None:
-        self.sleeps.append(secs)
-        self.t += secs
+def _line(stage: int, cluster: str, verdict: str, reason: str | None = None) -> str:
+    base = f'STAGE_STATUS: stage={stage} cluster={cluster} verdict={verdict}'
+    if reason:
+        return f'{base} reason={reason}'
+    return base
 
 
-def _mock_client(responses_by_url: dict[str, list[object]]) -> httpx.Client:
-    """Build an httpx.Client whose ``get`` returns each URL's next queued response.
-
-    A queued item may be an ``int`` (interpreted as HTTP status) or an
-    ``Exception`` instance (raised as if the transport failed).
-    """
-    remaining = {url: list(queue) for url, queue in responses_by_url.items()}
-
-    def _handler(request: httpx.Request) -> httpx.Response:
-        url = str(request.url)
-        if url not in remaining or not remaining[url]:
-            raise AssertionError(f'unexpected request to {url}')
-        nxt = remaining[url].pop(0)
-        if isinstance(nxt, Exception):
-            raise nxt
-        return httpx.Response(int(nxt))
-
-    return httpx.Client(transport=httpx.MockTransport(_handler))
+def _happy_path_transcript(reason: str = 'ok') -> str:
+    """The 7 STAGE_STATUS lines a fully-healthy release emits (stage 1 =
+    per-repo, stages 2..4 = per cluster × 2 clusters)."""
+    return '\n'.join(
+        [
+            _line(1, '-', 'PASS', f'release v1.2.3 Succeeded ({reason})'),
+            _line(2, 'gcp', 'PASS', 'promote PR #101 merged'),
+            _line(2, 'az', 'PASS', 'promote PR #102 merged'),
+            _line(3, 'gcp', 'PASS', 'jx-boot Job svc-boot-101 succeeded'),
+            _line(3, 'az', 'PASS', 'jx-boot Job svc-boot-102 succeeded'),
+            _line(4, 'gcp', 'PASS', 'healthy=true available_replicas=2'),
+            _line(4, 'az', 'PASS', 'healthy=true available_replicas=2'),
+        ]
+    )
 
 
 # ── the determinism headline ─────────────────────────────────────────────────
 
 
-def test_probe_passes_on_200_with_no_kubectl_involved() -> None:
-    """The core fix: 200 → PASS, verdict computed WITHOUT any kubectl involvement."""
-    clock = _FakeClock()
-    client = _mock_client({'https://hello-go.example.com/health': [200]})
-    with client:
-        result = probe_health_targets(
-            ['https://hello-go.example.com/health'],
-            budget_seconds=60.0,
-            backoff_seconds=5.0,
-            now=clock.now,
-            sleep=clock.sleep,
-            client=client,
-        )
+def test_all_stages_pass_yields_verdict_pass() -> None:
+    """The core fix: every (stage, cluster) PASS → verdict PASS, computed
+    WITHOUT any HTTP / kubectl involvement."""
+    result = compute_release_health(_happy_path_transcript())
     assert result.verdict == 'PASS'
     assert result.reason is None
-    assert [p.ok for p in result.probes] == [True]
-    assert [p.last_status for p in result.probes] == [200]
-    # No sleep needed when the first probe returns 200 — the schedule is pinned.
-    assert clock.sleeps == []
+    assert result.failing_stage is None
+    assert result.failing_cluster is None
+    # Every emitted stage is preserved for downstream logging.
+    assert len(result.stages) == 7
+    assert {(s.stage, s.cluster) for s in result.stages} == {
+        (1, '-'),
+        (2, 'gcp'),
+        (2, 'az'),
+        (3, 'gcp'),
+        (3, 'az'),
+        (4, 'gcp'),
+        (4, 'az'),
+    }
 
 
-def test_probe_module_does_not_shell_out_or_touch_kubernetes() -> None:
-    """kubectl is deliberately NOT touched — its absence is not-a-fail (asymmetry closed).
+def test_module_does_not_shell_out_or_touch_kubernetes_or_httpx() -> None:
+    """kubectl / httpx are deliberately NOT touched — the cluster-asymmetric
+    "sandbox can't reach the ingress" bug is closed by CODE, not docstring.
 
-    Enforced by CODE, not docstring — the module explains why it doesn't touch kubectl,
-    which is fine. What we forbid is actually running it: no ``subprocess`` import, no
-    kubernetes SDK import.
+    Enforced by CODE, not docstring — the module explains why it doesn't touch
+    these, which is fine. What we forbid is actually running them: no
+    ``subprocess`` import, no kubernetes SDK import, no httpx import.
     """
     import gate.agent.release_health as mod  # noqa: PLC0415 — assertion-scoped
 
     # No subprocess-based shell-outs (that's how a caller would run kubectl).
     assert not hasattr(mod, 'subprocess')
-    # No kubernetes SDK either. The module namespace pulls in only httpx-shaped bits.
-    for attr in ('kubernetes', 'client', 'ApiClient', 'CoreV1Api'):
-        assert not hasattr(mod, attr) or attr in {'client'}  # httpx.Client alias would be fine
-    # And the module source doesn't shell out (no subprocess/os.system/popen).
+    # No kubernetes SDK either.
+    for attr in ('kubernetes', 'ApiClient', 'CoreV1Api'):
+        assert not hasattr(mod, attr), f'release_health should not use {attr!r}'
+    # No httpx — the httpx probe was the specific bug this refactor closes.
+    assert not hasattr(mod, 'httpx')
+    # And the module source doesn't shell out or import forbidden clients.
+    # These are USAGE patterns (imports + call syntax) so the docstring can
+    # freely explain WHY we don't use them without triggering the check.
     src = (release_health.__file__ or '').replace('.pyc', '.py')
     with open(src) as fh:
         text = fh.read()
-    for forbidden in ('subprocess', 'os.system', 'popen(', 'kubernetes.client'):
+    for forbidden in (
+        'import subprocess',
+        'from subprocess',
+        'import httpx',
+        'from httpx',
+        'import kubernetes',
+        'from kubernetes',
+        'os.system(',
+        'Popen(',
+        'subprocess.run(',
+    ):
         assert forbidden not in text, f'release_health should not use {forbidden!r}'
-    # Sanity: sys is imported here for module-listing only; keep the lint tidy.
-    _ = sys
 
 
-# ── transient recovery: 502 then 200 → PASS ──────────────────────────────────
+# ── STAGE_STATUS parser: parse the exact grammar the LLM must emit ───────────
 
 
-@pytest.mark.parametrize('transient_status', [502, 503, 504])
-def test_probe_retries_transient_status_then_passes_on_200(transient_status: int) -> None:
-    """502/503/504 during jx-boot reconcile → keep retrying → 200 → PASS."""
-    clock = _FakeClock()
-    url = 'https://hello-go.example.com/health'
-    client = _mock_client({url: [transient_status, 200]})
-    with client:
-        result = probe_health_targets(
-            [url],
-            budget_seconds=120.0,
-            backoff_seconds=5.0,
-            now=clock.now,
-            sleep=clock.sleep,
-            client=client,
-        )
+def test_parse_stage_verdicts_extracts_every_line() -> None:
+    transcript = _happy_path_transcript()
+    parsed = parse_stage_verdicts(transcript)
+    assert len(parsed) == 7
+    assert parsed[0] == StageVerdict(stage=1, cluster='-', verdict='PASS', reason='release v1.2.3 Succeeded (ok)')
+    assert parsed[-1].stage == 4
+    assert parsed[-1].cluster == 'az'
+
+
+def test_parse_stage_verdicts_ignores_narration_between_lines() -> None:
+    """Narrative text between STAGE_STATUS lines is dropped — the aggregator
+    only sees structured emissions."""
+    transcript = '\n'.join(
+        [
+            'ok, calling release_status now...',
+            _line(1, '-', 'PASS'),
+            'now the promote status per cluster',
+            _line(2, 'gcp', 'PASS'),
+            'AZ was flaky; retesting once, then re-poll',
+            _line(2, 'az', 'PASS'),
+        ]
+    )
+    parsed = parse_stage_verdicts(transcript)
+    assert [(p.stage, p.cluster) for p in parsed] == [(1, '-'), (2, 'gcp'), (2, 'az')]
+
+
+def test_parse_stage_verdicts_tolerates_quoted_reason() -> None:
+    """LLMs love wrapping strings in quotes; ``reason="..."`` becomes ``reason=...``."""
+    transcript = 'STAGE_STATUS: stage=4 cluster=gcp verdict=FAIL reason="deployment not ready"'
+    parsed = parse_stage_verdicts(transcript)
+    assert parsed[0].reason == 'deployment not ready'
+
+
+def test_parse_stage_verdicts_drops_malformed_lines() -> None:
+    """Unknown verdict / missing fields → dropped silently.
+
+    Coverage requirements later catch the missing pair, so a garbled line
+    surfaces as a missing-coverage FAIL rather than a silent PASS.
+    """
+    transcript = '\n'.join(
+        [
+            'STAGE_STATUS: stage=4 cluster=gcp verdict=MAYBE',  # bad verdict
+            'STAGE_STATUS: cluster=gcp verdict=PASS',  # missing stage
+            _line(1, '-', 'PASS'),
+            _line(4, 'gcp', 'PASS'),
+        ]
+    )
+    parsed = parse_stage_verdicts(transcript)
+    assert len(parsed) == 2
+    assert {(p.stage, p.cluster) for p in parsed} == {(1, '-'), (4, 'gcp')}
+
+
+# ── FAIL paths ────────────────────────────────────────────────────────────────
+
+
+def test_first_stage_fail_names_the_failing_stage() -> None:
+    """A single STAGE_STATUS FAIL flips verdict to FAIL, naming (stage, cluster)."""
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS'),
+            _line(2, 'gcp', 'PASS'),
+            _line(2, 'az', 'FAIL', 'qa-gate blocked promote PR #77'),
+        ]
+    )
+    result = compute_release_health(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.reason is not None
+    assert 'stage 2' in result.reason
+    assert 'cluster=az' in result.reason
+    assert 'qa-gate blocked' in result.reason
+    assert result.failing_stage == 2
+    assert result.failing_cluster == 'az'
+
+
+def test_deploy_unhealthy_on_one_cluster_fails() -> None:
+    """Stage 4 FAIL on a single cluster names deploy_health details in reason."""
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS'),
+            _line(2, 'gcp', 'PASS'),
+            _line(2, 'az', 'PASS'),
+            _line(3, 'gcp', 'PASS'),
+            _line(3, 'az', 'PASS'),
+            _line(4, 'gcp', 'PASS', 'healthy=true available_replicas=2'),
+            _line(4, 'az', 'FAIL', 'healthy=false available_replicas=0 desired_replicas=1 deployment not ready'),
+        ]
+    )
+    result = compute_release_health(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 4
+    assert result.failing_cluster == 'az'
+    assert 'healthy=false' in (result.reason or '')
+
+
+def test_missing_stage_coverage_is_fail() -> None:
+    """No PASS-by-silence: a missing required (stage, cluster) pair FAILs
+    naming the first gap."""
+    # Miss stage 4 az entirely.
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS'),
+            _line(2, 'gcp', 'PASS'),
+            _line(2, 'az', 'PASS'),
+            _line(3, 'gcp', 'PASS'),
+            _line(3, 'az', 'PASS'),
+            _line(4, 'gcp', 'PASS'),
+            # stage=4 cluster=az is missing.
+        ]
+    )
+    result = compute_release_health(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 4
+    assert result.failing_cluster == 'az'
+    assert 'no STAGE_STATUS PASS emitted' in (result.reason or '')
+
+
+def test_empty_transcript_is_fail_naming_stage_1() -> None:
+    """No STAGE_STATUS lines at all → FAIL naming the first missing stage."""
+    result = compute_release_health('nothing happened')
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 1
+    assert result.failing_cluster == '-'
+
+
+def test_stage_1_can_be_reported_per_cluster_or_none() -> None:
+    """Stage 1 is per-repo; the LLM may accidentally emit cluster='gcp' on it.
+    Either shape (``cluster='-'`` or any required cluster) satisfies coverage."""
+    transcript = '\n'.join(
+        [
+            _line(1, 'gcp', 'PASS', 'release Succeeded'),  # deliberately cluster=gcp
+            _line(2, 'gcp', 'PASS'),
+            _line(2, 'az', 'PASS'),
+            _line(3, 'gcp', 'PASS'),
+            _line(3, 'az', 'PASS'),
+            _line(4, 'gcp', 'PASS'),
+            _line(4, 'az', 'PASS'),
+        ]
+    )
+    result = compute_release_health(transcript)
     assert result.verdict == 'PASS'
-    p = result.probes[0]
-    assert p.ok and p.last_status == 200
-    assert p.attempts == 2
-    assert clock.sleeps == [5.0]  # one backoff between the two attempts
 
 
-def test_probe_retries_transport_error_then_passes_on_200() -> None:
-    """Transport errors (LB not answering yet) are treated like transient 5xx — retried."""
-    clock = _FakeClock()
-    url = 'https://hello-go.example.com/health'
-    conn_err = httpx.ConnectError('connection refused')
-    client = _mock_client({url: [conn_err, 200]})
-    with client:
-        result = probe_health_targets(
-            [url],
-            budget_seconds=120.0,
-            backoff_seconds=3.0,
-            now=clock.now,
-            sleep=clock.sleep,
-            client=client,
-        )
-    assert result.verdict == 'PASS'
-    assert result.probes[0].attempts == 2
+# ── early-exit RELEASE_HEALTH: FAIL ──────────────────────────────────────────
 
 
-# ── persistent non-200 → FAIL with clear reason ──────────────────────────────
-
-
-def test_probe_fails_on_persistent_transient_within_budget() -> None:
-    """502 forever, budget expires → FAIL naming the last status + attempts."""
-    clock = _FakeClock()
-    url = 'https://hello-go.example.com/health'
-    # Enough 502s to exhaust the budget (10s budget / 3s backoff → at most 4 tries).
-    client = _mock_client({url: [502] * 10})
-    with client:
-        result = probe_health_targets(
-            [url],
-            budget_seconds=10.0,
-            backoff_seconds=3.0,
-            now=clock.now,
-            sleep=clock.sleep,
-            client=client,
-        )
+def test_early_exit_fail_free_form_shortcircuits() -> None:
+    """A ``RELEASE_HEALTH: FAIL: <reason>`` line short-circuits to FAIL even
+    when subsequent PASS STAGE_STATUS lines follow (they may be stale
+    narrative). LAST FAIL wins."""
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS'),
+            'RELEASE_HEALTH: FAIL: release did not fire within 60min',
+            _line(2, 'gcp', 'PASS'),  # ignored — early-exit already wins
+        ]
+    )
+    result = compute_release_health(transcript)
     assert result.verdict == 'FAIL'
-    assert result.reason is not None
-    assert 'no 200' in result.reason
-    assert '502' in result.reason
-    assert result.probes[0].attempts >= 2
+    assert 'release did not fire' in (result.reason or '')
 
 
-@pytest.mark.parametrize('hard_status', [404, 400, 500, 501])
-def test_probe_fails_immediately_on_non_transient_non_200(hard_status: int) -> None:
-    """404/500 etc. are NOT retried — retrying can't fix a missing route or a crashed app."""
-    clock = _FakeClock()
-    url = 'https://hello-go.example.com/health'
-    client = _mock_client({url: [hard_status]})
-    with client:
-        result = probe_health_targets(
-            [url],
-            budget_seconds=60.0,
-            backoff_seconds=5.0,
-            now=clock.now,
-            sleep=clock.sleep,
-            client=client,
-        )
+def test_early_exit_fail_structured_form_captures_stage_and_cluster() -> None:
+    """The structured ``stage=<n> cluster=<c> reason=<r>`` form is preferred —
+    the aggregator captures both fields for downstream logs."""
+    transcript = (
+        'RELEASE_HEALTH: FAIL: '
+        'stage=2 cluster=gcp reason=needs-cross-plan-Infra-agent: qa-gate failed on promote PR #123'
+    )
+    result = compute_release_health(transcript)
     assert result.verdict == 'FAIL'
-    assert result.probes[0].attempts == 1
-    assert clock.sleeps == []  # no backoff wasted on a hard fail
-    assert result.reason is not None
-    assert str(hard_status) in result.reason
-    assert 'non-transient' in result.reason
+    assert result.failing_stage == 2
+    assert result.failing_cluster == 'gcp'
+    assert 'stage 2' in (result.reason or '')
+    assert 'cluster=gcp' in (result.reason or '')
+    assert 'needs-cross-plan-Infra-agent' in (result.reason or '')
 
 
-# ── multi-target: PASS iff every host returns 200 ────────────────────────────
+def test_early_exit_last_fail_wins() -> None:
+    """Multiple ``RELEASE_HEALTH: FAIL`` lines → the LAST one is the verdict.
 
-
-def test_probe_requires_all_targets_pass() -> None:
-    """Both clusters must return 200 for the verdict to be PASS — the passing run probed both."""
-    clock = _FakeClock()
-    gcp = 'https://hello-go-gcp.example.com/health'
-    az = 'https://hello-go-az.example.com/health'
-    client = _mock_client({gcp: [200], az: [500]})
-    with client:
-        result = probe_health_targets(
-            [gcp, az],
-            budget_seconds=30.0,
-            backoff_seconds=5.0,
-            now=clock.now,
-            sleep=clock.sleep,
-            client=client,
-        )
+    The LLM may narrate a transient early failure it then recovered from.
+    Only the final line matters."""
+    transcript = '\n'.join(
+        [
+            'RELEASE_HEALTH: FAIL: transient',
+            'ok, recovered',
+            'RELEASE_HEALTH: FAIL: final: gcp qa-gate failed',
+        ]
+    )
+    result = compute_release_health(transcript)
     assert result.verdict == 'FAIL'
-    assert result.reason is not None
-    assert 'HTTP 500' in result.reason  # names the specific failing target
+    assert 'final' in (result.reason or '')
 
 
-def test_probe_passes_both_targets_return_200() -> None:
-    clock = _FakeClock()
-    gcp = 'https://hello-go-gcp.example.com/health'
-    az = 'https://hello-go-az.example.com/health'
-    client = _mock_client({gcp: [200], az: [200]})
-    with client:
-        result = probe_health_targets(
-            [gcp, az],
-            budget_seconds=30.0,
-            backoff_seconds=5.0,
-            now=clock.now,
-            sleep=clock.sleep,
-            client=client,
-        )
+def test_stray_release_health_pass_is_ignored() -> None:
+    """A stray ``RELEASE_HEALTH: PASS`` from the LLM is IGNORED — PASS is
+    decided by STAGE_STATUS coverage, never by the LLM saying so."""
+    # Only stage 1 PASS is emitted — stages 2/3/4 are missing → should FAIL.
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS'),
+            'RELEASE_HEALTH: PASS: I think it looks good',  # ignored
+        ]
+    )
+    result = compute_release_health(transcript)
+    assert result.verdict == 'FAIL'  # coverage gap forces FAIL
+
+
+def test_parse_early_exit_fail_returns_tuple() -> None:
+    assert parse_early_exit_fail('nothing') == (None, None, None)
+    assert parse_early_exit_fail('RELEASE_HEALTH: FAIL: boom') == (None, None, 'boom')
+    stage, cluster, reason = parse_early_exit_fail('RELEASE_HEALTH: FAIL: stage=3 cluster=az reason=jx-boot failed')
+    assert stage == 3
+    assert cluster == 'az'
+    assert reason == 'jx-boot failed'
+
+
+# ── single-cluster runs (inputs pin one cluster) ─────────────────────────────
+
+
+def test_single_cluster_run_pins_required_clusters() -> None:
+    """A plan step with ``clusters=[gcp]`` requires PASS coverage only on
+    that cluster — az's absence must not cause a FAIL."""
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS'),
+            _line(2, 'gcp', 'PASS'),
+            _line(3, 'gcp', 'PASS'),
+            _line(4, 'gcp', 'PASS'),
+        ]
+    )
+    result = compute_release_health(transcript, required_clusters=('gcp',))
     assert result.verdict == 'PASS'
 
 
-def test_empty_targets_is_deterministic_fail() -> None:
-    """No targets → FAIL with a specific reason (no PASS-by-silence)."""
-    result = probe_health_targets([], budget_seconds=1.0)
-    assert result.verdict == 'FAIL'
-    assert result.reason is not None
-    assert 'no health targets' in result.reason
-
-
-# ── target resolution: inputs override discovery ─────────────────────────────
-
-
-def test_resolve_targets_from_inputs_prefers_healthurl() -> None:
-    """healthUrl wins over host wins over transcript (most-deterministic first)."""
-    targets = resolve_targets_from_inputs(
-        {'healthUrl': 'https://custom.example/live'},
-        'HEALTH_TARGETS: https://ignored.example/health',
+def test_skip_on_non_required_cluster_is_not_a_fail() -> None:
+    """An LLM SKIP for a cluster the aggregator doesn't require does NOT
+    cause a FAIL — the aggregator only reasons about required clusters."""
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS'),
+            _line(2, 'gcp', 'PASS'),
+            _line(2, 'az', 'SKIP', 'single-cluster run (inputs.cluster=gcp)'),
+            _line(3, 'gcp', 'PASS'),
+            _line(4, 'gcp', 'PASS'),
+        ]
     )
-    assert targets == ['https://custom.example/live']
+    result = compute_release_health(transcript, required_clusters=('gcp',))
+    assert result.verdict == 'PASS'
 
 
-def test_resolve_targets_from_inputs_composes_host_and_healthpath() -> None:
-    targets = resolve_targets_from_inputs(
-        {'host': 'hello-go.example.com', 'healthPath': '/healthz'},
-        '',
-    )
-    assert targets == ['https://hello-go.example.com/healthz']
+# ── module constants pinned ──────────────────────────────────────────────────
 
 
-def test_resolve_targets_from_inputs_accepts_list_of_hosts() -> None:
-    targets = resolve_targets_from_inputs(
-        {'host': ['gcp.example', 'az.example']},
-        '',
-    )
-    assert targets == ['https://gcp.example/health', 'https://az.example/health']
+def test_required_stages_are_1_through_4() -> None:
+    """Guard against silent stage drift. Any additions to REQUIRED_STAGES
+    need an accompanying prompt update; this pin flags such divergence."""
+    assert REQUIRED_STAGES == (1, 2, 3, 4)
 
 
-def test_resolve_targets_from_inputs_accepts_comma_separated_hosts() -> None:
-    targets = resolve_targets_from_inputs(
-        {'host': 'gcp.example, az.example'},
-        '',
-    )
-    assert targets == ['https://gcp.example/health', 'https://az.example/health']
-
-
-def test_resolve_targets_defaults_healthpath_to_health() -> None:
-    targets = resolve_targets_from_inputs({'host': 'foo.example'}, '')
-    assert targets == ['https://foo.example/health']
-
-
-def test_resolve_targets_prepends_slash_to_healthpath_if_missing() -> None:
-    targets = resolve_targets_from_inputs({'host': 'foo.example', 'healthPath': 'livez'}, '')
-    assert targets == ['https://foo.example/livez']
-
-
-def test_resolve_targets_falls_back_to_transcript() -> None:
-    targets = resolve_targets_from_inputs(
-        {},
-        'ok, targets:\nHEALTH_TARGETS: https://a.example/health, https://b.example/health\n',
-    )
-    assert targets == ['https://a.example/health', 'https://b.example/health']
-
-
-def test_parse_health_targets_takes_last_line() -> None:
-    """The LLM may narrate; the LAST HEALTH_TARGETS line wins."""
-    text = (
-        'HEALTH_TARGETS: https://old.example/health\n'
-        'wait I need to retry\n'
-        'HEALTH_TARGETS: https://new-a.example/health, https://new-b.example/health'
-    )
-    assert parse_health_targets(text) == [
-        'https://new-a.example/health',
-        'https://new-b.example/health',
-    ]
-
-
-def test_parse_health_targets_returns_empty_when_absent() -> None:
-    assert parse_health_targets('nothing to see here') == []
+def test_default_clusters_are_gcp_and_az() -> None:
+    assert DEFAULT_CLUSTERS == ('gcp', 'az')
 
 
 # ── dataclass shapes ─────────────────────────────────────────────────────────
 
 
-def test_host_probe_as_dict_matches_schema() -> None:
-    p = HostProbe(url='https://x/health', ok=True, last_status=200, attempts=1, elapsed_seconds=0.42)
-    d = p.as_dict()
-    assert d == {
-        'url': 'https://x/health',
-        'ok': True,
-        'last_status': 200,
-        'attempts': 1,
-        'elapsed_seconds': 0.42,
-        'reason': None,
+def test_stage_verdict_as_dict_matches_schema() -> None:
+    sv = StageVerdict(stage=4, cluster='gcp', verdict='PASS', reason='healthy=true')
+    assert sv.as_dict() == {
+        'stage': 4,
+        'cluster': 'gcp',
+        'verdict': 'PASS',
+        'reason': 'healthy=true',
     }
 
 
 def test_probe_result_as_dict_matches_schema() -> None:
     r = ProbeResult(
         verdict='FAIL',
-        reason='HTTP 500 from …/health',
-        probes=(
-            HostProbe(
-                url='https://x/health',
-                ok=False,
-                last_status=500,
-                attempts=1,
-                elapsed_seconds=0.1,
-                reason='HTTP 500 from …/health',
-            ),
-        ),
+        reason='stage 4 cluster=az: healthy=false',
+        stages=(StageVerdict(stage=4, cluster='az', verdict='FAIL', reason='healthy=false'),),
+        failing_stage=4,
+        failing_cluster='az',
     )
     d = r.as_dict()
     assert d['verdict'] == 'FAIL'
-    assert d['reason'] == 'HTTP 500 from …/health'
-    assert len(d['probes']) == 1
-    assert d['probes'][0]['last_status'] == 500
+    assert d['reason'] == 'stage 4 cluster=az: healthy=false'
+    assert d['failing_stage'] == 4
+    assert d['failing_cluster'] == 'az'
+    assert len(d['stages']) == 1
+    assert d['stages'][0]['reason'] == 'healthy=false'

@@ -48,10 +48,10 @@ def _mounts(*names: str) -> list[dict[str, str]]:
 
 
 # Advertise every server the agent knows about (including the BA agent's
-# new platform_state / control_plane / agent_api trio) so the happy-path
-# wire-up assertion exercises the full WANTED_MCP_SERVERS set. `k8s` is
-# NOT in WANTED — it is included here to prove the agent silently ignores
-# host-only servers instead of wiring them.
+# platform_state / control_plane / agent_api trio and the infra agent's
+# k8s + jx_release entries) so the happy-path wire-up assertion exercises the
+# full WANTED_MCP_SERVERS set. Any host-only server not in WANTED would be
+# silently ignored by build_remote_mcp_servers.
 _ALL_ADVERTISED = {
     'servers': [
         'pr_context',
@@ -192,6 +192,10 @@ def test_fully_configured_wires_from_discovery_with_bearer(monkeypatch: pytest.M
         'leartech-jx3-flow',
         'leartech-repo-factory',
         'leartech-jx-release',
+        # Infra agent — in-cluster read surface (deploy_health / get_job_state /
+        # list_jobs_by_label) composed as the deterministic stage-3+4 signal
+        # of release-health-check (replaces the unreachable-from-sandbox HTTP probe).
+        'leartech-k8s',
         # BA agent surface (platform state + control plane + agent API).
         'leartech-platform-state',
         'leartech-control-plane',
