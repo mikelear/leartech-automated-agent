@@ -565,7 +565,7 @@ mapping (updated as new repos come online):
 
 | Language | Locally-runnable pre-push checks | Skip (needs cluster) |
 |---|---|---|
-| **Go** | See "Go: run the catalog make targets" below — do NOT reproduce bare commands | image-scan, dynamic-scan, end2end |
+| **Go** | See "Go: run the GOLDEN catalog `leartech-go.mk` DIRECTLY" below — do NOT run the consumer repo's own `make lint` / `make test-coverage`, and do NOT run bare `golangci-lint` / `go test` | image-scan, dynamic-scan, end2end |
 | **Python** | `ruff format --check <dirs>`, `ruff check <dirs>`, `mypy <dirs>`, `pytest` (or `uv run ...` equivalents) | image-scan, dynamic-scan, end2end |
 | **Angular** | `npm ci --legacy-peer-deps` (fallback `npm install --legacy-peer-deps`), `npm run lint` (or `npx ng lint`), `npm test` (headless via `ChromeHeadlessNoSandbox`) + parse `coverage/**/lcov.info` and enforce ≥ 60% floor, `npm audit` | image-scan, dynamic-scan, end2end-ui (iterative — see below) |
 | **Rust** | `cargo fmt --check`, `cargo clippy -- -D warnings`, `cargo test` | image-scan, dynamic-scan, end2end |
@@ -574,65 +574,91 @@ The gate pipeline files are the authoritative source. This table is a
 fast-path; always confirm against the actual `.lighthouse/jenkins-x/` files
 before pushing to a new or unfamiliar repo.
 
-## Go: run the catalog make targets, NOT bare commands
+## Go: run the GOLDEN catalog `leartech-go.mk` DIRECTLY
 
 Go consumer repos' `.lighthouse/jenkins-x/*.yaml` files reference the catalog
 via opaque `uses:` refs (e.g. `image: uses:mikelear/leartech-pipeline-catalog/tasks/go-lint/pullrequest.yaml@main`).
 There are NO local `script:` blocks to extract — the "extract script blocks"
-procedure will find nothing and, without this guidance, agents fall back to
-bare `gofmt -l . && golangci-lint run && go test ./...`. Those bare commands
-DO NOT match the catalog:
+procedure will find nothing and, without this guidance, agents fall back
+to running whatever the consumer repo happens to expose as `make lint` /
+`make test-coverage`, or worse, bare `gofmt -l . && golangci-lint run &&
+go test ./...`. **Neither is safe.** They may match the catalog today, but
+they can silently drift.
 
-- `go-lint` fetches + merges `go/.golangci.base.yml` from the catalog before
-  running `golangci-lint`; bare `golangci-lint run` uses only the repo's
-  local config and enables far fewer linters.
-- `go-test` enforces a **coverage floor and delta** (`-coverpkg`, threshold,
-  delta gate); bare `go test ./...` reports nothing about coverage.
+What the catalog CI actually runs (source of truth today):
+
+- `go-lint` fetches the golden `go/leartech-go.mk` from the catalog,
+  `yq`-merges `go/.golangci.base.yml` with the consumer's
+  `.golangci.yml`, and runs the merged config against `golangci-lint`
+  (currently ~30 linters).
+- `go-test` (also via the golden `go/leartech-go.mk`) runs the test
+  suite with `-coverpkg=./...`, enforces a **60% coverage floor**, and
+  gates on a **coverage delta vs. base**.
+
+Neither the consumer's `make lint` nor bare `golangci-lint run` /
+`go test ./...` reproduces that pipeline reliably:
+
+- Bare `golangci-lint run` uses only the consumer's local `.golangci.yml`
+  — no base merge, far fewer linters enabled.
+- Bare `go test ./...` reports nothing about coverage — floor + delta
+  are silently ignored.
+- The consumer's OWN `Makefile` `lint` / `test-coverage` targets **may or
+  may not** invoke the golden mk. Many repos' Makefiles have drifted to
+  bare `golangci-lint run ./...` / bare `go test ./...`, so a green
+  local `make lint` gives a false all-clear when CI would fail.
 
 This asymmetry is why Go PRs land RED on lint/coverage after the agent
-thought it was green (canonical case: `leartech-mcp-servers` PR #49).
+thought it was green (canonical drift case:
+`leartech-orchestrator-controller` PR #73; earlier related case with a
+different failure mode: `leartech-mcp-servers` PR #49).
 
-**The rule**: for Go repos, do NOT parse `uses:`-ref pipeline files for
-scripts. Instead run the **golden make targets** — the same targets the
-catalog tasks (and `leartech-go-service-template`'s Makefile) drive from:
+**The rule — run the golden `leartech-go.mk` DIRECTLY, never the
+consumer's own `make` targets.** For any Go repo whose
+`.lighthouse/jenkins-x/*.yaml` uses the catalog's `go-lint` / `go-test`
+tasks (i.e. every converged Go repo), the pre-push check MUST invoke the
+SAME code CI does — the golden mk itself — and MUST NOT delegate to a
+possibly-drifted consumer `Makefile`.
 
 ```sh
-# Preferred — consumer repo owns a Makefile with the standard targets
-# (go-service-template ships this; converged Go repos inherit it):
-make pre-push                # fmt vet swag-check tidy-check build test lint vuln secrets
-# or individually:
-make lint                    # fetches + merges catalog .golangci.base.yml, runs golangci-lint
-make test-coverage           # runs tests with coverage, enforces the floor
-
-# Fallback A — baked into the leartech-agent-go image
-make -f /usr/local/share/leartech-go.mk lint
-make -f /usr/local/share/leartech-go.mk test-coverage
-
-# Fallback B — curl the mk from the catalog raw URL when neither the
-# consumer Makefile nor the baked copy is present:
+# Preferred (durable) — curl the golden mk from the pipeline catalog and
+# invoke it directly. This is IDENTICAL to what CI runs; it CANNOT drift
+# with the consumer repo. Do this on every push regardless of whether
+# the consumer repo has its own Makefile.
 curl -fsSL -o /tmp/leartech-go.mk \
   https://raw.githubusercontent.com/mikelear/leartech-pipeline-catalog/main/go/leartech-go.mk
-make -f /tmp/leartech-go.mk lint
-make -f /tmp/leartech-go.mk test-coverage
+make -f /tmp/leartech-go.mk lint            # yq-merges base+repo .golangci, runs ~30 linters
+make -f /tmp/leartech-go.mk test-coverage   # -coverpkg=./..., 60% floor, delta gate
+
+# Fallback — a pre-baked golden mk in the leartech-agent-go image. Use ONLY
+# when the curl target is unreachable (offline / network-blocked build).
+# The baked copy is refreshed by image bumps; the curl copy is always
+# current.
+make -f /usr/local/share/leartech-go.mk lint
+make -f /usr/local/share/leartech-go.mk test-coverage
 ```
+
+**Do NOT invoke the consumer repo's `make lint`, `make test-coverage`,
+`make pre-push`, or any other consumer-defined target for pre-push
+validation.** They may be correct today and drift tomorrow; the golden mk
+is the only durable source of truth.
 
 **Do NOT push until BOTH `lint` and `test-coverage` are green locally.**
 Iterate until they are, then push.
 
-**Version matters — single-sourced now.** The `golangci-lint` version in the
-consumer Makefile / baked `leartech-go.mk` MUST match the version the
-catalog `go-lint` task installs. Running a different major/minor at push
-time will produce false negatives (linters that fire in-cluster but not
-locally) or false positives (the other way). If the baked image ships a
-newer patch than the consumer Makefile pins, prefer the Makefile's pinned
-version — it's what the catalog resolves to. When in doubt, `make lint`
-in the consumer repo uses its own pin and is safest.
+**Version pinning lives inside the golden mk itself.** The `golangci-lint`
+version, coverage floor, and delta gate are all defined in
+`go/leartech-go.mk` in the pipeline catalog. Because you curl that mk
+directly, your local pin is by construction identical to CI's. The old
+"consumer Makefile pins the version" concern goes away — there IS no
+consumer-side pin any more, only the catalog's.
 
-**PR sticky "Pre-push validation" section** — record both:
+**PR sticky "Pre-push validation" section** — record both, and note the
+mk source so future review can spot if the curl fell back to the baked
+copy:
 
 ```
-✅ make lint (golangci-lint v2.11.4 via consumer Makefile): passed
-✅ make test-coverage (60% floor, +0.0% delta): passed
+✅ make -f /tmp/leartech-go.mk lint (golden mk @ catalog main, ~30 linters via yq-merged base+repo .golangci): passed
+✅ make -f /tmp/leartech-go.mk test-coverage (60% floor, +0.0% delta): passed
 ```
 
 ## Checks to always skip pre-push
@@ -753,11 +779,12 @@ This lesson is **Layer 1** of the pre-push validation design, with a
 - **Layer 1 — `uses:`-ref repos (Go today, more languages later)**: When
   a pipeline file's step is an `image: uses:.../catalog/tasks/<task>@<ref>`
   reference with NO local `script:` block, script extraction returns
-  nothing useful. For these repos, **run the catalog's golden make
-  targets** — see the "Go: run the catalog make targets, NOT bare commands"
-  section above. The Makefile is the single source of truth for tool
-  versions and gate logic; parsing the catalog's Tekton YAML to
-  re-derive commands is fragile and diverges over time.
+  nothing useful. For these repos, **curl the catalog's golden mk and run
+  it directly** — see the "Go: run the GOLDEN catalog `leartech-go.mk`
+  DIRECTLY" section above. The golden mk in the pipeline catalog is the
+  single source of truth for tool versions, base config, and gate logic;
+  the consumer repo's own `Makefile` may have drifted and MUST NOT be
+  trusted for pre-push validation.
 
 - **Layer 2 (follow-up if Layer 1 proves brittle)**: An MCP server
   (`mcp__leartech-gate__list_local_runnable_commands`) parses the pipeline
