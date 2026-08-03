@@ -1,0 +1,128 @@
+# release-shepherd — a multi-step decomposed release-check Plan template.
+#
+# Shape: a five-step Plan (dependsOn chain) where each step passes/fails on
+# its OWN MCP call — one individual single-stage action per step. This is
+# the counterpart of the single-step ``release-health-check`` action; use
+# THIS shape when the plan needs to STOP the moment an upstream stage
+# fails and hand a stage-scoped brief to a BA Agent for remediation,
+# rather than running the composed action's whole 4-stage sweep in one
+# blob (which cannot localize the failure at step-graph granularity).
+#
+# Why decompose:
+#
+# * A dependsOn chain lets the plan runner SKIP downstream stages once an
+#   upstream one has failed — no wasted MCP calls to boot-status when
+#   release-status already tripped.
+# * Each per-stage step's FAIL emits a STRUCTURED BA failure context
+#   (``{stage, cluster, mcp, expected, mcp_returned, remediation_hint}``)
+#   the escalation carries to the spawned BA Agent — the BA arrives
+#   knowing WHERE + HOW to start rather than "somewhere in stages 1..4".
+# * Individual steps map cleanly to the composed ``release-health-check``
+#   action's stages — same DETERMINISM CONTRACT (STAGE_STATUS-driven
+#   verdict), same underlying MCPs (leartech-jx-release + leartech-tekton
+#   + leartech-k8s), no divergence.
+#
+# The five stages (one per step in the chain):
+#
+#   1. release-status  — the release Tekton pipeline fired + Succeeded
+#                        on the repo (jx_release.release_status +
+#                        leartech-tekton PipelineRun outcome cross-check)
+#   2. promote-status  — jx-promote opened promote PRs on every requested
+#                        cluster (jx_release.promote_status found=true)
+#   3. verify-gate     — the promote PRs' verify + qa-gate green + merged
+#                        (jx_release.promote_status all_green + merged;
+#                        retest_promote for a single flake)
+#   4. boot-status     — the jx-boot Job for this release ran + succeeded
+#                        per cluster (leartech-k8s.list_jobs_by_label /
+#                        get_job_state)
+#   5. deploy-health   — the Deployment has >=1 available replica per
+#                        cluster (leartech-k8s.deploy_health) — the
+#                        authoritative in-cluster verdict, no httpx
+#
+# NOTE: this file is a TEMPLATE (not a fireable plan). Substitute:
+#   - ``<service>``       — the target service name (e.g. hello-go)
+#   - ``<namespace>``     — the target namespace (e.g. jx-staging)
+#   - ``<plan-name>``     — a unique name for this Plan instance
+#
+# Prefer the composed ``release-health-check`` action for the simple case
+# (single step, all four stages in one action). Prefer THIS multi-step
+# shape when the plan needs early-stop + per-stage BA hand-off.
+apiVersion: agent.leartech.io/v1alpha1
+kind: Plan
+metadata:
+  name: <plan-name>
+  namespace: <namespace>
+spec:
+  tenant: leartech
+  triggeredBy: agent
+  steps:
+    # ── Stage 1: release fired + Succeeded (per repo) ─────────────────────
+    # PASS iff the release Tekton pipeline fired AND completed Succeeded
+    # (not just "tag missing"). FAIL surfaces the failing step of the
+    # release PipelineRun so the BA Agent knows where to start.
+    - name: release-status
+      agentType: leartech-agent-infra
+      repo: ""
+      inputs:
+        action: release-status
+        service: <service>
+
+    # ── Stage 2 opened: jx-promote opened promote PRs ─────────────────────
+    # PASS iff jx-promote opened a promote PR on every requested cluster.
+    # FAIL common cause: env-repo webhook broken, asymmetric release
+    # (only pushed to ONE cluster registry). BA gets the cluster + env-
+    # repo owner surfaced.
+    - name: promote-status
+      agentType: leartech-agent-infra
+      dependsOn: [release-status]
+      repo: ""
+      inputs:
+        action: promote-status
+        service: <service>
+        clusters: [gcp, az]
+
+    # ── Stage 2 green + merged: verify + qa-gate + Tide merge ─────────────
+    # PASS iff the promote PRs merged green on every requested cluster.
+    # FAIL on gate_failed=true escalates as needs-cross-plan-Infra-agent
+    # (real qa-gate failure — BA dispatches a cross-plan remediation
+    # against the env repo).
+    - name: verify-gate
+      agentType: leartech-agent-infra
+      dependsOn: [promote-status]
+      repo: ""
+      inputs:
+        action: verify-gate
+        service: <service>
+        clusters: [gcp, az]
+
+    # ── Stage 3: jx-boot Job succeeded per cluster ────────────────────────
+    # PASS iff the jx-boot Job for this release reached succeeded=true on
+    # every requested cluster. FAIL common cause: missing chart values,
+    # unseeded secret, node scheduling starvation. BA gets Job name +
+    # last-N pod log lines.
+    - name: boot-status
+      agentType: leartech-agent-infra
+      dependsOn: [verify-gate]
+      repo: ""
+      inputs:
+        action: boot-status
+        service: <service>
+        namespace: <namespace>
+        clusters: [gcp, az]
+
+    # ── Stage 4: Deployment healthy per cluster ───────────────────────────
+    # PASS iff every requested cluster's Deployment has >=1 available
+    # replica (leartech-k8s.deploy_health returns healthy=true). NEVER
+    # replace this with an httpx /health probe — the infra sandbox
+    # CANNOT reach the ingress; deploy_health is the authoritative
+    # in-cluster signal. This is the FINAL step of the chain — the
+    # plan's overall success gates on stage 4.
+    - name: deploy-health
+      agentType: leartech-agent-infra
+      dependsOn: [boot-status]
+      repo: ""
+      inputs:
+        action: deploy-health
+        service: <service>
+        namespace: <namespace>
+        clusters: [gcp, az]

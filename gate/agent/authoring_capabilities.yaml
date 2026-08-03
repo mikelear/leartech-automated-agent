@@ -63,7 +63,36 @@ agent_types:
       release-health-check:
         status: available
         inputs: {service: "service name", cluster: "gcp|az"}
-        does: "Verify a release deployed HEALTHY. Use this as the FINAL verify step of every remediation plan."
+        does: "Verify a release deployed HEALTHY. Use this as the FINAL verify step of every remediation plan. Composed single-step verification: emits stages 1-4 (release fired, promote merged both clusters, jx-boot succeeded, deploy healthy) in one action. Prefer this shape when you want ONE step covering the whole release watch."
+      # --- Individual single-stage release-check actions (2026-08-03) —
+      # decompose release-health-check into ONE stage each so a release-check
+      # can be authored as a multi-step Plan (dependsOn chain) where each
+      # step passes/fails on its own MCP call — and a FAILED step hands the
+      # spawned BA Agent stage-specific "where + how to remediate" context.
+      # Author these when the plan needs to STOP the moment an upstream
+      # stage fails (e.g. skip verify-gate + boot-status + deploy-health
+      # when release-status fails) rather than run the composed action's
+      # whole 4-stage sweep. Otherwise prefer release-health-check.
+      release-status:
+        status: available
+        inputs: {service: "service name (or repo=mikelear/<service>)"}
+        does: "Stage 1: verify the release Tekton pipeline fired AND succeeded on the repo (jx_release.release_status + leartech-tekton PipelineRun outcome cross-check). PASS iff released=true AND release PipelineRun reached Succeeded."
+      promote-status:
+        status: available
+        inputs: {service: "service name", clusters: "list of gcp|az (default both) OR cluster: gcp|az"}
+        does: "Stage 2 opened: verify jx-promote opened promote PRs on ALL requested clusters (jx_release.promote_status found=true per cluster). Does NOT check verify/gate/merged — see verify-gate."
+      verify-gate:
+        status: available
+        inputs: {service: "service name", clusters: "list of gcp|az (default both) OR cluster: gcp|az"}
+        does: "Stage 2 green: verify the promote PRs' verify + qa-gate is green AND the PR merged (jx_release promote_status all_green + merged; retest_promote for a single flake). PASS iff merged green per requested cluster. On gate_failed → escalates as needs-cross-plan-Infra-agent."
+      boot-status:
+        status: available
+        inputs: {service: "service name", namespace: "target namespace", clusters: "list of gcp|az (default both) OR cluster: gcp|az"}
+        does: "Stage 3: verify the jx-boot Job for this release ran + succeeded on every requested cluster (leartech-k8s.list_jobs_by_label / get_job_state)."
+      deploy-health:
+        status: available
+        inputs: {service: "service name", namespace: "target namespace", clusters: "list of gcp|az (default both) OR cluster: gcp|az"}
+        does: "Stage 4: verify the Deployment is healthy per cluster (leartech-k8s.deploy_health returns healthy=true, >=1 available replica). Authoritative in-cluster signal — NO httpx probe, NO kubectl. Use as the FINAL verify step of a decomposed release-shepherd chain."
       # --- PLANNED actions land here (status: planned) once an infra power is on
       #     the roadmap. NOTE: secret PROVISIONING is deliberately NOT here —
       #     secrets are human-owned by design (see capability_gaps), not a future

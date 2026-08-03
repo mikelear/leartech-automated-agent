@@ -45,8 +45,11 @@ from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
 from gate.agent.release_health import (
     DEFAULT_CLUSTERS,
+    INDIVIDUAL_STAGE_ACTIONS,
     ProbeResult,
+    StageActionResult,
     compute_release_health,
+    is_individual_stage_action,
 )
 from gate.agent.test_mode import parse_test_mode, run_test_mode
 from gate.mcp_servers import build_remote_mcp_servers
@@ -249,6 +252,84 @@ ACTIONS (your inputs include `action` + its params):
   early-exit RELEASE_HEALTH: FAIL from your transcript; it fails closed on any FAIL
   emitted, any missing (stage, cluster) coverage, or any early-exit line.
 
+- INDIVIDUAL SINGLE-STAGE RELEASE-CHECK ACTIONS (2026-08-03): the five actions below
+  DECOMPOSE the composed release-health-check into ONE stage each, so a release-check
+  can be authored as a multi-step Plan (dependsOn chain) where each step passes/fails
+  on its OWN MCP call — and a FAILED step hands the spawned BA Agent stage-specific
+  "where + how to remediate" context (the composed verdict can't localize the failure).
+  The composed release-health-check ABOVE stays available for single-step use; these
+  five are additive.
+
+  Each individual action follows the SAME DETERMINISM CONTRACT as the composed one:
+  emit STAGE_STATUS: lines from your MCP results and the Python aggregator computes
+  PASS/FAIL. On FAIL, the aggregator ALSO emits a structured BA failure context so a
+  subsequently-spawned BA Agent knows WHERE (stage, cluster, MCP) and HOW to start
+  remediation. Do NOT improvise — call the MCP, emit the STAGE_STATUS line matching
+  what the MCP returned. No httpx probe from this sandbox — the k8s MCP is the
+  authoritative in-cluster signal.
+
+  * release-status — stage 1 (per repo, cluster='-'). Poll
+    mcp__leartech-jx-release__release_status(repo=mikelear/<service>) until
+    released=true AND cross-check the release PipelineRun outcome via
+    mcp__leartech-tekton__list_pipelineruns_for_pr / step_status: the release
+    PipelineRun MUST have reached Succeeded (not just "tag missing"). Emit
+        STAGE_STATUS: stage=1 cluster=- verdict=PASS reason=release <tag> Succeeded
+    on success; on the release PipelineRun failing at a specific step emit
+        STAGE_STATUS: stage=1 cluster=- verdict=FAIL reason=release PipelineRun <name> failed at step <step>
+    Params: service (or repo=mikelear/<service>), optional budgetMinutes (default 60).
+
+  * promote-status — stage 2 opened (per cluster). Poll
+    mcp__leartech-jx-release__promote_status(service, clusters=[...]). PASS iff
+    jx-promote opened a promote PR on every requested cluster (per-cluster found=true).
+    Does NOT check verify/gate/merged (that's verify-gate). For each requested cluster:
+      * found=true  → STAGE_STATUS: stage=2 cluster=<c> verdict=PASS reason=promote PR #<n> opened
+      * found=false past budget → STAGE_STATUS: stage=2 cluster=<c> verdict=FAIL reason=jx-promote did not open a promote PR
+    Params: service, clusters (list, default [gcp,az]) or cluster (single), optional
+    budgetMinutes (default 60).
+
+  * verify-gate — stage 2 green + merged (per cluster). Poll
+    mcp__leartech-jx-release__promote_status again but require merged=true + all_green=true.
+    On gate_failed=true → real qa-gate failure needing cross-plan Infra-agent — emit
+        STAGE_STATUS: stage=2 cluster=<c> verdict=FAIL reason=qa-gate failed on promote PR #<n>
+        RELEASE_HEALTH: FAIL: stage=2 cluster=<c> reason=needs-cross-plan-Infra-agent: qa-gate failed on promote PR #<n>
+    On non-green but NOT gate_failed (flake) — call
+    mcp__leartech-jx-release__retest_promote(cluster, pr_number) ONCE, then keep polling.
+    On merged=true (Tide auto-merged on green) — emit
+        STAGE_STATUS: stage=2 cluster=<c> verdict=PASS reason=promote PR #<n> merged
+    Params: service, clusters (list) or cluster, optional budgetMinutes (default 60).
+
+  * boot-status — stage 3 (per cluster). Call
+    mcp__leartech-k8s__list_jobs_by_label(cluster=<c>, namespace=<ns>, label=<selector>)
+    (or get_job_state on the specific jx-boot Job name) to confirm the jx-boot Job for
+    this release ran and succeeded on the cluster. Poll ~60s if it's still Active.
+      * succeeded=true → STAGE_STATUS: stage=3 cluster=<c> verdict=PASS reason=jx-boot Job <name> succeeded
+      * failed=true    → STAGE_STATUS: stage=3 cluster=<c> verdict=FAIL reason=jx-boot Job <name> failed
+    Params: service, namespace, clusters (list) or cluster, optional budgetMinutes.
+
+  * deploy-health — stage 4 (per cluster). Call
+    mcp__leartech-k8s__deploy_health(service=<s>, namespace=<ns>, cluster=<c>). The MCP
+    returns a structured verdict (healthy=true/false, available_replicas=N,
+    desired_replicas=M, reason=?). Emit VERBATIM (do NOT re-interpret):
+      * healthy=true  → STAGE_STATUS: stage=4 cluster=<c> verdict=PASS reason=healthy=true available_replicas=<N>
+      * healthy=false → STAGE_STATUS: stage=4 cluster=<c> verdict=FAIL reason=healthy=false available_replicas=<N> desired_replicas=<M> <deploy_health reason>
+    If the k8s MCP cannot reach the cluster, emit
+        STAGE_STATUS: stage=4 cluster=<c> verdict=FAIL reason=k8s MCP could not reach cluster <c>: <error>
+    NEVER attempt an HTTP GET against a /health URL from this sandbox.
+    Params: service, namespace, clusters (list) or cluster.
+
+  ON FAIL, the aggregator hands the BA Agent a structured context per this stage:
+    * stage             — the stage number (1..4)
+    * cluster           — the failing cluster (or '-' for stage 1)
+    * mcp               — the MCP tool(s) whose signal drove the FAIL
+    * expected          — what a PASS would look like from that MCP
+    * mcp_returned      — what the MCP actually returned (from your STAGE_STATUS reason=...)
+    * remediation_hint  — a stage-specific "how to start" guidance line
+  You do NOT need to render this yourself — the Python aggregator builds it from your
+  STAGE_STATUS + the per-stage guidance registered in gate/agent/release_health.py
+  (BA_STAGE_GUIDANCE). Your job is simply to (1) call the RIGHT MCP for this action,
+  (2) emit the STAGE_STATUS line reflecting what the MCP returned, and (3) do not
+  improvise the verdict — the aggregator decides.
+
 Report concisely what you did, which PRs you opened (numbers), and the pass/fail outcome.
 """
 
@@ -327,6 +408,71 @@ def _health_check_verdict(
     """
     required_clusters = _resolve_required_clusters(inputs)
     return aggregator(transcript, required_clusters=required_clusters)
+
+
+def _stage_action_verdict(
+    action: str,
+    inputs: dict[str, object],
+    transcript: str,
+    *,
+    aggregator: Callable[..., StageActionResult] | None = None,
+) -> StageActionResult:
+    """Compute the DETERMINISTIC verdict for one individual single-stage action.
+
+    Contract (same shape as :func:`_health_check_verdict` but scoped to one stage):
+      * The verdict is a function of the LLM's STAGE_STATUS lines + any
+        early-exit RELEASE_HEALTH: FAIL — never free-form narration.
+      * ``inputs['cluster']`` or ``inputs['clusters']`` pins the required
+        cluster set for this stage. Stage 1 (``release-status``) is per-repo
+        and ignores those params.
+      * On FAIL, the ``StageActionResult.ba_failure_context`` field carries
+        the structured stage-specific brief the escalation hands to the
+        BA Agent. See :data:`gate.agent.release_health.BA_STAGE_GUIDANCE`
+        for the per-stage guidance content.
+
+    The ``aggregator`` seam mirrors :func:`_health_check_verdict` — tests
+    substitute a fake aggregator to isolate the wiring from the parser.
+    Default resolves to the registered aggregator for ``action`` via
+    :data:`gate.agent.release_health.INDIVIDUAL_STAGE_ACTIONS`.
+    """
+    spec = INDIVIDUAL_STAGE_ACTIONS.get(action)
+    if spec is None:
+        # Should not happen — callers gate on is_individual_stage_action.
+        # Fail closed so an unknown action name never accidentally PASSes.
+        return StageActionResult(
+            verdict='FAIL',
+            reason=f'unknown individual-stage action {action!r}',
+            stage=0,
+            failing_stage=None,
+            failing_cluster=None,
+            ba_failure_context={
+                'action': action,
+                'stage': 0,
+                'cluster': '-',
+                'mcp': 'unknown',
+                'expected': 'a registered individual-stage action name',
+                'mcp_returned': None,
+                'reason': f'unknown action {action!r}',
+                'remediation_hint': (
+                    'Plan author authored a step targeting an unregistered infra action. '
+                    'Add the action to INDIVIDUAL_STAGE_ACTIONS + BA_STAGE_GUIDANCE OR '
+                    'change the plan step to a registered action.'
+                ),
+            },
+        )
+    stage_num = int(spec['stage'])
+    resolved_aggregator = aggregator if aggregator is not None else spec['aggregator']
+
+    # Cluster resolution: stage 1 is per-repo (aggregator handles the
+    # cluster='-' default); other stages honour inputs.clusters/cluster.
+    if stage_num == 1:
+        required_clusters = None  # aggregator picks ('-',)
+    else:
+        required_clusters = _resolve_required_clusters(inputs)
+
+    if required_clusters is None:
+        return resolved_aggregator(transcript)
+    return resolved_aggregator(transcript, required_clusters=required_clusters)
 
 
 async def run_infra_task(
@@ -422,6 +568,30 @@ async def run_infra_task(
             failing_stage=result.failing_stage,
             failing_cluster=result.failing_cluster,
             stages=[s.as_dict() for s in result.stages],
+            exit_code=exit_code,
+        )
+
+    # Individual single-stage actions (release-status / promote-status /
+    # verify-gate / boot-status / deploy-health) — same deterministic
+    # verdict shape as release-health-check but scoped to ONE stage.
+    # On FAIL, the ba_failure_context is what the escalation carries to
+    # the spawned BA Agent so the BA knows WHERE + HOW to remediate the
+    # stage. Same fail-closed exit-code semantics — PASS → 0, else 1.
+    elif is_individual_stage_action(action):
+        stage_result = _stage_action_verdict(action, inputs, '\n'.join(transcript))
+        exit_code = 0 if stage_result.verdict == 'PASS' else 1
+        obslog.info(
+            'stage_verdict',
+            f'{action} verdict={stage_result.verdict}',
+            logger='infra',
+            action=action,
+            stage=stage_result.stage,
+            verdict=stage_result.verdict,
+            reason=stage_result.reason,
+            failing_stage=stage_result.failing_stage,
+            failing_cluster=stage_result.failing_cluster,
+            stages=[s.as_dict() for s in stage_result.stages],
+            ba_failure_context=stage_result.ba_failure_context,
             exit_code=exit_code,
         )
 

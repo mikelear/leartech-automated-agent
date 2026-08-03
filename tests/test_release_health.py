@@ -422,3 +422,382 @@ def test_probe_result_as_dict_matches_schema() -> None:
     assert d['failing_cluster'] == 'az'
     assert len(d['stages']) == 1
     assert d['stages'][0]['reason'] == 'healthy=false'
+
+
+# ── Individual single-stage action aggregators ───────────────────────────────
+#
+# The FIVE decomposed actions (release-status / promote-status / verify-gate /
+# boot-status / deploy-health) reuse the SAME STAGE_STATUS parser + early-exit
+# rules the composed release-health-check uses, but each aggregator scopes
+# coverage to ONE stage. Every FAIL path emits a STRUCTURED BA failure
+# context so a spawned BA Agent knows WHERE + HOW to remediate — the whole
+# point of the decomposition.
+#
+# For each of the five actions we pin:
+#   - PASS path: a minimal STAGE_STATUS transcript covering the required
+#     (stage, cluster) pairs for THAT stage → verdict PASS, no BA context.
+#   - FAIL path: an explicit STAGE_STATUS FAIL for THAT stage → verdict
+#     FAIL, ba_failure_context is filled with the right fields and points
+#     at the right MCP + remediation hint.
+#   - Missing-coverage FAIL: no STAGE_STATUS lines → still a FAIL (no
+#     PASS-by-silence), and ba_failure_context surfaces the missing pair.
+#   - Cross-stage noise is ignored: a STAGE_STATUS FAIL on a DIFFERENT
+#     stage does NOT trip this action (its verdict depends only on lines
+#     scoped to its own stage).
+
+
+def test_compute_release_status_verdict_pass_minimal() -> None:
+    """release-status PASS: only stage 1 (cluster='-') is required."""
+    from gate.agent.release_health import compute_release_status_verdict
+
+    transcript = _line(1, '-', 'PASS', 'release v1.0.0 Succeeded')
+    result = compute_release_status_verdict(transcript)
+    assert result.verdict == 'PASS'
+    assert result.stage == 1
+    assert result.reason is None
+    assert result.ba_failure_context is None
+    assert result.failing_stage is None
+
+
+def test_compute_release_status_verdict_fail_with_ba_context() -> None:
+    """release-status FAIL emits a structured BA failure context pointing
+    at release_status + tekton MCPs with the release-fired remediation hint."""
+    from gate.agent.release_health import compute_release_status_verdict
+
+    transcript = _line(
+        1,
+        '-',
+        'FAIL',
+        'release PipelineRun hello-go-release-abc123 failed at step kaniko',
+    )
+    result = compute_release_status_verdict(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 1
+    assert result.failing_cluster == '-'
+    assert 'kaniko' in (result.reason or '')
+
+    ctx = result.ba_failure_context
+    assert ctx is not None
+    assert ctx['stage'] == 1
+    assert ctx['cluster'] == '-'
+    assert ctx['action'] == 'release-status'
+    assert 'mcp__leartech-jx-release__release_status' in ctx['mcp']
+    assert 'mcp__leartech-tekton__' in ctx['mcp']
+    assert 'released=true' in ctx['expected']
+    assert 'kaniko' in (ctx['mcp_returned'] or '')
+    assert 'release Tekton pipeline' in ctx['remediation_hint']
+
+
+def test_compute_release_status_verdict_missing_coverage_is_fail() -> None:
+    """No STAGE_STATUS line for stage 1 → FAIL with BA context indicating
+    missing coverage (mcp_returned=None) — no PASS-by-silence."""
+    from gate.agent.release_health import compute_release_status_verdict
+
+    result = compute_release_status_verdict('narrative but no STAGE_STATUS emitted')
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 1
+    ctx = result.ba_failure_context
+    assert ctx is not None
+    assert ctx['mcp_returned'] is None
+    assert 'no STAGE_STATUS PASS emitted' in ctx['reason']
+
+
+def test_compute_release_status_ignores_cross_stage_fail() -> None:
+    """A stage-4 FAIL doesn't trip the release-status action — cross-stage
+    noise is scoped OUT (the whole point of decomposition)."""
+    from gate.agent.release_health import compute_release_status_verdict
+
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS', 'release v1.0.0 Succeeded'),
+            # Some other transcript context — this action has already
+            # completed by the time deploy-health runs anyway.
+            _line(4, 'gcp', 'FAIL', 'healthy=false available_replicas=0'),
+        ]
+    )
+    result = compute_release_status_verdict(transcript)
+    assert result.verdict == 'PASS'
+
+
+def test_compute_promote_status_verdict_pass_both_clusters() -> None:
+    """promote-status PASS requires stage 2 PASS per requested cluster."""
+    from gate.agent.release_health import compute_promote_status_verdict
+
+    transcript = '\n'.join(
+        [
+            _line(2, 'gcp', 'PASS', 'promote PR #101 opened'),
+            _line(2, 'az', 'PASS', 'promote PR #102 opened'),
+        ]
+    )
+    result = compute_promote_status_verdict(transcript)
+    assert result.verdict == 'PASS'
+    assert result.stage == 2
+
+
+def test_compute_promote_status_verdict_fail_missing_cluster() -> None:
+    """promote-status FAIL when a required cluster is missing coverage —
+    BA context names the missing (stage=2, cluster=az) with the promote-
+    status MCP remediation hint."""
+    from gate.agent.release_health import compute_promote_status_verdict
+
+    transcript = _line(2, 'gcp', 'PASS', 'promote PR #101 opened')
+    result = compute_promote_status_verdict(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 2
+    assert result.failing_cluster == 'az'
+
+    ctx = result.ba_failure_context
+    assert ctx is not None
+    assert ctx['stage'] == 2
+    assert ctx['cluster'] == 'az'
+    assert ctx['action'] == 'promote-status'
+    assert 'mcp__leartech-jx-release__promote_status' in ctx['mcp']
+    assert 'jx-promote' in ctx['remediation_hint']
+
+
+def test_compute_promote_status_verdict_single_cluster() -> None:
+    """A single-cluster promote-status only requires PASS on THAT cluster."""
+    from gate.agent.release_health import compute_promote_status_verdict
+
+    transcript = _line(2, 'gcp', 'PASS', 'promote PR #101 opened')
+    result = compute_promote_status_verdict(transcript, required_clusters=('gcp',))
+    assert result.verdict == 'PASS'
+
+
+def test_compute_verify_gate_verdict_pass_when_merged() -> None:
+    """verify-gate PASS: stage 2 PASS with merged status per cluster."""
+    from gate.agent.release_health import compute_verify_gate_verdict
+
+    transcript = '\n'.join(
+        [
+            _line(2, 'gcp', 'PASS', 'promote PR #101 merged'),
+            _line(2, 'az', 'PASS', 'promote PR #102 merged'),
+        ]
+    )
+    result = compute_verify_gate_verdict(transcript)
+    assert result.verdict == 'PASS'
+
+
+def test_compute_verify_gate_verdict_fail_on_gate_failure() -> None:
+    """verify-gate FAIL on qa-gate red → BA context surfaces the gate-fail
+    with the retest_promote / cross-plan Infra-agent remediation hint."""
+    from gate.agent.release_health import compute_verify_gate_verdict
+
+    transcript = '\n'.join(
+        [
+            _line(2, 'gcp', 'PASS', 'promote PR #101 merged'),
+            _line(2, 'az', 'FAIL', 'qa-gate failed on promote PR #102'),
+        ]
+    )
+    result = compute_verify_gate_verdict(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 2
+    assert result.failing_cluster == 'az'
+
+    ctx = result.ba_failure_context
+    assert ctx is not None
+    assert ctx['stage'] == 2
+    assert ctx['action'] == 'verify-gate'
+    assert 'promote_status' in ctx['mcp']
+    assert 'retest_promote' in ctx['mcp']
+    assert 'qa-gate' in ctx['remediation_hint']
+
+
+def test_compute_boot_status_verdict_pass() -> None:
+    """boot-status PASS: stage 3 PASS per required cluster."""
+    from gate.agent.release_health import compute_boot_status_verdict
+
+    transcript = '\n'.join(
+        [
+            _line(3, 'gcp', 'PASS', 'jx-boot Job hello-go-boot-101 succeeded'),
+            _line(3, 'az', 'PASS', 'jx-boot Job hello-go-boot-102 succeeded'),
+        ]
+    )
+    result = compute_boot_status_verdict(transcript)
+    assert result.verdict == 'PASS'
+
+
+def test_compute_boot_status_verdict_fail_on_job_failure() -> None:
+    """boot-status FAIL on Job failed → BA context points at k8s Job MCPs
+    + the "operator-owned secret / chart values" remediation hint."""
+    from gate.agent.release_health import compute_boot_status_verdict
+
+    transcript = '\n'.join(
+        [
+            _line(3, 'gcp', 'PASS', 'jx-boot Job hello-go-boot-101 succeeded'),
+            _line(3, 'az', 'FAIL', 'jx-boot Job hello-go-boot-102 failed at helmfile-apply'),
+        ]
+    )
+    result = compute_boot_status_verdict(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_cluster == 'az'
+
+    ctx = result.ba_failure_context
+    assert ctx is not None
+    assert ctx['stage'] == 3
+    assert ctx['action'] == 'boot-status'
+    assert 'list_jobs_by_label' in ctx['mcp']
+    assert 'get_job_state' in ctx['mcp']
+    assert 'jx-boot Job' in ctx['remediation_hint']
+    assert 'helmfile-apply' in (ctx['mcp_returned'] or '')
+
+
+def test_compute_deploy_health_verdict_pass() -> None:
+    """deploy-health PASS: stage 4 PASS per required cluster (>=1 available replica)."""
+    from gate.agent.release_health import compute_deploy_health_verdict
+
+    transcript = '\n'.join(
+        [
+            _line(4, 'gcp', 'PASS', 'healthy=true available_replicas=2'),
+            _line(4, 'az', 'PASS', 'healthy=true available_replicas=2'),
+        ]
+    )
+    result = compute_deploy_health_verdict(transcript)
+    assert result.verdict == 'PASS'
+
+
+def test_compute_deploy_health_verdict_fail_when_unhealthy() -> None:
+    """deploy-health FAIL when healthy=false → BA context points at
+    deploy_health MCP + the "crashloop / readiness / HPA / DO NOT reintroduce
+    httpx" remediation hint (the specific bug this refactor closed)."""
+    from gate.agent.release_health import compute_deploy_health_verdict
+
+    transcript = '\n'.join(
+        [
+            _line(4, 'gcp', 'PASS', 'healthy=true available_replicas=2'),
+            _line(4, 'az', 'FAIL', 'healthy=false available_replicas=0 desired_replicas=1 deployment not ready'),
+        ]
+    )
+    result = compute_deploy_health_verdict(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 4
+    assert result.failing_cluster == 'az'
+
+    ctx = result.ba_failure_context
+    assert ctx is not None
+    assert ctx['stage'] == 4
+    assert ctx['action'] == 'deploy-health'
+    assert 'mcp__leartech-k8s__deploy_health' in ctx['mcp']
+    assert 'available replica' in ctx['expected'].lower()
+    assert 'httpx' in ctx['remediation_hint']  # NEVER re-introduce the ingress probe
+    assert 'crashloop' in ctx['remediation_hint'].lower() or 'readiness' in ctx['remediation_hint'].lower()
+
+
+def test_stage_action_early_exit_short_circuits_verdict() -> None:
+    """An early-exit RELEASE_HEALTH: FAIL short-circuits a per-stage
+    aggregator too — the BA context reflects the early exit's stage +
+    cluster when supplied."""
+    from gate.agent.release_health import compute_verify_gate_verdict
+
+    transcript = (
+        'RELEASE_HEALTH: FAIL: stage=2 cluster=gcp reason=needs-cross-plan-Infra-agent: '
+        'qa-gate failed on promote PR #123'
+    )
+    result = compute_verify_gate_verdict(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 2
+    assert result.failing_cluster == 'gcp'
+    ctx = result.ba_failure_context
+    assert ctx is not None
+    assert ctx['action'] == 'verify-gate'
+    assert 'needs-cross-plan-Infra-agent' in (ctx['mcp_returned'] or '')
+
+
+def test_stage_action_result_as_dict_shape() -> None:
+    """StageActionResult.as_dict serialises every field for structured logs
+    (obslog needs the ba_failure_context on the log record)."""
+    from gate.agent.release_health import compute_deploy_health_verdict
+
+    transcript = _line(4, 'gcp', 'FAIL', 'healthy=false available_replicas=0')
+    result = compute_deploy_health_verdict(transcript, required_clusters=('gcp',))
+    d = result.as_dict()
+    assert set(d) >= {
+        'verdict',
+        'reason',
+        'stage',
+        'stages',
+        'failing_stage',
+        'failing_cluster',
+        'ba_failure_context',
+    }
+    assert d['verdict'] == 'FAIL'
+    assert d['ba_failure_context'] is not None
+    assert d['ba_failure_context']['action'] == 'deploy-health'
+
+
+def test_individual_stage_actions_registry_covers_all_five_names() -> None:
+    """The registry the infra_agent dispatch reads from MUST list every
+    documented action name. Guard against silent drift between the
+    infra_agent prompt / authoring_capabilities.yaml / this map."""
+    from gate.agent.release_health import (
+        INDIVIDUAL_STAGE_ACTIONS,
+        is_individual_stage_action,
+    )
+
+    expected = {
+        'release-status',
+        'promote-status',
+        'verify-gate',
+        'boot-status',
+        'deploy-health',
+    }
+    assert set(INDIVIDUAL_STAGE_ACTIONS) == expected
+    for name in expected:
+        assert is_individual_stage_action(name)
+        entry = INDIVIDUAL_STAGE_ACTIONS[name]
+        assert 'stage' in entry
+        assert 'aggregator' in entry
+        assert callable(entry['aggregator'])
+    # Not-a-stage-action names return False.
+    assert not is_individual_stage_action('release-health-check')
+    assert not is_individual_stage_action('create-repo')
+
+
+def test_ba_stage_guidance_covers_every_registered_action() -> None:
+    """Every action registered in INDIVIDUAL_STAGE_ACTIONS MUST also
+    have BA guidance registered — otherwise a FAIL escalation would go
+    out with a permissive "unknown action" hint. The two maps must move
+    together."""
+    from gate.agent.release_health import (
+        BA_STAGE_GUIDANCE,
+        INDIVIDUAL_STAGE_ACTIONS,
+    )
+
+    for action in INDIVIDUAL_STAGE_ACTIONS:
+        assert action in BA_STAGE_GUIDANCE, f'no BA guidance registered for {action!r}'
+        guidance = BA_STAGE_GUIDANCE[action]
+        assert 'mcp' in guidance and guidance['mcp']
+        assert 'expected' in guidance and guidance['expected']
+        assert 'remediation_hint' in guidance and guidance['remediation_hint']
+        # Remediation hints are stage-scoped — they should mention at
+        # least one action-specific keyword so a BA prompt renders
+        # something more concrete than "figure it out".
+        assert len(guidance['remediation_hint']) > 100, (
+            f'{action}: remediation_hint too short ({len(guidance["remediation_hint"])} chars) '
+            'to give the BA Agent a useful starting point'
+        )
+
+
+def test_composed_release_health_still_works_after_decomposition() -> None:
+    """The decomposition is ADDITIVE — the composed release-health-check
+    aggregator must still produce the same PASS on a happy transcript
+    (guard against silent behavioural drift)."""
+    result = compute_release_health(_happy_path_transcript())
+    assert result.verdict == 'PASS'
+    assert result.reason is None
+    # And still FAILs on a stage-4 red — the composed contract is unchanged.
+    transcript = '\n'.join(
+        [
+            _line(1, '-', 'PASS'),
+            _line(2, 'gcp', 'PASS'),
+            _line(2, 'az', 'PASS'),
+            _line(3, 'gcp', 'PASS'),
+            _line(3, 'az', 'PASS'),
+            _line(4, 'gcp', 'PASS'),
+            _line(4, 'az', 'FAIL', 'healthy=false'),
+        ]
+    )
+    result = compute_release_health(transcript)
+    assert result.verdict == 'FAIL'
+    assert result.failing_stage == 4
+    assert result.failing_cluster == 'az'
