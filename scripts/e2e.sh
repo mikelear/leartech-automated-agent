@@ -1312,6 +1312,141 @@ else
   failures=$((failures + 1))
 fi
 
+# ---------------------------------------------------------------------
+# Individual single-stage release-check actions (release-status /
+# promote-status / verify-gate / boot-status / deploy-health) —
+# decompose release-health-check into five one-stage actions each of
+# which passes/fails on its OWN MCP call and, on FAIL, hands the
+# spawned BA Agent a stage-specific "where + how to remediate"
+# structured context. Guard that the deployed wheel exposes:
+#   1. every action's aggregator + verdict path (PASS + FAIL);
+#   2. the BA_STAGE_GUIDANCE map covers every registered action;
+#   3. the composed release-health-check still works (regression);
+#   4. the release-shepherd template exists and chains the 5 actions
+#      in dependsOn order.
+# ---------------------------------------------------------------------
+if uv run python -c "
+import yaml
+from pathlib import Path
+
+from gate.agent import infra_agent
+from gate.agent.release_health import (
+    BA_STAGE_GUIDANCE,
+    INDIVIDUAL_STAGE_ACTIONS,
+    compute_release_health,
+    compute_release_status_verdict,
+    compute_promote_status_verdict,
+    compute_verify_gate_verdict,
+    compute_boot_status_verdict,
+    compute_deploy_health_verdict,
+    is_individual_stage_action,
+)
+
+# Every documented action name is registered.
+EXPECTED = {'release-status', 'promote-status', 'verify-gate', 'boot-status', 'deploy-health'}
+assert set(INDIVIDUAL_STAGE_ACTIONS) == EXPECTED
+for name in EXPECTED:
+    assert is_individual_stage_action(name)
+    assert name in BA_STAGE_GUIDANCE
+    guidance = BA_STAGE_GUIDANCE[name]
+    for key in ('mcp', 'expected', 'remediation_hint'):
+        assert guidance.get(key), f'{name} guidance missing {key}'
+
+# Per-stage aggregators — PASS + FAIL paths pinned in-process.
+r = compute_release_status_verdict('STAGE_STATUS: stage=1 cluster=- verdict=PASS reason=released Succeeded')
+assert r.verdict == 'PASS' and r.ba_failure_context is None
+
+r = compute_release_status_verdict(
+    'STAGE_STATUS: stage=1 cluster=- verdict=FAIL reason=release PipelineRun failed at step kaniko'
+)
+assert r.verdict == 'FAIL'
+assert r.ba_failure_context is not None
+assert 'mcp__leartech-jx-release__release_status' in r.ba_failure_context['mcp']
+
+r = compute_promote_status_verdict(
+    'STAGE_STATUS: stage=2 cluster=gcp verdict=PASS\nSTAGE_STATUS: stage=2 cluster=az verdict=PASS'
+)
+assert r.verdict == 'PASS'
+
+r = compute_verify_gate_verdict(
+    'STAGE_STATUS: stage=2 cluster=gcp verdict=PASS reason=promote PR #101 merged\\n'
+    'STAGE_STATUS: stage=2 cluster=az verdict=FAIL reason=qa-gate failed on promote PR #102'
+)
+assert r.verdict == 'FAIL'
+assert r.ba_failure_context is not None
+assert 'retest_promote' in r.ba_failure_context['mcp']
+
+r = compute_boot_status_verdict(
+    'STAGE_STATUS: stage=3 cluster=gcp verdict=PASS reason=jx-boot Job succeeded\\n'
+    'STAGE_STATUS: stage=3 cluster=az verdict=PASS reason=jx-boot Job succeeded'
+)
+assert r.verdict == 'PASS'
+
+# deploy-health FAIL — BA context MUST forbid re-introducing httpx probe.
+r = compute_deploy_health_verdict(
+    'STAGE_STATUS: stage=4 cluster=gcp verdict=FAIL '
+    'reason=healthy=false available_replicas=0 desired_replicas=1'
+)
+assert r.verdict == 'FAIL'
+assert r.ba_failure_context is not None
+assert 'httpx' in r.ba_failure_context['remediation_hint']
+
+# Composed release-health-check is UNCHANGED — regression guard.
+composed = compute_release_health(
+    'STAGE_STATUS: stage=1 cluster=- verdict=PASS\\n'
+    'STAGE_STATUS: stage=2 cluster=gcp verdict=PASS\\n'
+    'STAGE_STATUS: stage=2 cluster=az verdict=PASS\\n'
+    'STAGE_STATUS: stage=3 cluster=gcp verdict=PASS\\n'
+    'STAGE_STATUS: stage=3 cluster=az verdict=PASS\\n'
+    'STAGE_STATUS: stage=4 cluster=gcp verdict=PASS\\n'
+    'STAGE_STATUS: stage=4 cluster=az verdict=PASS\\n'
+)
+assert composed.verdict == 'PASS'
+
+# infra_agent dispatch — _stage_action_verdict routes to the right aggregator.
+r = infra_agent._stage_action_verdict(
+    'deploy-health', {'clusters': ['gcp']},
+    'STAGE_STATUS: stage=4 cluster=gcp verdict=PASS reason=healthy=true available_replicas=2',
+)
+assert r.verdict == 'PASS'
+
+# Unknown action name fails closed with a specific BA hint.
+r = infra_agent._stage_action_verdict('bogus', {}, '')
+assert r.verdict == 'FAIL'
+assert r.ba_failure_context is not None
+assert 'unregistered' in r.ba_failure_context['remediation_hint']
+
+# release-shepherd template exists and chains the 5 actions in dependsOn order.
+template = Path('examples/templates/release-shepherd.yaml')
+assert template.is_file(), 'examples/templates/release-shepherd.yaml missing'
+data = yaml.safe_load(template.read_text())
+actions = [step['inputs']['action'] for step in data['spec']['steps']]
+assert actions == [
+    'release-status', 'promote-status', 'verify-gate', 'boot-status', 'deploy-health',
+], actions
+steps = data['spec']['steps']
+for i in range(1, len(steps)):
+    depends_on = steps[i].get('dependsOn') or []
+    assert steps[i - 1]['name'] in depends_on, f'step[{i}] missing dependsOn on step[{i - 1}]'
+
+# authoring_capabilities.yaml advertises the 5 new actions as available.
+caps = yaml.safe_load(Path('gate/agent/authoring_capabilities.yaml').read_text())
+inf = caps['agent_types']['leartech-agent-infra']['actions']
+for name in EXPECTED:
+    assert inf[name]['status'] == 'available', f'{name} not advertised as available'
+# And release-health-check stays available for the single-step case.
+assert inf['release-health-check']['status'] == 'available'
+
+print('OK: 5 individual stage actions (release-status/promote-status/verify-gate/boot-status/deploy-health) '
+      'wired, BA context complete, template chains dependsOn, composed action unchanged.')
+" > /tmp/e2e-release-check-individual.txt 2>&1; then
+  echo "✓ individual single-stage release-check actions (5 aggregators, BA context, dependsOn template, composed regression-guard)"
+else
+  echo "✗ individual single-stage release-check actions smoke failed" >&2
+  cat /tmp/e2e-release-check-individual.txt >&2
+  failures=$((failures + 1))
+fi
+
 if [ "${failures}" -gt 0 ]; then
   echo
   echo "✗ ${failures} e2e check(s) failed" >&2

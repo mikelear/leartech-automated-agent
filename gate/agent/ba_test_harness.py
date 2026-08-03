@@ -62,7 +62,24 @@ CANONICAL_VERIFICATION_ACTION = 'release-health-check'
 # ``inputs.action``. Loose match on purpose — a future BA that authors
 # ``verify-webhook-response`` or ``check-deployment-health`` for a
 # non-infra-agent verification path should not need a harness rev.
-VERIFICATION_ACTION_MARKERS: tuple[str, ...] = ('health-check', 'verify', 'health_check')
+#
+# Extended 2026-08-03 for the five INDIVIDUAL single-stage release-check
+# actions (release-status / promote-status / verify-gate / boot-status /
+# deploy-health) — when a BA authors a decomposed release-shepherd chain,
+# its final step is typically ``deploy-health`` (stage 4, the authoritative
+# in-cluster verdict); accept every stage-action name as verification-
+# shaped so a chain ending on any of them satisfies the invariant.
+VERIFICATION_ACTION_MARKERS: tuple[str, ...] = (
+    'health-check',
+    'verify',
+    'health_check',
+    # Individual single-stage release-check action names — each is a
+    # deterministic PASS/FAIL verification against ONE MCP-composed stage.
+    'release-status',
+    'promote-status',
+    'boot-status',
+    'deploy-health',
+)
 
 
 class PlanShapeError(AssertionError):

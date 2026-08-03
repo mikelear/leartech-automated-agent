@@ -321,6 +321,27 @@ def test_alt_verification_action_names_are_accepted() -> None:
         validate_authored_plan(brief, plan)
 
 
+def test_individual_stage_actions_are_accepted_as_verification() -> None:
+    """The five individual single-stage release-check actions
+    (release-status / promote-status / verify-gate / boot-status /
+    deploy-health) are all verification-shaped — a decomposed
+    release-shepherd Plan's final step is typically ``deploy-health``,
+    and the harness must accept it (else BA-authored decomposed chains
+    would be rejected as non-verification-terminated)."""
+    brief = _load_brief('infra-remediation')
+    for action in (
+        'release-status',
+        'promote-status',
+        'verify-gate',
+        'boot-status',
+        'deploy-health',
+    ):
+        plan = _clone_plan('infra-remediation')
+        plan['spec']['steps'][-1]['inputs']['action'] = action
+        # Should NOT raise — the plan ends on a valid individual stage-action.
+        validate_authored_plan(brief, plan)
+
+
 # --- Fixture file layout is stable -------------------------------------------
 
 
