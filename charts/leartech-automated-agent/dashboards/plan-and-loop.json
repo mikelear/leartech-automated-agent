@@ -290,6 +290,294 @@
       "targets": [
         { "refId": "A", "datasource": { "type": "loki", "uid": "loki" }, "expr": "{namespace=\"$ns\"} |~ \"loop_hop|event_id\" | json | loop_hop=~\".+\" | event_id=~\"$event_id\"" }
       ]
+    },
+    {
+      "id": 18,
+      "type": "row",
+      "title": "Tier 2 — hardening safety-nets (#80: stop-on-merge + exactly-once escalation)",
+      "gridPos": {
+        "h": 1,
+        "w": 24,
+        "x": 0,
+        "y": 43
+      },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 19,
+      "type": "stat",
+      "title": "Stop-on-merge firings (agent-overrun net)",
+      "description": "Times the controller's STOP-ON-MERGE safety net (#80) terminated a runaway agent whose PR had already merged. 0 = agents self-stopped on green (the #199 agent fix working); >0 = the net caught an overrun the agent didn't stop itself. Informational, not an error.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 0,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"stop-on-merge: PR merged\" | json | plan=~\"$plan\" [$__range]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 20,
+      "type": "stat",
+      "title": "release.deploy_failed emits (exactly-once)",
+      "description": "Escalations emitted. #80 claim-before-emit makes each (plan,step) failure emit EXACTLY once. Must equal the bus-receives panel to its right — if receives exceed emits, a double-emit regressed.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 8,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"emit\" | plan=~\"$plan\" [$__range]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 21,
+      "type": "stat",
+      "title": "→ bus receives (must equal emits)",
+      "description": "release.deploy_failed events the bus received (maestro_receive hop). EQUAL to emits = exactly-once holds. GREATER than emits = a double-emit regression (the #80 bug).",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 5,
+        "w": 8,
+        "x": 16,
+        "y": 44
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          },
+          "unit": "short",
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "sum"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"maestro_receive\" | eventName=\"release.deploy_failed\" [$__range]))",
+          "instant": true
+        }
+      ]
+    },
+    {
+      "id": 22,
+      "type": "timeseries",
+      "title": "Exactly-once: emits vs bus-receives over time (divergence = double-emit)",
+      "description": "Side-by-side rate of release.deploy_failed emits vs maestro_receive. The two lines should track 1:1. A persistent gap where receives run above emits is the double-emit signature the #80 claim-before-emit fix prevents.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 0,
+        "y": 49
+      },
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "stacking": {
+              "mode": "none"
+            }
+          },
+          "noValue": "0"
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "sum"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi"
+        }
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"emit\" | plan=~\"$plan\" [$__interval]))",
+          "legendFormat": "emit"
+        },
+        {
+          "refId": "B",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "sum(count_over_time({namespace=\"$ns\"} |~ \"loop_hop\" | json | loop_hop=\"maestro_receive\" | eventName=\"release.deploy_failed\" [$__interval]))",
+          "legendFormat": "bus receives"
+        }
+      ]
+    },
+    {
+      "id": 23,
+      "type": "logs",
+      "title": "Safety-net audit — stop-on-merge terminations + exactly-once escalations",
+      "description": "Audit trail for both #80 fixes: STOP-ON-MERGE terminations (carry plan/step/run/pr) and each release.deploy_failed emit, plus any 'NOT re-firing' line (emit failed after the exactly-once claim persisted). Filter by $plan.",
+      "datasource": {
+        "type": "loki",
+        "uid": "loki"
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 12,
+        "x": 12,
+        "y": 49
+      },
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": true,
+        "enableLogDetails": true,
+        "dedupStrategy": "none",
+        "sortOrder": "Descending"
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "loki"
+          },
+          "expr": "{namespace=\"$ns\"} |~ \"stop-on-merge: PR merged|emit release.deploy_failed|NOT re-firing\" | json | plan=~\"$plan\""
+        }
+      ]
     }
   ]
 }
