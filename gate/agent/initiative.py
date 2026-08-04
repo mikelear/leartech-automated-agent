@@ -25,7 +25,9 @@ from claude_agent_sdk.types import (
     ResultMessage,
     TextBlock,
     ThinkingBlock,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
 from app.db import dispose_engine as _dispose_engine
@@ -251,6 +253,60 @@ DEFAULT_INITIATIVE_MAX_TURNS = 200
 
 # Standard write-mode toolkit. Bash gives `git`, `gh`, `npm`, etc.; the rest are file ops.
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']
+
+# Fail-fast terminal MCP whose `all_passed` result means "the agent's job is
+# COMPLETE" (see the initiative system prompt, step 9/12). We match on the
+# unqualified suffix so a namespace change (`mcp__leartech-jx3-flow__…`) doesn't
+# silently disable the hard-stop safety net below.
+WAIT_FOR_TERMINAL_TOOL_SUFFIX = 'wait_for_terminal'
+
+
+def _tool_name_is_wait_for_terminal(name: str) -> bool:
+    """True iff a tool name is the fail-fast full-terminal check.
+
+    Matches the unqualified suffix rather than the fully-qualified
+    ``mcp__leartech-jx3-flow__wait_for_terminal`` so a future MCP
+    namespace/prefix rename doesn't quietly break the post-green
+    hard-stop. ``wait_for_first_failure_or_all_pass`` is deliberately
+    NOT matched — the in-loop fail-fast primitive can legitimately
+    return ``all_passed`` mid-loop before the final-pass verification,
+    so we only treat the FULL-terminal check as the completion signal.
+    """
+    return name.split('__')[-1] == WAIT_FOR_TERMINAL_TOOL_SUFFIX
+
+
+def _tool_result_reports_all_passed(block: ToolResultBlock) -> bool:
+    """Best-effort: True iff a `wait_for_terminal` tool result says `all_passed`.
+
+    The MCP returns a structured ``{status: all_passed|some_failed|timeout, …}``
+    payload, but the SDK surfaces ``ToolResultBlock.content`` as either a plain
+    string or a list of content parts (dicts with a ``text`` field). We stringify
+    whatever shape it is and look for the ``all_passed`` token — a false negative
+    (we fail to spot it) simply means the LLM-driven stop in the prompt remains the
+    sole lever, which is the safe fallback. A false positive is guarded downstream:
+    the loop only acts on this AFTER a turn that made no further tool calls (the
+    agent's own "I'm done" signal), so mis-reading an unrelated payload can't cut
+    off in-flight work.
+    """
+    if block.is_error:
+        return False
+    content = block.content
+    if content is None:
+        return False
+    if isinstance(content, str):
+        text = content
+    else:
+        # List of content parts — join any string / {"text": …} entries.
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                value = part.get('text')
+                if isinstance(value, str):
+                    parts.append(value)
+        text = ' '.join(parts)
+    return 'all_passed' in text
 
 
 @dataclass
@@ -993,6 +1049,21 @@ async def run_initiative(
     # wins" rule means later ToolUseBlocks in a single AssistantMessage
     # overwrite earlier ones — operators see the most recent action.
     current_turn_last_tool: str | None = None
+    # Post-green hard-stop safety net (fix-agent-exit-on-mcp-success). The
+    # PRIMARY lever is the system prompt telling the LLM to STOP once
+    # `wait_for_terminal` returns `all_passed`. This is the belt-and-braces
+    # backstop for the known SDK behaviour (issue #913: the SDK doesn't
+    # cleanly terminate, so a model that lingers past "done" would keep
+    # burning idle turns — the "agent outlives merged PR" overrun). We track
+    # the tool_use_ids of `wait_for_terminal` calls, flip
+    # ``terminal_all_passed_seen`` when one returns `all_passed`, and — only
+    # AFTER a subsequent turn that made NO tool call (the agent emitting its
+    # final text summary, its own designated done-signal) — break the SDK
+    # loop. Gating on the no-tool turn means we never cut off the "ready for
+    # review" sticky (a tool call) or a some_failed→fix iteration.
+    wait_for_terminal_tool_ids: set[str] = set()
+    terminal_all_passed_seen = False
+    turn_made_tool_call = False
     # Reliability — resume-on-retry seed for the exit-code normalisation below
     # (which downgrades a 1/2 exit → 0 when a PR was opened during this run, so
     # K8s doesn't retry a crashed pod whose substantive work already shipped).
@@ -1116,6 +1187,16 @@ async def run_initiative(
                         click.echo(block.text)
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
+                        # Post-green hard-stop safety net — this turn made a
+                        # tool call, so it is NOT the agent's final
+                        # no-tool "I'm done" summary turn. Record the
+                        # ``wait_for_terminal`` invocation's id so the
+                        # matching ToolResultBlock (delivered on a later
+                        # UserMessage) can be recognised as the terminal
+                        # completion signal.
+                        turn_made_tool_call = True
+                        if _tool_name_is_wait_for_terminal(block.name):
+                            wait_for_terminal_tool_ids.add(block.id)
                         # Per-turn writeback (initiative
                         # agent-add-per-turn-writeback). Track the
                         # LATEST tool the agent invoked this turn so the
@@ -1137,6 +1218,21 @@ async def run_initiative(
                         )
                     elif isinstance(block, ThinkingBlock):
                         pass
+            elif isinstance(message, UserMessage):
+                # Post-green hard-stop safety net — tool RESULTS come back to
+                # the model as a UserMessage carrying ToolResultBlock(s). When
+                # a `wait_for_terminal` result reports `all_passed`, flip the
+                # flag so the ResultMessage boundary can end the loop once the
+                # agent emits its final no-tool summary turn.
+                content = message.content
+                if isinstance(content, list):
+                    for block in content:
+                        if (
+                            isinstance(block, ToolResultBlock)
+                            and block.tool_use_id in wait_for_terminal_tool_ids
+                            and _tool_result_reports_all_passed(block)
+                        ):
+                            terminal_all_passed_seen = True
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
                 terminate_state.last_turn_count = last_turn_count
@@ -1237,6 +1333,44 @@ async def run_initiative(
                     # was opened earlier in the run.
                     exit_via_cancel = True
                     break
+
+                # Post-green hard-stop safety net
+                # (fix-agent-exit-on-mcp-success). If `wait_for_terminal`
+                # has reported `all_passed` AND this just-completed turn made
+                # no tool call, the agent has emitted its final text summary —
+                # its own designated done-signal — and the initiative is
+                # COMPLETE. Break the SDK loop here rather than relying solely
+                # on the model to stop taking turns. This is the belt to the
+                # prompt's braces: it caps the "agent outlives merged PR"
+                # idle overrun (SDK issue #913 means the session doesn't
+                # cleanly terminate, so a lingering model keeps burning turns).
+                # Gating on ``not turn_made_tool_call`` guarantees we never
+                # cut off the "ready for review" sticky or a some_failed→fix
+                # iteration — those turns make tool calls.
+                if terminal_all_passed_seen and not turn_made_tool_call:
+                    click.echo(
+                        click.style(
+                            '\n  ✓ wait_for_terminal reported all_passed and the agent has '
+                            'posted its final summary — initiative COMPLETE. Stopping the SDK '
+                            'loop (Tide auto-merges on green; the controller stops the agent on '
+                            'merge). Not waiting for the PR to merge.',
+                            fg='green',
+                            bold=True,
+                        ),
+                        err=True,
+                    )
+                    await record_decision(
+                        run_id_for_first_turn,
+                        'decision',
+                        'post-green hard-stop: wait_for_terminal=all_passed + final no-tool '
+                        'summary turn — ending SDK loop without waiting for merge',
+                        payload={'turn_count': last_turn_count, 'reason': 'all_passed_terminal'},
+                    )
+                    break
+                # Reset the per-turn tool-call marker for the NEXT turn. Placed
+                # after both the cancel + hard-stop checks so each ResultMessage
+                # boundary reflects exactly the turn that just closed.
+                turn_made_tool_call = False
     except Exception as exc:  # noqa: BLE001 — SDK raises bare Exception; we narrow via turn-count heuristic
         # The SDK's `receive_messages()` raises a generic Exception when the consumer-set
         # `max_turns` is reached (see issue #913) AND for genuine transport errors. We use

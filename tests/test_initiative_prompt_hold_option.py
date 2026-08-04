@@ -140,6 +140,44 @@ def test_initiative_hold_true_flows_to_prompt() -> None:
     assert HOLD_POSTING_MARKER in rendered
 
 
+def test_prompt_says_all_passed_means_complete_stop_this_turn() -> None:
+    """fix-agent-exit-on-mcp-success: the prompt must UNAMBIGUOUSLY tell the agent
+    that a `wait_for_terminal` `all_passed` result means its job is COMPLETE and it
+    must STOP the turn — the primary lever against the post-green idle overrun."""
+    for hold in (False, True):
+        rendered = render_initiative_system_prompt(hold=hold)
+        norm = ' '.join(rendered.split())
+        # The completion signal is tied to the fail-fast MCP's all_passed result.
+        assert 'all_passed' in norm
+        assert 'wait_for_terminal' in norm
+        assert 'YOUR JOB IS COMPLETE' in norm
+        assert 'STOP THIS TURN' in norm
+
+
+def test_prompt_forbids_waiting_for_merge_after_green() -> None:
+    """The agent must NOT wait for / poll for the PR to merge after green — merging
+    is Tide's job and the controller stops the agent as a safety net. This removes
+    the drive-through-to-merge framing that caused the idle overrun."""
+    for hold in (False, True):
+        rendered = render_initiative_system_prompt(hold=hold)
+        norm = ' '.join(rendered.split())
+        # Explicit "do not wait for merge" + names the responsible parties.
+        assert 'Merging is Tide' in norm
+        assert 'do NOT poll' in norm or 'Do NOT then wait for the PR to merge' in norm
+        # No lingering "drive through to merge" style framing.
+        assert 'through to merge' not in norm.lower()
+
+
+def test_prompt_keeps_some_failed_fix_and_repush_loop() -> None:
+    """The some_failed branch (fix + re-push + call wait_for_terminal again) is
+    correct as-is and must remain — the exit-on-green change must not remove it."""
+    for hold in (False, True):
+        rendered = render_initiative_system_prompt(hold=hold)
+        norm = ' '.join(rendered.split())
+        assert 'some_failed' in norm
+        assert 'call `wait_for_terminal` again' in norm
+
+
 def test_initiative_compose_calls_renderer_with_hold() -> None:
     """Mirror the compose pipeline shape from ``gate/agent/initiative.py``.
 

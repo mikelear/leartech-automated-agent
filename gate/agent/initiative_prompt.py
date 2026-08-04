@@ -172,6 +172,22 @@ You have access to:
    get every Tekton check green — but each iteration cycle should be as short as the
    fastest failure signal.**
 
+   **`wait_for_terminal` is the fail-fast MCP that tells you when your job is over.**
+   It blocks until every required check is terminal and returns a structured result:
+
+   - `status: "all_passed"` (exit 0) — **every required check is green. YOUR JOB IS
+     COMPLETE.** Post the final summary (see "Final output") and **STOP THIS TURN**.
+     Do NOT wait for / poll for the PR to merge, do NOT re-verify, do NOT take any
+     further turns. Merging is Tide's job, not yours — once the gate is green Tide
+     auto-merges (for `hold: false`), and the controller stops this agent when the
+     merge lands (a safety net you do not need to watch for). There is nothing left
+     for you to do; lingering past this point is a defect.
+   - `status: "some_failed"` (exit 8) — one or more required checks failed. Do the
+     iteration loop: drill in (steps 10–11), work out WHY, fix the cited files,
+     commit + push, then call `wait_for_terminal` again.
+   - `status: "timeout"` — the pipeline is wedged; apply chatops recovery
+     (`/test <check>`) then call `wait_for_terminal` again.
+
 10. **For every FAILED check, classify by STEP and respond** (Phase G.2 — step-aware path):
 
     The aggregate "lint: failure" or "pr: failure" status from `list_pr_checks`
@@ -210,11 +226,19 @@ You have access to:
     the prior SHA are wasted cluster CPU and slow the next cycle. Skip on the
     very first push (no prior runs).
 
-12. **Stopping criteria**: post the "ready for client review" sticky and stop **only
+12. **Stopping criteria — when green, STOP; do NOT wait for merge**: post the "ready
+    for client review" sticky, write the final summary, and **STOP THIS TURN only
     when**:
-    - Every check is SUCCESS, OR
+    - `wait_for_terminal` returned `all_passed` (every check is SUCCESS), OR
     - Any failures are classified as pre-existing infra outside your diff (cite which
       ones and why in the sticky)
+
+    When that condition is met your job is **COMPLETE**. Do NOT then wait for the PR to
+    merge, do NOT poll `list_pr_checks` / `gh pr view` for a merged state, and do NOT
+    keep taking turns "to be sure it lands". Merging is Tide's job — for `hold: false`
+    Tide auto-merges the moment the gate is green, and the controller stops this agent
+    when the merge happens (a safety net you do not watch for). Taking any further turns
+    after `all_passed` is the "agent outlives merged PR" overrun defect — end the turn.
 
     Red checks pending or unclassified failure = NOT done. If you've retested the same
     check twice and it fails the same way, classify it as either real infra (needs
@@ -324,7 +348,10 @@ trust the agent reasoned about it.
 
 ## Final output
 
-When done (gate green or turn budget exhausted), produce a concise summary:
+When done (gate green — i.e. `wait_for_terminal` returned `all_passed` — or turn budget
+exhausted), produce a concise summary **and end the turn**. The summary is your LAST
+action: do not follow it with a merge-watch, a re-verification, or any further tool call.
+Emitting this summary is how you signal completion. Use this shape:
 
     ## Initiative <status: complete / blocked / partial>
 
