@@ -41,7 +41,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from gate.agent.initiative import RunSummary, run_initiative
+from gate.agent.initiative import ResumeContext, RunSummary, run_initiative
 
 # ─── Test doubles (mirror tests/test_agent_exit_code_normalisation.py) ──────
 
@@ -352,3 +352,93 @@ async def test_blocked_verdict_records_reason_and_event(tmp_path: Path) -> None:
     assert verdict_events, f'expected an initiative_verdict obslog event; got {mock_obslog.emit.call_args_list!r}'
     assert verdict_events[0].kwargs.get('verdict') == 'blocked_or_unfinished'
     assert verdict_events[0].kwargs.get('exit_code') == 1
+
+
+# ─── State A — normal iteration (red → fix → green must NOT false-fail) ──
+
+
+def _fix_push_messages() -> list[Any]:
+    """The agent reacts to a red check: commits a fix and pushes (state A)."""
+    return [
+        AssistantMessage(
+            content=[
+                TextBlock(text='az/verify was red — patching and pushing a fix.'),
+                ToolUseBlock(id='fix1', name='Bash', input={'command': 'git commit -am fix && git push'}),
+            ],
+            model='claude',
+        ),
+        UserMessage(content=[ToolResultBlock(tool_use_id='fix1', content='pushed\n', is_error=False)]),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_iteration_red_then_green_exits_zero(tmp_path: Path) -> None:
+    """State A: a mid-loop red the agent FIXES and drives to green must NOT be
+    false-failed. Gate 1 keys on the FINAL confirmed-green signal, never on an
+    intermediate red — this is the normal dev iteration and it must stay green."""
+    messages = [
+        *_adopt_pr_messages(),
+        # A red check surfaces mid-loop (first two msgs of the fail-fast some_failed
+        # exchange — the tool call + the some_failed result, WITHOUT any give-up text).
+        *_fail_fast_some_failed_unresolved_messages()[:2],
+        *_fix_push_messages(),
+        *_wait_for_terminal_all_passed_messages(),
+        _result_message(),
+    ]
+    with ExitStack() as stack:
+        _enter_common_patches(stack, messages, resolved_pr=1)
+        summary = await run_initiative(**_build_run_kwargs(tmp_path), max_turns=200)
+    assert summary.exit_code == 0, (
+        f'red→fix→green iteration must succeed (intermediate red is not a failure); got {summary.exit_code}'
+    )
+
+
+# ─── Continuation — a dev agent adopts a PR a previous job left unfinished ──
+# (Mike's point: keep coverage of the resume/continuation lifecycle.)
+
+
+def _enter_resume_patches(stack: ExitStack, *, pr_number: int) -> None:
+    """Make run_initiative treat this as a RESUME: a prior job left an open PR on
+    the branch. Seeds ``pr_emitted`` from the resume context BEFORE the SDK loop
+    (mirroring a fresh dev-agent run that picks up an unfinished PR)."""
+    stack.enter_context(
+        patch(
+            'gate.agent.initiative._detect_resume_context',
+            return_value=ResumeContext(is_resume=True, pr_number=pr_number, branch_exists_on_remote=True),
+        )
+    )
+    stack.enter_context(patch('gate.agent.initiative._fetch_and_checkout_existing', return_value=True))
+
+
+@pytest.mark.asyncio
+async def test_resume_adopts_prior_pr_and_reaches_green_exits_zero(tmp_path: Path) -> None:
+    """Continuation → green: a fresh run adopts the PR a previous job left
+    unfinished, drives it to green → SUCCESS. The verdict gate treats an adopted
+    PR exactly like a self-opened one — reaching green is success regardless of
+    which run opened it."""
+    messages = [
+        *_wait_for_terminal_all_passed_messages(),
+        _result_message(),
+    ]
+    with ExitStack() as stack:
+        _enter_common_patches(stack, messages, resolved_pr=1)
+        _enter_resume_patches(stack, pr_number=1)
+        summary = await run_initiative(**_build_run_kwargs(tmp_path), max_turns=200)
+    assert summary.exit_code == 0, f'resumed run that reaches green must succeed; got {summary.exit_code}'
+
+
+@pytest.mark.asyncio
+async def test_resume_adopts_prior_pr_still_blocked_exits_one(tmp_path: Path) -> None:
+    """Continuation → still blocked: adopts the prior PR but STILL can't reach
+    green → FAIL → recycles again. The false-Succeed bug was worst here — a
+    continuation that keeps not-finishing would have reported success forever
+    instead of surfacing that it's stuck."""
+    messages = [
+        *_fail_fast_no_checks_then_blocked_messages(),
+        _result_message(),
+    ]
+    with ExitStack() as stack:
+        _enter_common_patches(stack, messages, resolved_pr=1)
+        _enter_resume_patches(stack, pr_number=1)
+        summary = await run_initiative(**_build_run_kwargs(tmp_path), max_turns=200)
+    assert summary.exit_code == 1, f'resumed run still blocked must FAIL (recycle); got {summary.exit_code}'
