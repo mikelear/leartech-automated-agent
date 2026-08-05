@@ -234,6 +234,81 @@ async def _backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: in
         logger.warning('targetPR backstop failed (non-fatal): %s', exc)
 
 
+# Distinct non-zero exit for the "expected a PR but none produced" fail-fast.
+# There is no EXIT_* enum in this module today (failure exits are the bare
+# ``1``/``2`` literals used throughout ``run_initiative``), so we reuse the
+# generic failure convention: 1 = the agent's own work is incomplete/wrong,
+# 2 = an environment/config precondition failure. A finished PR-backed run with
+# no PR on its branch is the former.
+EXPECTED_PR_MISSING_EXIT_CODE = 1
+
+
+def _fail_fast_if_expected_pr_missing(
+    *,
+    pr_expected: bool,
+    pr_number: int | None,
+    exit_code: int,
+    qualified_repo: str,
+    branch: str,
+) -> int:
+    """Deterministic fail-fast: a PR-backed step that finished with NO PR must fail.
+
+    A dev/infra agent is a single LLM ``query()`` session that exits 0 unless it
+    crashes or hits max-turns. In prod an az-infra register step's agent failed
+    to push a PR (bot push-perms) yet exited 0 → the AgentRun false-Succeeded;
+    the miss was only caught later by the controller's ``kind:pr`` step check.
+    This catches the same case at the AGENT layer: when a PR was expected but the
+    branch-scoped ``_resolve_pr_number`` came back ``None`` after the agent
+    finished, force a non-zero exit so the AgentRun goes Failed (and K8s can
+    retry) instead of silently Succeeding.
+
+    Returns the (possibly forced) exit code so the caller threads it into
+    ``RunSummary.exit_code`` AND the trailing ``run_end`` event — so ``run_end``
+    reflects the failure too.
+
+    Complements, does NOT duplicate, ``_backstop_target_pr``: the backstop fires
+    only when a PR *does* exist on the branch (recovering ``status.targetPR``
+    when the LLM skipped the ``open_pr`` tool); this fail-fast fires only when
+    *no* PR exists and one was expected. The two are mutually exclusive by
+    construction (``pr_number`` present vs. ``None``).
+
+    Only acts on a run that would otherwise report SUCCESS (``exit_code == 0``):
+    the whole point is to convert a false-Succeed into a Failed. A run that has
+    already failed (exit 1/2 — SDK crash, max-turns, operator cancel) is left
+    untouched; its exit code already reflects the failure and carries meaning
+    (e.g. 2 → K8s retry on cap-hit), so re-stamping it would only lose signal.
+
+    Defensive by design: only force-fails on a confident ``pr_number is None``
+    when a PR was expected. Callers that could not confidently resolve the PR
+    (e.g. a resolve error) should pass ``pr_expected=False`` or otherwise avoid
+    the confident-None state rather than have this force-fail on ambiguity.
+    """
+    if not pr_expected:
+        # apply/check-only initiative, BA run, or no PR was expected — nothing to do.
+        return exit_code
+    if exit_code != 0:
+        # Already a failure (crash / max-turns / cancel) — the exit code already
+        # reflects it and its specific value is meaningful. Don't re-stamp.
+        return exit_code
+    if pr_number is not None:
+        # A PR exists on the branch — the PR-backed step did its job.
+        return exit_code
+    # PR expected + confidently no PR on the branch → fail the run.
+    run_name = (os.environ.get('AGENT_RUN_NAME') or '').strip() or None
+    # LOUD, deliberate signal: greppable in Loki as event="expected_pr_missing".
+    obslog.emit(
+        'ERROR',
+        'expected_pr_missing',
+        'PR-backed step finished with no PR on its branch — failing the run so it does not false-Succeed',
+        logger='agent.initiative',
+        run_id=run_name,
+        repo=qualified_repo,
+        branch=branch,
+        reason='no_pr_produced',
+    )
+    return EXPECTED_PR_MISSING_EXIT_CODE
+
+
 def _build_crash_sticky_body(
     *,
     reason: str,
@@ -1030,6 +1105,20 @@ async def run_initiative(
     click.echo(click.style(f'  cwd: {cwd}', fg='green'), err=True)
     click.echo('', err=True)
 
+    # PR-backed step marker. ``run_initiative`` (this non-test dev-agent path) is
+    # the entrypoint that genuinely OPENS a PR — the LLM assembles the ``open_pr``
+    # MCP call itself, but the initiative-shaped arg dict is deterministic, so we
+    # build it up front. Its truthiness is the single "a PR was expected" signal
+    # consumed by the end-of-run fail-fast below (mirrors the test-mode path,
+    # which builds the same dict via ``maybe_open_pr_args_for_initiative``).
+    open_pr_args = maybe_open_pr_args_for_initiative(
+        qualified_repo=primary.qualified_repo,
+        base_branch=primary.base or 'main',
+        head_branch=primary.branch,
+        title=initiative.name,
+        body=f'Automated changes for initiative `{initiative.name}`.',
+    )
+
     # NOTE: ``run_id_for_first_turn`` + ``db_engine_initialised`` are
     # already resolved above the clone block — they need to be available
     # so a clone failure can attribute itself to the run via Layer 1.
@@ -1654,6 +1743,22 @@ async def run_initiative(
     # a no-op when open_pr already set the field, when no PR was resolved, or when
     # not running as a real AgentRun — and any failure is swallowed.
     await _backstop_target_pr(qualified_repo=primary.qualified_repo, branch=primary.branch, pr_number=pr_number)
+
+    # Deterministic fail-fast: a PR-backed step (``open_pr_args`` truthy) that
+    # finished with NO PR on its branch must NOT false-Succeed. Force a non-zero
+    # exit so the AgentRun goes Failed (and K8s can retry) and emit a loud,
+    # greppable Loki signal (event="expected_pr_missing"). This is the AGENT-layer
+    # complement to the controller's ``kind:pr`` step check. It is mutually
+    # exclusive with the backstop above (that fires only when a PR exists; this
+    # fires only when none does) and is a no-op when a PR was resolved or when no
+    # PR was expected. Threaded into ``exit_code`` so ``run_end`` reflects it too.
+    exit_code = _fail_fast_if_expected_pr_missing(
+        pr_expected=bool(open_pr_args),
+        pr_number=pr_number,
+        exit_code=exit_code,
+        qualified_repo=primary.qualified_repo,
+        branch=primary.branch,
+    )
 
     # Note: we used to emit a trailing `--- turns=... pr=N` stdout marker
     # here for a pod-log reconciler to grep. That consumer is long gone — the
