@@ -173,6 +173,41 @@ def _no_pr_messages() -> list[Any]:
     ]
 
 
+def _wait_for_terminal_all_passed_messages() -> list[Any]:
+    """A `wait_for_terminal → all_passed` exchange — the CONFIRMED-GREEN signal.
+
+    Flips ``terminal_all_passed_seen`` in the loop: an AssistantMessage invoking
+    the full-terminal check (matched on the ``wait_for_terminal`` suffix), then a
+    UserMessage[ToolResultBlock] whose payload carries the ``all_passed`` token.
+    This is the prompt's mandated completion signal — "every required check is
+    green, YOUR JOB IS COMPLETE". Post-2026-08-05 the exit-code normalisation
+    (Gate 2) rescues a crash/max-turns exit to 0 ONLY when this was seen — a PR
+    being open is no longer sufficient (Gate 1 fails a PR-opened-but-never-green
+    run). So the "work genuinely shipped, don't retry" cases must include this.
+    """
+    return [
+        AssistantMessage(
+            content=[
+                ToolUseBlock(
+                    id='wft1',
+                    name='mcp__leartech-jx3-flow__wait_for_terminal',
+                    input={'pr': 777},
+                ),
+            ],
+            model='claude',
+        ),
+        UserMessage(
+            content=[
+                ToolResultBlock(
+                    tool_use_id='wft1',
+                    content='{"status": "all_passed", "checks": []}',
+                    is_error=False,
+                ),
+            ],
+        ),
+    ]
+
+
 def _enter_common_patches(
     stack: ExitStack,
     messages: list[Any],
@@ -212,6 +247,9 @@ async def test_max_turns_hit_after_pr_opened_exits_zero(
     max_turns = 10
     messages = [
         *_pr_opened_messages(),
+        # Confirmed-green BEFORE the cap-hit — this is what "substantive work
+        # shipped" now means (post-2026-08-05: green, not merely PR-opened).
+        *_wait_for_terminal_all_passed_messages(),
         # last_turn_count must equal max_turns when the exception fires so the
         # cap-hit branch (not the unexpected-error branch) is exercised.
         _result_message(turns=max_turns),
@@ -226,7 +264,7 @@ async def test_max_turns_hit_after_pr_opened_exits_zero(
 
     assert isinstance(summary, RunSummary)
     assert summary.exit_code == 0, (
-        f'expected exit_code=0 (downgraded from 2: PR opened before max_turns hit); got {summary.exit_code}'
+        f'expected exit_code=0 (downgraded from 2: confirmed-green before max_turns hit); got {summary.exit_code}'
     )
     captured = capsys.readouterr()
     assert 'exit_code normalisation' in captured.err, (
@@ -247,6 +285,8 @@ async def test_sdk_exception_after_pr_opened_exits_zero(
     """
     messages = [
         *_pr_opened_messages(),
+        # Confirmed-green before the crash → substantive work shipped.
+        *_wait_for_terminal_all_passed_messages(),
         # last_turn_count well below max_turns → unexpected-error branch (not cap-hit).
         _result_message(turns=3),
     ]
@@ -261,7 +301,7 @@ async def test_sdk_exception_after_pr_opened_exits_zero(
         )
 
     assert summary.exit_code == 0, (
-        f'expected exit_code=0 (downgraded from 1: PR opened before SDK crash); got {summary.exit_code}'
+        f'expected exit_code=0 (downgraded from 1: confirmed-green before SDK crash); got {summary.exit_code}'
     )
     captured = capsys.readouterr()
     # The warn-level log must still be visible — the crash isn't hidden.
@@ -421,6 +461,10 @@ async def test_crash_sticky_still_emitted_in_exception_branch(
     """
     messages = [
         *_pr_opened_messages(),
+        # Confirmed-green before the crash so the downgrade path is exercised —
+        # the whole point of this test is that the downgrade doesn't silence the
+        # crash sticky.
+        *_wait_for_terminal_all_passed_messages(),
         _result_message(turns=3),
     ]
 
@@ -465,6 +509,9 @@ async def test_is_error_result_message_after_pr_opened_exits_zero(
     """
     messages = [
         *_pr_opened_messages(),
+        # Confirmed-green THEN an is_error ResultMessage — work shipped despite
+        # the trailing transport-level error, so the downgrade still applies.
+        *_wait_for_terminal_all_passed_messages(),
         _result_message(turns=2, is_error=True),
     ]
 
@@ -476,5 +523,75 @@ async def test_is_error_result_message_after_pr_opened_exits_zero(
         )
 
     assert summary.exit_code == 0, (
-        f'is_error ResultMessage after PR opened: expected downgrade to 0; got {summary.exit_code}'
+        f'is_error ResultMessage after confirmed-green: expected downgrade to 0; got {summary.exit_code}'
+    )
+
+
+# ─── Corrected contract (Mike 2026-08-05): PR-opened ≠ shipped ───────
+# The rescue-to-0 is gated on CONFIRMED-GREEN (wait_for_terminal all_passed),
+# not on a PR merely being open. A crash/max-turns BEFORE green means nothing
+# shipped — the failure must surface so the Job recycles, rather than being
+# masked as success (the false-Succeed bug).
+
+
+@pytest.mark.asyncio
+async def test_sdk_crash_after_pr_opened_without_green_keeps_exit_one(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """PR opened, SDK crashes, but wait_for_terminal never reported all_passed.
+
+    Pre-2026-08-05 this downgraded to 0 ("a PR was opened"). Corrected: no green
+    → nothing confirmed-shipped → exit 1 stays so K8s retries. The crash sticky
+    still fires (operator visibility preserved).
+    """
+    messages = [
+        *_pr_opened_messages(),
+        _result_message(turns=3),
+    ]
+
+    with ExitStack() as stack:
+        _enter_common_patches(
+            stack, messages, raise_at_end=RuntimeError('simulated SDK transport error'), resolved_pr=513
+        )
+        summary = await run_initiative(
+            **_build_run_kwargs(tmp_path),
+            max_turns=200,
+        )
+
+    assert summary.exit_code == 1, (
+        f'PR opened but never green + SDK crash: expected exit_code=1 (no rescue); got {summary.exit_code}'
+    )
+    captured = capsys.readouterr()
+    # The crash warn log still emits — the failure is not hidden.
+    assert 'Unexpected SDK exception' in captured.err
+    # And the normalisation must NOT claim a downgrade happened.
+    assert 'exit_code normalisation' not in captured.err, (
+        f'no confirmed-green → normalisation must not fire. stderr: {captured.err!r}'
+    )
+
+
+@pytest.mark.asyncio
+async def test_max_turns_after_pr_opened_without_green_keeps_exit_two(
+    tmp_path: Path,
+) -> None:
+    """Max_turns hit after a PR was opened but before it ever went green.
+
+    Nothing confirmed-shipped → exit 2 stays (real failure, retry as designed).
+    """
+    max_turns = 10
+    messages = [
+        *_pr_opened_messages(),
+        _result_message(turns=max_turns),
+    ]
+
+    with ExitStack() as stack:
+        _enter_common_patches(stack, messages, raise_at_end=Exception('SDK terminated at max_turns'), resolved_pr=513)
+        summary = await run_initiative(
+            **_build_run_kwargs(tmp_path),
+            max_turns=max_turns,
+        )
+
+    assert summary.exit_code == 2, (
+        f'PR opened but never green + max_turns: expected exit_code=2 (no rescue); got {summary.exit_code}'
     )
