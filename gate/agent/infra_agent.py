@@ -220,10 +220,16 @@ ACTIONS (your inputs include `action` + its params):
          * failed=true → STAGE_STATUS: stage=3 cluster=<c> verdict=FAIL reason=jx-boot Job <name> failed
 
     4. DEPLOY HEALTHY (per cluster) — call
-       mcp__leartech-k8s__deploy_health(service=<s>, namespace=<ns>, cluster=<c>).
-       The MCP returns a structured verdict (healthy=true/false, available_replicas=N,
-       desired_replicas=M, reason=?). Emit VERBATIM (do NOT re-interpret):
-         * healthy=true → STAGE_STATUS: stage=4 cluster=<c> verdict=PASS reason=healthy=true available_replicas=<N>
+       mcp__leartech-k8s__deploy_health(service=<s>, namespace=<ns>, cluster=<c>,
+       expected_version=<tag>) where <tag> is the RELEASED version from stage 1's
+       `release <tag> Succeeded`. Passing it makes the verdict VERSION-AWARE: healthy is
+       true only when the released version is what's actually running (>=1 available AND
+       observed_version==expected), so a stale/leftover Deployment of an OLD version can no
+       longer pass the gate (the release-check Layer-3 gap). If stage 1 yielded no tag, OMIT
+       expected_version (version-blind fallback — weaker; ad-hoc checks only). The MCP returns
+       healthy, available_replicas, desired_replicas, observed_version, version_match, reason.
+       Emit VERBATIM (do NOT re-interpret):
+         * healthy=true → STAGE_STATUS: stage=4 cluster=<c> verdict=PASS reason=healthy=true available_replicas=<N> version=<observed_version>
          * healthy=false → STAGE_STATUS: stage=4 cluster=<c> verdict=FAIL reason=healthy=false available_replicas=<N> desired_replicas=<M> <deploy_health reason>
 
        If the k8s MCP cannot reach a cluster (host returns isError, or deploy_health
@@ -307,15 +313,19 @@ ACTIONS (your inputs include `action` + its params):
     Params: service, namespace, clusters (list) or cluster, optional budgetMinutes.
 
   * deploy-health — stage 4 (per cluster). Call
-    mcp__leartech-k8s__deploy_health(service=<s>, namespace=<ns>, cluster=<c>). The MCP
-    returns a structured verdict (healthy=true/false, available_replicas=N,
-    desired_replicas=M, reason=?). Emit VERBATIM (do NOT re-interpret):
-      * healthy=true  → STAGE_STATUS: stage=4 cluster=<c> verdict=PASS reason=healthy=true available_replicas=<N>
+    mcp__leartech-k8s__deploy_health(service=<s>, namespace=<ns>, cluster=<c>,
+    expected_version=<v>) — pass expected_version when inputs provide a release version
+    (`version`/`expectedVersion`), making the verdict VERSION-AWARE: healthy only when the
+    released version is what's running (>=1 available AND observed_version==expected), so a
+    stale/leftover Deployment of an old version can't pass. Omit it when no version input is
+    given (version-blind fallback — weaker). The MCP returns healthy, available_replicas,
+    desired_replicas, observed_version, version_match, reason. Emit VERBATIM (do NOT re-interpret):
+      * healthy=true  → STAGE_STATUS: stage=4 cluster=<c> verdict=PASS reason=healthy=true available_replicas=<N> version=<observed_version>
       * healthy=false → STAGE_STATUS: stage=4 cluster=<c> verdict=FAIL reason=healthy=false available_replicas=<N> desired_replicas=<M> <deploy_health reason>
     If the k8s MCP cannot reach the cluster, emit
         STAGE_STATUS: stage=4 cluster=<c> verdict=FAIL reason=k8s MCP could not reach cluster <c>: <error>
     NEVER attempt an HTTP GET against a /health URL from this sandbox.
-    Params: service, namespace, clusters (list) or cluster.
+    Params: service, namespace, clusters (list) or cluster, optional version/expectedVersion.
 
   ON FAIL, the aggregator hands the BA Agent a structured context per this stage:
     * stage             — the stage number (1..4)
