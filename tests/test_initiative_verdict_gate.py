@@ -307,14 +307,13 @@ async def test_pr_opened_never_waited_exits_one(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_no_pr_blocked_stays_zero(tmp_path: Path) -> None:
-    """Gate 1 is scoped to PR-driving initiatives (``pr_emitted is not None``).
-
-    A blocked run that opened NO PR (e.g. a create/register/apply step, or an
-    agent that bailed before opening one) is NOT touched here — the
-    expected-PR-missing case is #203's fail-fast, and no-PR steps legitimately
-    succeed on their own done-check. This pins the scope so Gate 1 doesn't
-    regress create/register steps."""
+async def test_no_pr_blocked_fails_via_expected_pr_missing(tmp_path: Path) -> None:
+    """A PR-backed run that opens NO PR must FAIL — but via the expected-PR-missing
+    fail-fast (#203), NOT Gate 1. Gate 1's scope is PR-OPENED-but-not-green
+    (``pr_emitted`` set); the no-PR-at-all case is #203's domain. Together they
+    leave no false-Succeed hole: PR opened + never green → Gate 1 (exit 1);
+    no PR opened at all → #203 (non-zero). This pins that the two compose — a
+    blocked agent that never opened a PR does not slip through as success."""
     messages = [
         *_fail_fast_no_checks_then_blocked_messages(),
         _result_message(),
@@ -322,7 +321,9 @@ async def test_no_pr_blocked_stays_zero(tmp_path: Path) -> None:
     with ExitStack() as stack:
         _enter_common_patches(stack, messages, resolved_pr=None)
         summary = await run_initiative(**_build_run_kwargs(tmp_path), max_turns=200)
-    assert summary.exit_code == 0, f'no PR opened → Gate 1 does not fire (scope guard); got {summary.exit_code}'
+    assert summary.exit_code != 0, (
+        f'PR-backed step that opened no PR must fail via expected_pr_missing (#203); got {summary.exit_code}'
+    )
 
 
 @pytest.mark.asyncio

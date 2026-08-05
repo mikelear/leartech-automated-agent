@@ -437,6 +437,11 @@ async def test_clean_success_exits_zero(
     genuinely produced a PR)."""
     messages = [
         *_pr_opened_messages(),
+        # A genuine clean success must ALSO reach confirmed-green: with the
+        # verdict gate (#204) a PR opened but never green fails, and with the
+        # expected-PR fail-fast (#203) a PR opened satisfies pr_expected. So the
+        # happy path = PR resolved (513) AND wait_for_terminal all_passed.
+        *_wait_for_terminal_all_passed_messages(),
         _result_message(turns=2),
     ]
 
