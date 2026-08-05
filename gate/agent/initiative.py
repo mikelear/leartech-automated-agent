@@ -34,6 +34,7 @@ from app.db import dispose_engine as _dispose_engine
 from app.db import init_engine as _init_engine
 from app.db import is_db_enabled
 from gate import obslog
+from gate.agent import agentrun_client
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.commands import (
     CommandSink,
@@ -180,6 +181,57 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
         return resolved
     except (subprocess.TimeoutExpired, json.JSONDecodeError, ValueError):
         return None
+
+
+async def _backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: int | None) -> None:
+    """Runtime backstop: guarantee ``AgentRun.status.targetPR`` is set even when the
+    LLM opens a PR via raw ``gh`` without calling the ``open_pr`` MCP tool.
+
+    ``open_pr`` is the AUTHORITATIVE writer of ``status.targetPR`` (+headBranch),
+    and the controller keys its stop-on-merge correlation off that field. When the
+    agent skips the tool the field stays empty, the merge can't be correlated, and
+    the agent overruns polling release status until its deadline (observed in prod).
+    This end-of-run backstop patches the field from the branch-scoped
+    ``_resolve_pr_number`` result AND emits a loud, structured Loki signal so a
+    future forensic / scrum-master agent can harvest the "open_pr skipped" cases.
+
+    Fully best-effort: only runs as a real AgentRun; does nothing (no patch, no
+    event) when open_pr already set the field or when no PR was resolved; and any
+    failure here is swallowed so it never changes the run's exit code.
+    """
+    run_name = (os.environ.get('AGENT_RUN_NAME') or '').strip()
+    namespace = (os.environ.get('AGENT_RUN_NAMESPACE') or '').strip()
+    status_enabled = (os.environ.get('LEARTECH_AGENTRUN_STATUS') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    # Local/dev runs (no AgentRun identity or status reporting disabled) → skip entirely.
+    if not run_name or not namespace or not status_enabled:
+        return
+    try:
+        current = await agentrun_client.get_target_pr(run_name, namespace)
+        if current:
+            # open_pr did its job — the authoritative writer already published the PR.
+            return
+        if pr_number is None:
+            # Agent legitimately opened no PR on this branch — nothing to record.
+            return
+        # Empty status + a PR resolved on the branch → the agent opened a PR without
+        # calling open_pr. Recover the field so the controller can correlate the merge.
+        await agentrun_client.patch_target_pr(run_name, namespace, pr_number)
+        # LOUD, deliberate forensic signal: greppable in Loki as
+        # event="targetpr_backstop_fired". A downstream forensic / scrum-master agent
+        # harvests these to spot plans/agents that skip the open_pr tool (plan health).
+        obslog.emit(
+            'WARN',
+            'targetpr_backstop_fired',
+            'runtime recovered targetPR — agent opened a PR without calling open_pr',
+            logger='agent.initiative',
+            run_id=run_name,
+            repo=qualified_repo,
+            branch=branch,
+            targetPR=pr_number,
+            reason='open_pr_not_called',
+        )
+    except Exception as exc:  # noqa: BLE001 — backstop must never change the run's exit code
+        logger.warning('targetPR backstop failed (non-fatal): %s', exc)
 
 
 def _build_crash_sticky_body(
@@ -1591,6 +1643,17 @@ async def run_initiative(
             pr_number=pr_number,
             body=crash_sticky_body,
         )
+
+    # Runtime backstop: open_pr is the authoritative writer of
+    # ``AgentRun.status.targetPR``, but if the LLM opened a PR via raw ``gh``
+    # without calling the tool the field stays empty and the controller's
+    # stop-on-merge correlation breaks (the agent then overruns polling release
+    # status). This guarantees the field is set from the branch-scoped
+    # ``_resolve_pr_number`` result above AND emits a loud, greppable Loki signal
+    # (event="targetpr_backstop_fired") for downstream forensic harvesting. It is
+    # a no-op when open_pr already set the field, when no PR was resolved, or when
+    # not running as a real AgentRun — and any failure is swallowed.
+    await _backstop_target_pr(qualified_repo=primary.qualified_repo, branch=primary.branch, pr_number=pr_number)
 
     # Note: we used to emit a trailing `--- turns=... pr=N` stdout marker
     # here for a pod-log reconciler to grep. That consumer is long gone — the
