@@ -38,7 +38,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from gate.agent.initiative import RunSummary, run_initiative
+from gate.agent.initiative import EXPECTED_PR_MISSING_EXIT_CODE, RunSummary, run_initiative
 
 # ─── Test doubles (mirror tests/test_initiative_pr_open_emit.py) ──────
 
@@ -430,20 +430,55 @@ async def test_clean_success_exits_zero(
     tmp_path: Path,
 ) -> None:
     """Baseline: no exception, no max_turns, no cancel, PR opened cleanly.
-    Exit 0 unchanged — the normaliser is a no-op on the happy path."""
+    Exit 0 unchanged — the normaliser is a no-op on the happy path.
+
+    ``resolved_pr`` is set to a real number so the end-of-run expected-PR
+    fail-fast sees the PR on the branch and stays a no-op (the happy path
+    genuinely produced a PR)."""
     messages = [
         *_pr_opened_messages(),
+        # A genuine clean success must ALSO reach confirmed-green: with the
+        # verdict gate (#204) a PR opened but never green fails, and with the
+        # expected-PR fail-fast (#203) a PR opened satisfies pr_expected. So the
+        # happy path = PR resolved (513) AND wait_for_terminal all_passed.
+        *_wait_for_terminal_all_passed_messages(),
         _result_message(turns=2),
     ]
 
     with ExitStack() as stack:
-        _enter_common_patches(stack, messages)
+        _enter_common_patches(stack, messages, resolved_pr=513)
         summary = await run_initiative(
             **_build_run_kwargs(tmp_path),
             max_turns=200,
         )
 
     assert summary.exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_clean_run_with_no_pr_fails_expected_pr_missing(
+    tmp_path: Path,
+) -> None:
+    """The false-Succeed the fail-fast fixes: the SDK loop finished cleanly
+    (would-be exit 0) but NO PR was resolved on the branch. A PR-backed dev
+    agent that produces no PR must NOT report success — it forces a non-zero
+    exit so the AgentRun goes Failed and K8s can retry. Mirrors the az-infra
+    register step that exited 0 without pushing a PR (bot push-perms)."""
+    messages = [
+        *_no_pr_messages(),
+        _result_message(turns=2),
+    ]
+
+    with ExitStack() as stack:
+        _enter_common_patches(stack, messages, resolved_pr=None)
+        summary = await run_initiative(
+            **_build_run_kwargs(tmp_path),
+            max_turns=200,
+        )
+
+    assert summary.exit_code != 0, 'PR-backed step with no PR must not false-Succeed'
+    assert summary.exit_code == EXPECTED_PR_MISSING_EXIT_CODE
+    assert summary.pr_number is None
 
 
 @pytest.mark.asyncio
