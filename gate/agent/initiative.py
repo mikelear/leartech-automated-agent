@@ -1505,46 +1505,100 @@ async def run_initiative(
             payload={'reason': reason, 'turn_count': last_turn_count, 'max_turns': max_turns},
         )
 
-    # Initiative agent-fix-exit-code-after-pr-opened — normalise the exit
-    # code AFTER the SDK loop has settled but BEFORE the snapshot writer
-    # picks ``terminal_reason``. When the substantive work (opening a PR)
-    # completed before an SDK crash, max_turns hit, or is_error=True
-    # ResultMessage, the process should exit 0 so K8s doesn't retry the
-    # Job. Each retry hits the same SDK regression, runs to the same exit
-    # point, costs another full agent cycle, and eventually trips
-    # BackoffLimitExceeded — bogus failure marker for substantive work
-    # that already shipped (canonical case: run 59aefbd8f2d8, PR #111
-    # merged cleanly while agent_run.status=failed).
+    # ── Verdict gate + exit-code normalisation ──────────────────────────
+    # Core principle (Mike 2026-08-05): opening a PR is NOT success —
+    # reaching green is. The single authoritative "the work shipped" signal
+    # is ``terminal_all_passed_seen`` (wait_for_terminal reported all_passed —
+    # the prompt's mandated completion signal, initiative_prompt.py §Stopping
+    # criteria), NOT "a PR exists". An agent that opens a PR then declares
+    # itself BLOCKED, or never gets the wait command to report all-green, must
+    # record a FAILURE so the step recycles the agent (its normal retry loop).
+    # A false-Succeed here is the exact bug that let a blocked run (no webhook,
+    # 0 checks fired) report success while nothing was built (setup-mcp-design,
+    # 2026-08-05).
     #
-    # The downgrade is gated on three conditions, in order:
-    #   1. ``exit_code in (1, 2)`` — only failure exits get touched.
-    #   2. ``not exit_via_cancel`` — operator-cancel intent is preserved
-    #      (the operator deliberately triggered shutdown; surfacing that
-    #      to the Job condition layer is correct).
-    #   3. ``pr_emitted is not None`` — a PR was opened on THIS branch during
-    #      the run. The signal is AUTHORITATIVE + BRANCH-SCOPED: the resume seed
-    #      (branch-scoped resume detection) or, for non-resume runs, a
-    #      branch-scoped ``_resolve_pr_number`` (gh pr list --head <branch>)
-    #      re-check computed just below. We deliberately no longer scrape PR
-    #      URLs out of tool-result prose — that matched unrelated PRs the agent
-    #      merely cited and mis-set the number (the targetPR wrong-PR bug). The
-    #      only downside vs the old scrape is the rare open-then-close-mid-loop
-    #      race (the --head --state open query returns None), which at worst
-    #      costs one wasteful K8s retry — never an incorrect result.
-    #
-    # The crash sticky still fires (set by the exception handler above,
-    # posted by ``_post_crash_sticky`` further down) and the warn-level
-    # logs still emit. Operators retain full visibility into the crash
-    # path; only the process exit code changes.
-    if pr_emitted is None and exit_code in (1, 2) and not exit_via_cancel:
+    # Resolve the branch-scoped PR once, up-front, for BOTH gates below. The
+    # signal is AUTHORITATIVE + BRANCH-SCOPED (``gh pr list --head <branch>`` /
+    # the resume seed); we deliberately no longer scrape PR URLs out of
+    # tool-result prose (that mis-captured cited PRs — the targetPR wrong-PR
+    # bug). ``--state open`` returns None once a PR is merged, which is fine: a
+    # merged PR is a success and neither gate should fire for it.
+    if pr_emitted is None:
         pr_emitted = _resolve_pr_number(primary.qualified_repo, primary.branch)
-    if exit_code in (1, 2) and not exit_via_cancel and pr_emitted is not None:
+
+    # Gate 1 — blocked / never-green (natural-end path only). The agent stopped
+    # of its own accord (no SDK crash: ``crash_sticky_body is None``; no
+    # operator cancel) with ``exit_code == 0`` and a PR open, but
+    # wait_for_terminal never reported all_passed. It either posted a "blocked"
+    # summary or ran out of road on red/absent checks. Record FAILED so the run
+    # recycles. The reasons the agent already posted (its sticky + summary) are
+    # untouched — only the exit code changes ("quick exit AND still post the
+    # reasons, but that is not success").
+    if (
+        crash_sticky_body is None
+        and not exit_via_cancel
+        and exit_code == 0
+        and pr_emitted is not None
+        and not terminal_all_passed_seen
+    ):
         click.echo(
             click.style(
-                f'\n  ✓ exit_code normalisation: PR #{pr_emitted} was opened during this run; '
-                f'downgrading exit_code {exit_code} → 0 so K8s does not retry on a path that '
-                'already shipped substantive work. The crash sticky + warn logs above remain '
-                'as the operator-visible signal.',
+                f'\n  ‼ verdict gate: PR #{pr_emitted} was opened but wait_for_terminal never '
+                'reported all_passed — the agent did not reach green (blocked / unfinished). '
+                'Recording exit_code 1 so the step recycles the agent; opening a PR is not success.',
+                fg='red',
+                bold=True,
+            ),
+            err=True,
+        )
+        await write_failure_reason(
+            run_id_for_first_turn,
+            f'pr_opened_without_green: PR #{pr_emitted} on {primary.qualified_repo}@{primary.branch} '
+            'never reached wait_for_terminal=all_passed (agent blocked or checks never went green)',
+        )
+        await record_decision(
+            run_id_for_first_turn,
+            'decision',
+            f'verdict gate: pr_opened_without_green pr_number={pr_emitted}, exit_code 0 → 1',
+            payload={
+                'verdict': 'blocked_or_unfinished',
+                'pr_number': pr_emitted,
+                'terminal_all_passed_seen': False,
+                'pre_gate_exit_code': 0,
+                'post_gate_exit_code': 1,
+            },
+        )
+        obslog.emit(
+            'ERROR',
+            'initiative_verdict',
+            'PR opened but wait_for_terminal never reported all_passed — recording blocked/unfinished as failure',
+            logger='agent.initiative',
+            verdict='blocked_or_unfinished',
+            pr_number=pr_emitted,
+            terminal_all_passed_seen=False,
+            exit_code=1,
+        )
+        exit_code = 1
+
+    # Gate 2 — crash / max-turns normalisation. When the SDK crashed, hit the
+    # max_turns ceiling, or returned is_error=True (``exit_code in (1, 2)``)
+    # AFTER the work genuinely shipped, exit 0 so K8s doesn't retry a path
+    # whose substantive work already landed — each retry hits the same SDK
+    # regression and eventually trips BackoffLimitExceeded (canonical case: run
+    # 59aefbd8f2d8, PR #111 merged cleanly while status=failed). The rescue is
+    # gated on ``terminal_all_passed_seen`` — CONFIRMED GREEN — NOT merely "a PR
+    # was opened". That was the flaw: a blocked/never-green run (PR open,
+    # nothing built) was also rescued to success. Confirmed-green is the correct
+    # proxy for "shipped"; PR-opened is not. Operator-cancel intent is preserved
+    # (``not exit_via_cancel``). The crash sticky + warn logs still fire below;
+    # only the exit code changes.
+    if exit_code in (1, 2) and not exit_via_cancel and terminal_all_passed_seen:
+        click.echo(
+            click.style(
+                f'\n  ✓ exit_code normalisation: wait_for_terminal reported all_passed '
+                f'(PR #{pr_emitted}); downgrading exit_code {exit_code} → 0 so K8s does not retry '
+                'a path that already shipped confirmed-green work. The crash sticky + warn logs '
+                'above remain as the operator-visible signal.',
                 fg='cyan',
             ),
             err=True,
@@ -1552,12 +1606,12 @@ async def run_initiative(
         await record_decision(
             run_id_for_first_turn,
             'decision',
-            f'exit_code normalisation: pr_opened pr_number={pr_emitted}, downgrading exit_code {exit_code} → 0',
+            f'exit_code normalisation: confirmed_green pr_number={pr_emitted}, downgrading exit_code {exit_code} → 0',
             payload={
                 'pre_normalisation_exit_code': exit_code,
                 'normalised_exit_code': 0,
                 'pr_number': pr_emitted,
-                'reason': 'pr_opened_before_failure',
+                'reason': 'all_passed_before_failure',
             },
         )
         exit_code = 0
