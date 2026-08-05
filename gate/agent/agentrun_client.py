@@ -113,6 +113,64 @@ async def list_agent_runs(namespace: str) -> list[dict[str, Any]]:
         await api.api_client.close()
 
 
+async def get_target_pr(name: str, namespace: str) -> str | None:
+    """Read the current ``AgentRun.status.targetPR`` (a STRING in the CRD).
+
+    Best-effort: a 404 / permission error yields ``None`` (treated as "unknown /
+    not set") rather than crashing — the runtime backstop that consumes this must
+    never change the run's exit code.
+    """
+    from kubernetes_asyncio.client.exceptions import ApiException
+
+    api = await _custom_api()
+    try:
+        obj = await api.get_namespaced_custom_object_status(
+            group=_GROUP,
+            version=_VERSION,
+            namespace=namespace,
+            plural=_AGENTRUNS,
+            name=name,
+        )
+        status = obj.get('status') or {}
+        raw = status.get('targetPR')
+        return str(raw) if raw else None
+    except ApiException as exc:
+        _logger.warning('get_target_pr(%s/%s) non-fatal error: %s', namespace, name, exc)
+        return None
+    except Exception as exc:  # noqa: BLE001 — best-effort read must never crash the run
+        _logger.warning('get_target_pr(%s/%s) unexpected error: %s', namespace, name, exc)
+        return None
+    finally:
+        await api.api_client.close()
+
+
+async def patch_target_pr(name: str, namespace: str, pr_number: int) -> None:
+    """Patch ``AgentRun.status.targetPR`` (STRING) to ``pr_number`` via a
+    status merge-patch. Best-effort: swallow/log non-fatal errors (a 404 /
+    permission error must NOT crash the run — this is a runtime backstop).
+    """
+    from kubernetes_asyncio.client.exceptions import ApiException
+
+    api = await _custom_api()
+    try:
+        await api.patch_namespaced_custom_object_status(
+            group=_GROUP,
+            version=_VERSION,
+            namespace=namespace,
+            plural=_AGENTRUNS,
+            name=name,
+            body={'status': {'targetPR': str(pr_number)}},
+            _content_type='application/merge-patch+json',
+        )
+        _logger.info('patched AgentRun %s/%s status.targetPR=%s', namespace, name, pr_number)
+    except ApiException as exc:
+        _logger.warning('patch_target_pr(%s/%s) non-fatal error: %s', namespace, name, exc)
+    except Exception as exc:  # noqa: BLE001 — best-effort patch must never crash the run
+        _logger.warning('patch_target_pr(%s/%s) unexpected error: %s', namespace, name, exc)
+    finally:
+        await api.api_client.close()
+
+
 async def delete_agent_run(name: str, namespace: str) -> None:
     """Delete an AgentRun; Background propagation cascades to its owned Job (which
     SIGTERMs the agent pod → the preStop crash-sticky). 404 is treated as success
