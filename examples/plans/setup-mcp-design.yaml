@@ -1,0 +1,49 @@
+# setup-mcp-design — Phase 0 of the MCP Design / artifact-storage deliverable.
+#
+# Stands up TWO bootstraps (with auth built in) by COMPOSING two reusable
+# PlanTemplates (proves Template Plans — a concrete Plan as a short list of
+# `use:` refs, params substituted, expanded to a flat DAG by the controller):
+#
+#   1. leartech-artifact-api  — a NEW authed Go service scaffolded from
+#      leartech-plan-api (carries JWKS/Hydra auth + audience forward). ClusterIP,
+#      GCS + presigned URLs for artifacts; DB wiring inherited (lazy/optional
+#      until the follow-up gcloud plan fully enables it).
+#   2. MCP "design"           — a NEW public MCP forwarder in leartech-mcp-servers
+#      copying planserver verbatim, forwarding the caller bearer (RFC 8693) to
+#      leartech-artifact-api.
+#
+# Goal of Phase 0: get both up with authentication, proving Template Plans.
+# Functions (publish/retrieve artifacts by label) are FOLLOW-UP plans.
+#
+# PREREQUISITE (manual, done first this session): the Hydra config — add
+# leartech-artifact-api to auth.userTokenDefaultAudiences + dcr.defaultAudiences +
+# oauth.frontend.audiences, and the two scopes to dcr.allowedScopes (respecting
+# the aud = default ∩ allow-list intersection rule). See the tracking notes.
+#
+# Fire: kubectl apply -f examples/plans/setup-mcp-design.yaml
+# (requires the bootstrap-authed-service + bootstrap-mcp-forwarder PlanTemplates
+#  deployed via the controller chart — planTemplates.install=true.)
+apiVersion: agent.leartech.io/v1alpha1
+kind: Plan
+metadata:
+  name: setup-mcp-design
+  namespace: jx-staging
+spec:
+  tenant: leartech
+  triggeredBy: human
+  steps:
+    - name: artifact-api
+      use: bootstrap-authed-service
+      with:
+        name: leartech-artifact-api
+        templateRepo: mikelear/leartech-plan-api
+        namespace: jx-staging
+
+    - name: design-mcp
+      use: bootstrap-mcp-forwarder
+      dependsOn: [artifact-api]
+      with:
+        mcpName: design
+        backendService: leartech-artifact-api
+        backendAudience: leartech-artifact-api
+        scopes: "leartechapi:artifact:read,leartechapi:artifact:write"
