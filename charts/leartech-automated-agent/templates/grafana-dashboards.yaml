@@ -9,7 +9,9 @@ the in-cluster Loki datasource (uid: loki) provisioned by the observability stac
 `.Files.Get` embeds the JSON verbatim (NOT Helm-templated) so Grafana's own
 `{{label}}` legend syntax survives. Gated + folder-annotated like evm's.
 */}}
-{{- if .Values.grafanaDashboards.enabled }}
+{{- /* Skip in preview namespaces (*-pr-<N>): the cluster Grafana sidecar (searchNamespace:
+     ALL) would let a preview clobber the prod dashboard (same uid+filename). */ -}}
+{{- if and .Values.grafanaDashboards.enabled (not (contains "-pr-" .Release.Namespace)) }}
 {{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
 {{- $name := base $path | trimSuffix ".json" }}
 ---
