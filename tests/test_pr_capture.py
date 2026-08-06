@@ -1,19 +1,16 @@
-"""Unit tests for :mod:`gate.agent.pr_capture` — the shared PR-URL parser.
+"""Unit tests for :mod:`gate.agent.pr_capture` — the PR-URL parser.
 
-The regex + classifier are the source-of-truth for BOTH the SDK-loop's
-create-return capture (in ``gate/agent/initiative.py``) AND the MCP
-admin's ``gh pr create`` subprocess wrapper (in ``gate/tools/pr_back.py``).
-Pinning them here means a regex tweak that breaks one caller can never
-land without a test flip.
+The regex is the source-of-truth for the MCP admin's ``gh pr create`` subprocess
+wrapper (``gate/tools/pr_back.py``). Pinning it here means a regex tweak that breaks
+the caller can never land without a test flip. (The old SDK-loop
+``is_gh_pr_create_command`` classifier was removed when the dev-agent loop stopped
+scraping PR URLs — ``open_pr`` records the number authoritatively now.)
 """
 
 from __future__ import annotations
 
-import pytest
-
 from gate.agent.pr_capture import (
     PR_URL_RE,
-    is_gh_pr_create_command,
     parse_pr_number_from_gh_output,
 )
 
@@ -63,12 +60,13 @@ class TestParsePrNumber:
 
     def test_returns_first_url_when_multiple_present(self) -> None:
         """gh pr create returns ONE URL; multiple would indicate stray content
-        we tolerate by taking the first. The classifier + downstream caller
-        already narrow this to the specific ``gh pr create`` tool_result."""
+        we tolerate by taking the first."""
         text = (
             'https://github.com/mikelear/leartech-automated-agent/pull/42\n'
             'https://github.com/mikelear/leartech-automated-agent/pull/99\n'
         )
+        # gh pr create returns ONE URL; the sole consumer (pr_back) parses the
+        # stdout of a single create subprocess, so taking the first is correct.
         assert parse_pr_number_from_gh_output(text) == 42
 
 
@@ -87,40 +85,3 @@ class TestPrUrlRegex:
     def test_does_not_match_enterprise_github(self) -> None:
         """Enterprise GitHub uses ``github.example.com`` — different host."""
         assert PR_URL_RE.search('https://github.example.com/foo/bar/pull/42') is None
-
-
-# ─── is_gh_pr_create_command ─────────────────────────────────────────────
-
-
-class TestIsGhPrCreateCommand:
-    def test_matches_bare_command(self) -> None:
-        assert is_gh_pr_create_command('gh pr create --title X --body Y') is True
-
-    def test_matches_with_cd_prefix(self) -> None:
-        """Agent sometimes prepends ``cd /path && ...`` — must still match."""
-        assert is_gh_pr_create_command('cd /workspace/repo && gh pr create --title X') is True
-
-    def test_matches_with_trailing_pipe(self) -> None:
-        assert is_gh_pr_create_command('gh pr create --title X | tee /tmp/pr.log') is True
-
-    def test_does_not_match_gh_pr_view(self) -> None:
-        """``gh pr view`` is a DIFFERENT subcommand — must not arm capture."""
-        assert is_gh_pr_create_command('gh pr view 42') is False
-
-    def test_does_not_match_gh_pr_comment(self) -> None:
-        assert is_gh_pr_create_command('gh pr comment 42 --body /hold') is False
-
-    def test_does_not_match_gh_pr_list(self) -> None:
-        assert is_gh_pr_create_command('gh pr list --head agent/foo') is False
-
-    def test_does_not_match_git_command(self) -> None:
-        assert is_gh_pr_create_command('git commit -m "gh pr create in message"') is False
-
-    def test_returns_false_on_empty(self) -> None:
-        assert is_gh_pr_create_command('') is False
-
-    @pytest.mark.parametrize('cmd', ['', '   ', None])
-    def test_returns_false_on_empty_or_whitespace(self, cmd: str | None) -> None:
-        # None-safety: the SDK may hand us None if the command key is missing.
-        # The helper's contract is "no crash on falsy input".
-        assert is_gh_pr_create_command(cmd or '') is False

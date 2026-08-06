@@ -108,8 +108,9 @@ class RunSummary:
 
 
 # Phase D.7 — file the preStop hook reads to learn the PR number on cancel.
-# Updated mid-run by ``_resolve_pr_number`` so the hook has a current value
-# regardless of when the operator triggers cancel. Path is process-local so
+# Written at end-of-run by ``_resolve_target_pr`` (from the authoritative
+# ``status.targetPR`` when available, else the ``gh`` fallback) so the hook has a
+# value regardless of when the operator triggers cancel. Path is process-local so
 # absence on disk simply means "no PR yet" — the hook skips gracefully.
 PR_NUMBER_HINT_FILE = '/tmp/run_pr_number'  # noqa: S108 — intentional service-internal tmp file
 
@@ -136,10 +137,24 @@ def _write_pr_number_hint(pr_number: int | None) -> None:
         pass
 
 
-def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
-    """Best-effort: ask GitHub for the open PR on `branch`. Returns None on miss/error.
+def _resolve_pr_number(qualified_repo: str, branch: str, *, state: str = 'open') -> int | None:
+    """Best-effort BREAK-GLASS: ask GitHub for a PR on `branch`. Returns None on miss/error.
 
-    Runs synchronously; called once at end-of-run so the few-hundred-ms cost is fine.
+    NOT the primary PR signal — that is ``AgentRun.status.targetPR`` (written by the
+    ``open_pr`` MCP tool), read via ``_resolve_target_pr``. This ``gh`` query is only
+    a fallback for the rare case where the authoritative status field is empty, and
+    for resume-detection.
+
+    ``state``:
+      * ``'open'`` (default) — resume-detection semantics: only an OPEN PR is a
+        resumable prior attempt.
+      * ``'all'`` — end-of-run resolution semantics: a MERGED PR is a SUCCESS, so
+        the fallback must see merged/closed too. ``--state open`` here was the
+        root cause of the expected_pr_missing false-FAIL (a PR merged by Tide
+        before run-end looked identical to "never created").
+
+    Runs synchronously; called at most once at end-of-run so the few-hundred-ms cost
+    is fine.
 
     Side effect (D.7): on resolution, writes the PR number to
     ``/tmp/run_pr_number`` so the spawned Job pod's preStop hook can post a
@@ -157,7 +172,7 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
                 '--head',
                 branch,
                 '--state',
-                'open',
+                state,
                 '--json',
                 'number',
                 '--limit',
@@ -183,6 +198,72 @@ def _resolve_pr_number(qualified_repo: str, branch: str) -> int | None:
         return None
 
 
+async def _resolve_target_pr(qualified_repo: str, branch: str) -> int | None:
+    """Resolve the PR this run produced — AUTHORITATIVE (``status.targetPR``) first.
+
+    This is the single PR-identity read for the end-of-run verdict/fail-fast. It
+    exists because the same logical fact ("did this run produce a PR?") used to be
+    re-derived from a flaky ``gh pr list --state open`` query that could not tell a
+    MERGED PR (a success — Tide merged it) from a never-created one — the
+    expected_pr_missing false-FAIL. The fix: read the value the ``open_pr`` MCP tool
+    already wrote, in the SAME channel it was set, and only fall back to ``gh`` for
+    the rare case where the authoritative field is empty.
+
+    Resolution order (each logged to Loki as event="target_pr_resolved" with the
+    ``source``, so every resolution's provenance is greppable):
+      1. ``AgentRun.status.targetPR`` — written by ``open_pr`` (MCP). State-agnostic:
+         set once and never cleared, so it SURVIVES the merge. This is the truth.
+      2. ``gh pr list --state all`` (``_resolve_pr_number``) — break-glass for an
+         empty status field (open_pr's publish didn't land, or a raw-``gh`` PR).
+         Merge-aware, unlike the old ``--state open`` path.
+
+    Never raises: a status-read failure degrades to the ``gh`` fallback, and a
+    fallback failure yields ``None`` (a genuine "no PR" the fail-fast then catches).
+    """
+    run_name = (os.environ.get('AGENT_RUN_NAME') or '').strip()
+    namespace = (os.environ.get('AGENT_RUN_NAMESPACE') or '').strip()
+    status_enabled = (os.environ.get('LEARTECH_AGENTRUN_STATUS') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+
+    # 1. Authoritative: the value open_pr (MCP) wrote onto the CRD status.
+    if run_name and namespace and status_enabled:
+        current = await agentrun_client.get_target_pr(run_name, namespace)
+        if current:
+            try:
+                number = int(current)
+            except ValueError:
+                number = None
+            if number is not None:
+                _write_pr_number_hint(number)
+                obslog.emit(
+                    'INFO',
+                    'target_pr_resolved',
+                    'resolved PR from AgentRun.status.targetPR (authoritative, open_pr-written)',
+                    logger='agent.initiative',
+                    run_id=run_name or None,
+                    repo=qualified_repo,
+                    branch=branch,
+                    targetPR=number,
+                    source='status',
+                )
+                return number
+
+    # 2. Break-glass fallback: gh, merge-aware. (Step 2 replaces this with the
+    #    pr_context ``resolve_pr`` MCP read so the resolver never touches GitHub.)
+    number = _resolve_pr_number(qualified_repo, branch, state='all')
+    obslog.emit(
+        'INFO',
+        'target_pr_resolved',
+        'resolved PR via gh fallback (status empty)' if number is not None else 'no PR resolved for branch',
+        logger='agent.initiative',
+        run_id=run_name or None,
+        repo=qualified_repo,
+        branch=branch,
+        targetPR=number,
+        source='gh_fallback' if number is not None else 'none',
+    )
+    return number
+
+
 async def _backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: int | None) -> None:
     """Runtime backstop: guarantee ``AgentRun.status.targetPR`` is set even when the
     LLM opens a PR via raw ``gh`` without calling the ``open_pr`` MCP tool.
@@ -191,9 +272,10 @@ async def _backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: in
     and the controller keys its stop-on-merge correlation off that field. When the
     agent skips the tool the field stays empty, the merge can't be correlated, and
     the agent overruns polling release status until its deadline (observed in prod).
-    This end-of-run backstop patches the field from the branch-scoped
-    ``_resolve_pr_number`` result AND emits a loud, structured Loki signal so a
-    future forensic / scrum-master agent can harvest the "open_pr skipped" cases.
+    This end-of-run backstop patches the field from the resolved PR (``_resolve_target_pr``
+    — here that means the ``gh`` fallback fired, since a set ``status.targetPR`` makes
+    this a no-op) AND emits a loud, structured Loki signal so a future forensic /
+    scrum-master agent can harvest the "open_pr skipped" cases.
 
     Fully best-effort: only runs as a real AgentRun; does nothing (no patch, no
     event) when open_pr already set the field or when no PR was resolved; and any
@@ -258,9 +340,12 @@ def _fail_fast_if_expected_pr_missing(
     to push a PR (bot push-perms) yet exited 0 → the AgentRun false-Succeeded;
     the miss was only caught later by the controller's ``kind:pr`` step check.
     This catches the same case at the AGENT layer: when a PR was expected but the
-    branch-scoped ``_resolve_pr_number`` came back ``None`` after the agent
-    finished, force a non-zero exit so the AgentRun goes Failed (and K8s can
-    retry) instead of silently Succeeding.
+    status-first ``_resolve_target_pr`` came back ``None`` (``status.targetPR`` empty
+    AND the merge-aware ``gh`` fallback found no PR in ANY state) after the agent
+    finished, force a non-zero exit so the AgentRun goes Failed (and K8s can retry)
+    instead of silently Succeeding. Because the resolver is authoritative + merge-aware,
+    a MERGED PR yields a number here (not ``None``), so a shipped-and-merged run no
+    longer false-FAILs — the bug this guard previously caused via ``--state open``.
 
     Returns the (possibly forced) exit code so the caller threads it into
     ``RunSummary.exit_code`` AND the trailing ``run_end`` event — so ``run_end``
@@ -1606,14 +1691,16 @@ async def run_initiative(
     # 0 checks fired) report success while nothing was built (setup-mcp-design,
     # 2026-08-05).
     #
-    # Resolve the branch-scoped PR once, up-front, for BOTH gates below. The
-    # signal is AUTHORITATIVE + BRANCH-SCOPED (``gh pr list --head <branch>`` /
-    # the resume seed); we deliberately no longer scrape PR URLs out of
-    # tool-result prose (that mis-captured cited PRs — the targetPR wrong-PR
-    # bug). ``--state open`` returns None once a PR is merged, which is fine: a
-    # merged PR is a success and neither gate should fire for it.
+    # Resolve the PR ONCE, up-front, for the gates + fail-fast below. The signal is
+    # AUTHORITATIVE — ``AgentRun.status.targetPR`` (written by the open_pr MCP tool),
+    # read via ``_resolve_target_pr`` — with a merge-aware ``gh`` break-glass fallback
+    # only when that field is empty. We deliberately no longer (a) scrape PR URLs out
+    # of tool-result prose (mis-captured cited PRs — the wrong-PR bug), nor (b) rely on
+    # ``gh pr list --state open`` as the primary signal (it returned None once Tide
+    # merged the PR — the expected_pr_missing false-FAIL, since a merged PR is a
+    # SUCCESS). Reused as ``pr_number`` at end-of-run — no second resolution.
     if pr_emitted is None:
-        pr_emitted = _resolve_pr_number(primary.qualified_repo, primary.branch)
+        pr_emitted = await _resolve_target_pr(primary.qualified_repo, primary.branch)
 
     # Gate 1 — blocked / never-green (natural-end path only). The agent stopped
     # of its own accord (no SDK crash: ``crash_sticky_body is None``; no
@@ -1752,12 +1839,16 @@ async def run_initiative(
                 err=True,
             )
 
-    pr_number = _resolve_pr_number(primary.qualified_repo, primary.branch)
+    # Reuse the PR resolved once above (status-first, via ``_resolve_target_pr``) —
+    # no second ``gh`` shellout, and no divergent representation of the same fact.
+    # Between the verdict gate and here the LLM loop is finished, so no new PR can
+    # appear; ``pr_emitted`` is the authoritative value.
+    pr_number = pr_emitted
     # PR publish is owned by the open_pr MCP tool (it patches AgentRun.status
     # {targetPR, headBranch} at create time; the controller then emits the
     # Maestro run.pr_opened). The agent no longer patches/emits here — the
-    # branch-scoped _resolve_pr_number above is only the read-only signal for
-    # the orphan-PR classification below + the exit-code normalisation.
+    # resolved value above is only the read-only signal for the orphan-PR
+    # classification below + the exit-code normalisation + the fail-fast.
     # Layer 1 + 2 — classify the orphan-PR case. When the agent reports
     # success but no PR exists on the branch, the operator needs to know.
     # The decision log captures the classification; the error column
