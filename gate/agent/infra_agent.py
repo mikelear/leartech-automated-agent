@@ -43,6 +43,7 @@ from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative import INITIATIVE_TEKTON_TOOLS, WRITE_MODE_TOOLS
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
+from gate.agent.release_checks import is_check_action, run_check_action
 from gate.agent.release_health import (
     DEFAULT_CLUSTERS,
     INDIVIDUAL_STAGE_ACTIONS,
@@ -521,6 +522,17 @@ async def run_infra_task(
             test_mode=True,
         )
         return exit_code
+
+    # ── THIN DETERMINISTIC CHECK short-circuit ─────────────────────────────
+    # The release-verify check actions (release-pipeline-status / promote-status /
+    # deploy-health / bootjob-for-commit) are pure Go-MCP-tool relays: call ONE
+    # tool, exit on its typed verdict — NO LLM turn-loop, NO STAGE_STATUS
+    # transcription (see gate/agent/release_checks.py). Placed BEFORE the
+    # ANTHROPIC_API_KEY gate because these never invoke the model; they only need
+    # the MCP host + auth env. This is the runtime side of the verify-release-flow
+    # PlanTemplate — each kind:check step maps to one action here.
+    if is_check_action(action):
+        return await run_check_action(action, inputs)
 
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
