@@ -11,10 +11,11 @@ authored plan must satisfy a small set of INVARIANTS derived from the brief:
 
 2.  **Final step verifies successCriteria.** The last step in
     ``spec.steps`` must be a verification step — canonically
-    ``inputs.action: release-health-check``, but any action whose name
-    contains "health-check" or "verify" is accepted so future verification
-    shapes don't force a harness rebuild. Without this the plan can
-    "succeed" without satisfying the brief.
+    ``inputs.action: deploy-health`` (the deterministic, version-aware
+    release-verify check), but any action whose name contains "health-check"
+    or "verify" is accepted so future verification shapes don't force a
+    harness rebuild. Without this the plan can "succeed" without satisfying
+    the brief.
 
 3.  **`remediates` matches `resolves`.** If the brief carries
     ``resolves: [PlanRef, …]``, the plan's ``spec.remediates`` list must
@@ -51,33 +52,29 @@ from typing import Any
 
 from gate.agent.ba_agent import DRAFT_ANNOTATION_KEY, DRAFT_ANNOTATION_VALUE, Brief
 
-# Canonical verification action name. The infra_agent has this action wired
-# (see ``gate/agent/infra_agent.py``); it is the ONLY action currently used
-# in verification. New verification shapes should be added to
-# :data:`VERIFICATION_ACTION_MARKERS` rather than replacing this constant so
-# existing fixtures continue to match.
-CANONICAL_VERIFICATION_ACTION = 'release-health-check'
+# Canonical verification action name. Verification is now the single
+# DETERMINISTIC ``deploy-health`` check (version-aware; see
+# ``gate/agent/release_checks.py``) — it superseded the legacy LLM-transcribed
+# ``release-health-check`` STAGE_STATUS action. New verification shapes should
+# be added to :data:`VERIFICATION_ACTION_MARKERS` rather than replacing this
+# constant so existing fixtures continue to match.
+CANONICAL_VERIFICATION_ACTION = 'deploy-health'
 
 # Substrings the harness accepts as "verification-shaped" in a step's
 # ``inputs.action``. Loose match on purpose — a future BA that authors
 # ``verify-webhook-response`` or ``check-deployment-health`` for a
 # non-infra-agent verification path should not need a harness rev.
 #
-# Extended 2026-08-03 for the five INDIVIDUAL single-stage release-check
-# actions (release-status / promote-status / verify-gate / boot-status /
-# deploy-health) — when a BA authors a decomposed release-shepherd chain,
-# its final step is typically ``deploy-health`` (stage 4, the authoritative
-# in-cluster verdict); accept every stage-action name as verification-
-# shaped so a chain ending on any of them satisfies the invariant.
+# The canonical verification is the deterministic ``deploy-health`` check
+# (version-aware, authoritative in-cluster verdict). ``promote-status`` (the
+# other deterministic release-verify check) is also accepted, as are the
+# generic ``health-check`` / ``verify`` shapes for forward compatibility.
 VERIFICATION_ACTION_MARKERS: tuple[str, ...] = (
     'health-check',
     'verify',
     'health_check',
-    # Individual single-stage release-check action names — each is a
-    # deterministic PASS/FAIL verification against ONE MCP-composed stage.
-    'release-status',
+    # Deterministic release-verify check action names (kind: check).
     'promote-status',
-    'boot-status',
     'deploy-health',
 )
 

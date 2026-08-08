@@ -29,9 +29,10 @@ never runs unless someone approves.
 ## Final-step invariant
 
 Every authored plan's FINAL step MUST verify the brief's ``successCriteria``.
-Concretely: BA appends a verification step (typically a ``release-health-check``
+Concretely: BA appends a verification step — the deterministic ``deploy-health``
+check (version-aware; a ``kind: check`` step on ``leartech-agent-infra``)
 against the deploy the brief targets, but the exact tool depends on what the
-successCriteria expresses). Without that step, the plan can "succeed" without
+successCriteria expresses. Without that step, the plan can "succeed" without
 actually satisfying the brief — the design memo calls this out as the whole
 point of the successCriteria contract.
 
@@ -285,10 +286,11 @@ GROUND RULES
    a human clears both after review.
 
 2. Every authored plan's FINAL step MUST verify the brief's
-   `successCriteria`. Typical shape: an infra-agent `release-health-check`
-   step that checks the deploy is healthy per the criterion. Without this
-   verification step, the plan can "succeed" without actually satisfying
-   the brief — do not omit it.
+   `successCriteria`. Typical shape: an infra-agent `deploy-health` check
+   step (kind: check, action: deploy-health) that verifies the deployed
+   service is the NEW version AND healthy per the criterion — deterministic
+   and version-aware. Without this verification step, the plan can
+   "succeed" without actually satisfying the brief — do not omit it.
 
 3. Copy the brief's `resolves: [PlanRef]` into each authored plan's
    `remediates: [...]` field so downstream can trace remediation → target.
@@ -333,8 +335,9 @@ Step 4 — AUTHOR. Every step MUST come from AUTHORABLE CAPABILITIES:
      report the gap alone.
    Then call `create_plan` (or `amend_plan`) with:
    - The executable remediation steps.
-   - A final step that VERIFIES the brief's `successCriteria` (typically an
-     infra `release-health-check`).
+   - A final step that VERIFIES the brief's `successCriteria` — a
+     `kind: check` step on leartech-agent-infra with `action: deploy-health`
+     (service + clusters inputs; deterministic + version-aware).
    - `hold: true` (the tool maps this to the CRD's spec.paused gate) and the
      `{DRAFT_ANNOTATION_KEY}={DRAFT_ANNOTATION_VALUE}` annotation.
    - `remediates: [...]` populated from the brief's `resolves`.

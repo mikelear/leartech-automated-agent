@@ -97,28 +97,28 @@ mcp_servers:
     type: http_sse
     url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/jx_release/sse
     description: |
-      JX3 release-check primitives the infra agent composes for
-      release-health-check: release_status (did the release Tekton pipeline fire
-      + succeed on the repo?), promote_status (jx-promote PRs across both
-      clusters + qa-gate / verify / merged state), retest_promote (chatops
-      /retest on a single-cluster flake). Served remotely by
-      leartech-mcp-servers/jx_release. Composed WITH leartech-tekton (release
-      PipelineRun outcome cross-check) + leartech-k8s (boot job + deploy_health)
-      to make the release-health-check verdict deterministic.
+      JX3 release-check primitives the deterministic release-verify checks call
+      directly (via the stdio bridge, no LLM): release_status (did the release
+      Tekton pipeline fire + succeed on the repo?), promote_status (jx-promote
+      PRs across both clusters + qa-gate / verify / merged state), retest_promote
+      (chatops /retest on a single-cluster flake). Served remotely by
+      leartech-mcp-servers/jx_release. Used WITH leartech-tekton (release
+      PipelineRun outcome) + leartech-k8s (boot job + deploy_health) by the thin
+      deterministic checks in gate/agent/release_checks.py.
 
   leartech-k8s:
     type: http_sse
     url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/k8s/sse
     description: |
       In-cluster Kubernetes read surface — no kubectl needed on the agent side.
-      Exposes deploy_health (Deployment healthy iff >=1 available replica, the
-      authoritative stage-4 signal for release-health-check), get_job_state
-      + list_jobs_by_label (jx-boot Job succeeded, the stage-3 signal), and
-      get_pod_state (used by the stale-progress detector). Runs from inside a
-      cluster with a ServiceAccount scoped to the read verbs, so the agent
-      doesn't need kubectl / cluster credentials of its own — replacing the
-      historical httpx /health probe that couldn't reach the ingress from the
-      infra sandbox and produced false FAILs.
+      Exposes deploy_health (Deployment healthy iff >=1 available replica +
+      running the NEW version — the authoritative signal for the deploy-health
+      check), get_job_state + list_jobs_by_label (jx-boot Job succeeded, the
+      bootjob-for-commit signal), and get_pod_state (used by the stale-progress
+      detector). Runs from inside a cluster with a ServiceAccount scoped to the
+      read verbs, so the agent doesn't need kubectl / cluster credentials of its
+      own — replacing the historical httpx /health probe that couldn't reach the
+      ingress from the infra sandbox and produced false FAILs.
 
   leartech-agent-local:
     type: sdk
@@ -274,7 +274,7 @@ roles:
       `create_plan` DRAFT-BY-DEFAULT (hold:true + draft annotation) so
       nothing heavy triggers downstream until a human reviews. Every
       authored plan's FINAL step must verify the brief's successCriteria
-      (e.g. release-health-check). May author/amend MULTIPLE plans
+      (the deterministic deploy-health check). May author/amend MULTIPLE plans
       (cluster-wide multi-resolve). BA has ZERO infra-specific knowledge —
       it consumes the brief only.
     llm:
@@ -322,8 +322,9 @@ roles:
     description: |
       Cluster-side write-mode agent. Owns the repo/cluster wiring the dev agent
       doesn't: create a repo, register it in source-config (per cluster), land
-      deploy config, and VERIFY a release is healthy after a dev PR merges
-      (the "PR merged != release healthy" gap). Scaffolds new repos
+      deploy config, and (via the DETERMINISTIC no-LLM release-verify checks in
+      gate/agent/release_checks.py) VERIFY a release is healthy after a dev PR
+      merges (the "PR merged != release healthy" gap). Scaffolds new repos
       DETERMINISTICALLY via gate.tools.repo_factory (literal rename, never LLM
       grep/replace) and opens the scaffold PR whose preview exercises the Tekton
       steps. Runs on a cheaper model via its OWN gateway virtual key (see
@@ -340,10 +341,10 @@ roles:
       - leartech-tekton
       - leartech-pr-context
       - leartech-repo-factory
-      # jx-release + k8s compose the DETERMINISTIC release-health-check verdict:
-      # jx_release (stages 1-2 — release fired + promotes merged), tekton (stage 1
-      # cross-check on the release PipelineRun outcome), k8s (stage 3 boot job +
-      # stage 4 deploy_health, replacing the unreachable-from-sandbox HTTP probe).
+      # jx-release + tekton + k8s back the DETERMINISTIC release-verify checks
+      # (gate/agent/release_checks.py, no LLM): jx_release (release-pipeline-status
+      # + promote-status), tekton (release PipelineRun outcome), k8s (deploy-health
+      # + bootjob-for-commit, replacing the unreachable-from-sandbox HTTP probe).
       - leartech-jx-release
       - leartech-k8s
     tools:
