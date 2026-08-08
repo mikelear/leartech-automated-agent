@@ -4,8 +4,8 @@ No LLM turn-loop, no ``STAGE_STATUS`` transcription. Each infra ``action`` here 
 one Go MCP tool; the tool's *structured* verdict (not model narration) decides PASS/FAIL and the
 process exit code. This is the runtime side of the ``verify-release-flow`` PlanTemplate
 (leartech-plan-catalog): the DAG composes these checks, so each step is a pure Go-tool relay that
-is independently re-runnable. Contrast ``gate/agent/release_health.py``, where the LLM emitted
-STAGE_STATUS lines that Python regex-parsed — that indirection is what this module removes.
+is independently re-runnable. Contrast the now-removed STAGE_STATUS release-check path, where the
+LLM emitted STAGE_STATUS lines that Python regex-parsed — that indirection is what this module replaced.
 
 Input contract (consolidated — the duplication the STAGE_STATUS actions carried is gone):
   * ``clusters: [gcp, az]``  ONE list. No ``cluster`` singular alias.
