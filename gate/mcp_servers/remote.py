@@ -72,13 +72,14 @@ _TOKEN_TIMEOUT = 15.0
 #     (GITHUB_OWNER_ADMIN_PAT) lives in the MCP host, not the agent. Only the
 #     infra_agent role's allowed_tools grants these; other agents just don't call them.
 #   * jx_release — JX3 release-check primitives (release_status, promote_status,
-#     retest_promote) the infra agent composes into the release-health-check action.
+#     retest_promote) the DETERMINISTIC release-verify checks call directly
+#     (gate/agent/release_checks.py — release-pipeline-status / promote-status).
 #   * k8s — in-cluster Kubernetes read surface (deploy_health, get_job_state,
-#     list_jobs_by_label, get_pod_state). The infra agent composes deploy_health as
-#     the authoritative stage-4 signal for release-health-check (>=1 available
-#     replica ⇒ healthy), replacing the httpx /health probe that couldn't reach the
-#     ingress from the infra sandbox. Only the infra_agent role's allowed_tools
-#     grants these; other agents just don't call them.
+#     list_jobs_by_label, get_pod_state). The deterministic checks call deploy_health
+#     as the authoritative deploy-health signal (>=1 available replica + NEW version
+#     ⇒ healthy), replacing the httpx /health probe that couldn't reach the ingress
+#     from the infra sandbox. Only the infra_agent role's allowed_tools grants these;
+#     other agents just don't call them.
 #   * platform_state — read-only live-state view for the BA agent: list_plans /
 #     list_runs / get_plan_state / deploy_health. Correlates the brief's
 #     `resolves` (PlanRefs) against what's actually in flight so BA doesn't
@@ -98,10 +99,10 @@ WANTED_MCP_SERVERS: frozenset[str] = frozenset(
         'repo_factory',
         'jx_release',
         # k8s — in-cluster reads (deploy_health / get_job_state /
-        # list_jobs_by_label) the infra agent composes for stages 3 + 4 of
-        # release-health-check. Deploys the authoritative "healthy iff >=1
-        # available replica" verdict from inside the cluster (no ingress /
-        # kubectl on the agent side).
+        # list_jobs_by_label) the deterministic release-verify checks call for
+        # deploy-health + bootjob-for-commit. Deploys the authoritative "healthy
+        # iff >=1 available replica + NEW version" verdict from inside the
+        # cluster (no ingress / kubectl on the agent side).
         'k8s',
         # BA agent — live-state + authoring surface.
         'platform_state',

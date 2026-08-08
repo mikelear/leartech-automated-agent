@@ -123,7 +123,7 @@ def _minimal_brief_dict() -> dict[str, object]:
         ],
         'context': (
             'Cluster gcp saw 5 release failures in the last 24h. az is unaffected. '
-            'The failing step is release-health-check.'
+            'The failing step is the deploy-health verification.'
         ),
         'resolves': [
             {'name': 'foo-service-release', 'namespace': 'jx-staging'},
@@ -213,6 +213,10 @@ def test_system_prompt_encodes_draft_by_default_and_verification() -> None:
     # Verification step for successCriteria.
     assert 'successCriteria' in prompt
     assert 'verification' in prompt.lower()
+    # The canonical verification step is now the deterministic deploy-health
+    # check (superseding the legacy release-health-check STAGE_STATUS action).
+    assert 'deploy-health' in prompt
+    assert 'release-health-check' not in prompt
     # Explicit "no PR" + "no code" invariants.
     assert 'do NOT open a PR' in prompt or 'do not open a PR' in prompt.lower()
     # BA has ZERO infra-specific knowledge — clear signal in the prompt.
@@ -466,7 +470,7 @@ def test_authoring_capabilities_render_has_surface_and_gaps() -> None:
     assert 'routing' in cap
     # infra is the restricted, extensible capability-holder
     assert 'leartech-agent-infra' in cap
-    assert 'register-source-config' in cap and 'release-health-check' in cap
+    assert 'register-source-config' in cap and 'deploy-health' in cap
     # gaps are reported, not authored as phantom steps
     assert 'capability_gaps' in cap
     assert 'needs-human:provision-secret' in cap
@@ -489,4 +493,4 @@ def test_capabilities_file_shape() -> None:
     infra = data['agent_types']['leartech-agent-infra']
     assert infra.get('restricted') is True
     available = [k for k, v in infra['actions'].items() if v.get('status') == 'available']
-    assert {'register-source-config', 'deploy-config', 'release-health-check'} <= set(available)
+    assert {'register-source-config', 'deploy-config', 'deploy-health'} <= set(available)

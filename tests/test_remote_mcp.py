@@ -193,8 +193,8 @@ def test_fully_configured_wires_from_discovery_with_bearer(monkeypatch: pytest.M
         'leartech-repo-factory',
         'leartech-jx-release',
         # Infra agent — in-cluster read surface (deploy_health / get_job_state /
-        # list_jobs_by_label) composed as the deterministic stage-3+4 signal
-        # of release-health-check (replaces the unreachable-from-sandbox HTTP probe).
+        # list_jobs_by_label) backing the deterministic deploy-health +
+        # bootjob-for-commit checks (replaces the unreachable-from-sandbox HTTP probe).
         'leartech-k8s',
         # BA agent surface (platform state + control plane + agent API).
         'leartech-platform-state',
