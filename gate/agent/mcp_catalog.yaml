@@ -75,9 +75,10 @@ mcp_servers:
       WHICH STEP failed (git-clone vs ruff vs pytest), tails per-step logs,
       and cancels superseded runs on force-push. The former in-process SDK
       builder (`gate.mcp_servers.tekton`) has been deleted; the Go
-      `leartech-mcp-servers/tekton` deployment now exposes the same six
+      `leartech-mcp-servers/tekton` deployment now exposes these
       tools (list_pipelineruns_for_pr, step_status, step_logs,
-      cancel_pipelinerun, cancel_superseded_for_pr, wait_first_failure).
+      cancel_pipelinerun, cancel_superseded_for_pr, wait_first_failure, release_pipeline_status
+      (the release-verify `release-passed` check), diagnose_pr_failures.
       `LEARTECH_PLATFORM_MCPS_URL` env var lets the chart point at the
       cluster-local URL; the source fallback is a dev-only localhost (no
       hardcoded cluster URL).
@@ -113,9 +114,10 @@ mcp_servers:
       In-cluster Kubernetes read surface — no kubectl needed on the agent side.
       Exposes deploy_health (Deployment healthy iff >=1 available replica +
       running the NEW version — the authoritative signal for the deploy-health
-      check), get_job_state + list_jobs_by_label (jx-boot Job succeeded, the
-      bootjob-for-commit signal), and get_pod_state (used by the stale-progress
-      detector). Runs from inside a cluster with a ServiceAccount scoped to the
+      check), bootjob_for_commit (the release-verify `bootjob-ran` check),
+      get_deployment_state (raw state deploy_health wraps), get_job_state +
+      list_jobs_by_label (jx-boot Job signals), get_pod_state / get_pod_events /
+      get_pod_logs (stale-progress detector + diagnosis). Runs from inside a cluster with a ServiceAccount scoped to the
       read verbs, so the agent doesn't need kubectl / cluster credentials of its
       own — replacing the historical httpx /health probe that couldn't reach the
       ingress from the infra sandbox and produced false FAILs.
