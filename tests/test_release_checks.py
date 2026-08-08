@@ -132,22 +132,36 @@ def test_deploy_health_unhealthy_is_fail() -> None:
     def fn(base, server, tool, args):
         return {'healthy': False, 'available_replicas': 0, 'reason': 'ImagePullBackOff'}, None
 
-    res = _run(run_check('deploy-health', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    res = _run(run_check('deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp']}, caller=_caller_for(fn)))
     assert res.verdict == 'FAIL'
     assert 'unhealthy' in res.reason
 
 
-def test_deploy_health_version_blind_omits_expected_version() -> None:
-    seen: dict[str, Any] = {}
-
+def test_deploy_health_derives_new_version_from_promote_status() -> None:
+    # No explicit `version` → deploy-health calls promote_status, learns the promoted
+    # version per cluster, and asserts the RUNNING image equals it.
     def fn(base, server, tool, args):
-        seen.update(args)
-        return {'healthy': True, 'available_replicas': 1, 'observed_version': '9.9.9', 'version_match': False}, None
+        if tool == 'promote_status':
+            return {'all_merged': True, 'clusters': [{'cluster': 'gcp', 'merged': True, 'version': '0.0.14', 'pr_number': 1348}]}, None
+        assert args.get('expected_version') == '0.0.14'  # derived version threaded into deploy_health
+        return {'healthy': True, 'available_replicas': 2, 'observed_version': '0.0.14', 'version_match': True}, None
 
-    # No `version` input → version-blind: expected_version omitted, version_match ignored.
-    res = _run(run_check('deploy-health', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
-    assert 'expected_version' not in seen
+    res = _run(run_check('deploy-health', {'service': 'plan-api', 'clusters': ['gcp']}, caller=_caller_for(fn)))
     assert res.verdict == 'PASS'
+    assert '0.0.14' in res.clusters[0].reason
+
+
+def test_deploy_health_no_derivable_version_fails_closed() -> None:
+    # promote_status returns no version and none is supplied → REFUSE a version-blind
+    # pass (the boot-died-early/old-version-still-up blind spot must not go green).
+    def fn(base, server, tool, args):
+        if tool == 'promote_status':
+            return {'clusters': [{'cluster': 'gcp', 'merged': True}]}, None  # no version field
+        return {'healthy': True, 'available_replicas': 1, 'observed_version': 'old', 'version_match': True}, None
+
+    res = _run(run_check('deploy-health', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    assert res.verdict == 'FAIL'
+    assert 'version-blind' in res.clusters[0].reason.lower() or 'cannot assert' in res.clusters[0].reason.lower()
 
 
 # ── promote-status (jx_release) — native cross-cluster ─────────────────────────
@@ -219,6 +233,16 @@ def test_bootjob_not_found_is_fail() -> None:
     assert res.verdict == 'FAIL'
 
 
+def test_bootjob_found_but_indeterminate_is_fail() -> None:
+    # found but no terminal signal — must NOT be assumed completed (old blind spot).
+    def fn(base, server, tool, args):
+        return {'found': True, 'succeeded': False, 'running': False, 'failed': False, 'job_name': 'jx-boot-q'}, None
+
+    res = _run(run_check('bootjob-for-commit', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    assert res.verdict == 'FAIL'
+    assert 'indeterminate' in res.clusters[0].reason
+
+
 def test_bootjob_running_is_fail() -> None:
     def fn(base, server, tool, args):
         return {'found': True, 'running': True, 'job_name': 'jx-boot-z'}, None
@@ -238,9 +262,10 @@ def test_missing_required_input_fails_closed() -> None:
     assert code == 1
 
 
-def test_shared_endpoint_skips_duplicate_not_double_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No per-cluster URLs → both clusters resolve to the same endpoint. The second must be
-    # SKIP (not a second probe counted as a pass) — the 'nominal routing' guard.
+def test_shared_endpoint_fails_closed_no_blind_pass(monkeypatch: pytest.MonkeyPatch) -> None:
+    # No per-cluster URLs → both clusters resolve to the same endpoint. The second cluster
+    # is NOT actually verified, so it must FAIL (not be silently skipped-and-passed).
+    # This is the whole-cluster blind spot: a green check that only checked one cluster.
     monkeypatch.delenv('LEARTECH_MCP_URL_GCP', raising=False)
     monkeypatch.delenv('LEARTECH_MCP_URL_AZ', raising=False)
     monkeypatch.setenv('LEARTECH_MCP_URL', 'http://single')
@@ -248,20 +273,20 @@ def test_shared_endpoint_skips_duplicate_not_double_probe(monkeypatch: pytest.Mo
 
     def fn(base, server, tool, args):
         calls.append(base)
-        return {'healthy': True, 'available_replicas': 1, 'observed_version': 'v', 'version_match': True}, None
+        return {'healthy': True, 'available_replicas': 1, 'observed_version': '0.0.1', 'version_match': True}, None
 
-    res = _run(run_check('deploy-health', {'service': 's', 'clusters': ['gcp', 'az']}, caller=_caller_for(fn)))
+    res = _run(run_check('deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp', 'az']}, caller=_caller_for(fn)))
     assert len(calls) == 1  # probed ONCE, not twice
     verdicts = {c.cluster: c.verdict for c in res.clusters}
-    assert verdicts['gcp'] == 'PASS' and verdicts['az'] == 'SKIP'
-    assert res.verdict == 'PASS'  # the one probed cluster passed
+    assert verdicts['gcp'] == 'PASS' and verdicts['az'] == 'FAIL'  # az NOT silently passed
+    assert res.verdict == 'FAIL'  # fail-closed on missing coverage
 
 
 def test_tool_error_is_fail_not_crash() -> None:
     def fn(base, server, tool, args):
         return {}, 'downstream MCP call failed: timeout'
 
-    res = _run(run_check('deploy-health', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    res = _run(run_check('deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp']}, caller=_caller_for(fn)))
     assert res.verdict == 'FAIL'
     assert 'call failed' in res.reason
 

@@ -20,7 +20,7 @@ successCriteria:
   - HTTP GET /health returns 200 for 3 consecutive polls on each cluster
   - The gitops env repo shows chart version 0.9.3 pinned for foo-service
 context: |
-  Both clusters' foo-service release-health-check pipelines have been
+  Both clusters' foo-service deploy-health verification has been
   red since the 0.9.4 chart bump at 06:12Z. No other service is
   affected — issue is confined to foo-service's overriden values shape.
   Roll back is the safest resolution while an upstream fix is drafted.

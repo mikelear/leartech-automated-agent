@@ -176,16 +176,15 @@ def _version(inputs: dict[str, object]) -> str:
 
 
 def _fail_reason(cvs: list[ClusterVerdict]) -> str:
-    fails = [f'{v.cluster}: {v.reason}' for v in cvs if v.verdict == 'FAIL']
-    skips = [f'{v.cluster}: {v.reason}' for v in cvs if v.verdict == 'SKIP']
-    parts = fails or ['no cluster probed']
-    if skips:
-        parts.append('(skipped — ' + '; '.join(skips) + ')')
-    return '; '.join(parts)
+    fails = [f'{v.cluster}: {v.reason}' for v in cvs if v.verdict != 'PASS']
+    return '; '.join(fails or ['no cluster probed'])
 
 
-# ── per-tool verdicts (pure: structured dict -> (ok, reason)) ───────────────────
-def _verdict_release_pipeline(s: dict[str, Any]) -> tuple[bool, str]:
+# ── per-tool verdicts (pure: (structured dict, cluster) -> (ok, reason)) ────────
+# Every verdict takes the cluster so deploy-health can look up its per-cluster
+# expected version; the others ignore it. Verdicts are FAIL-CLOSED: an ambiguous or
+# indeterminate signal is a FAIL, never a PASS-by-assumption.
+def _verdict_release_pipeline(s: dict[str, Any], _cluster: str) -> tuple[bool, str]:
     run = s.get('run') or {}
     name = run.get('name', '') if isinstance(run, dict) else ''
     label = name or 'run'
@@ -198,34 +197,54 @@ def _verdict_release_pipeline(s: dict[str, Any]) -> tuple[bool, str]:
     return False, f'release pipeline still running ({label})'
 
 
-def _verdict_deploy_health(expected: str) -> Callable[[dict[str, Any]], tuple[bool, str]]:
-    def _v(s: dict[str, Any]) -> tuple[bool, str]:
+def _make_deploy_verdict(
+    explicit: str, version_by_cluster: dict[str, str]
+) -> Callable[[dict[str, Any], str], tuple[bool, str]]:
+    """Version-AWARE deploy verdict. `healthy` alone is not enough — we require the
+    running image to equal the NEW promoted version for this cluster. If we cannot
+    establish that expected version we FAIL CLOSED rather than pass version-blind
+    (a version-blind pass would hide a boot that died before applying the new version,
+    leaving the OLD version running healthy)."""
+
+    def _v(s: dict[str, Any], cluster: str) -> tuple[bool, str]:
+        expected = explicit or version_by_cluster.get(cluster, '')
         avail = s.get('available_replicas')
-        obs = s.get('observed_version', '')
+        obs = s.get('observed_version', '') or '?'
         reason = s.get('reason', '')
+        if not expected:
+            return False, (
+                f'cannot assert the NEW version is out on {cluster}: no expected version '
+                '(promote_status returned none — pass `version` or fix the promote PR title). '
+                'Refusing a version-blind pass.'
+            )
         if not s.get('healthy'):
             return False, f'deploy unhealthy (available={avail}) {reason}'.strip()
-        if expected and s.get('version_match') is False:
-            return False, f'version mismatch: running {obs or "?"}, expected {expected}'
-        return True, f'healthy available={avail} version={obs or "?"}'
+        if s.get('version_match') is False:
+            return False, f'version mismatch: running {obs}, expected NEW {expected}'
+        return True, f'NEW version out: running {obs} == promoted {expected}, available={avail}'
 
     return _v
 
 
-def _verdict_bootjob(s: dict[str, Any]) -> tuple[bool, str]:
+def _verdict_bootjob(s: dict[str, Any], _cluster: str) -> tuple[bool, str]:
     job = s.get('job_name', '')
     if not s.get('found'):
         return False, 'no jx-boot Job found reconciling this release commit'
-    if s.get('running'):
-        return False, f'jx-boot Job {job} still running'
+    if s.get('succeeded'):
+        return True, f'jx-boot Job {job} completed'
     if s.get('failed'):
         # Locked step-7 semantics: a boot that RAN is a PASS even if the Job ended FAILED
-        # (post-apply housekeeping); deploy-health is the authoritative 'landed' gate.
+        # (post-apply housekeeping); deploy-health is the authoritative 'landed' gate. This
+        # is SAFE ONLY because deploy-health is version-aware — it independently catches a
+        # boot that failed BEFORE applying (old version still up).
         return True, (
             f'jx-boot Job {job} ran (terminal FAILED — post-apply housekeeping; '
-            'deploy-health gates landed)'
+            'deploy-health independently gates that the new version landed)'
         )
-    return True, f'jx-boot Job {job} completed'
+    if s.get('running'):
+        return False, f'jx-boot Job {job} still running'
+    # found but no terminal signal — do NOT assume completed (that was a blind spot).
+    return False, f'jx-boot Job {job} found but state indeterminate (not succeeded/failed/running)'
 
 
 # ── check runners ──────────────────────────────────────────────────────────────
@@ -237,25 +256,28 @@ async def _run_per_cluster(
     caller: ToolCaller,
     *,
     build_args: Callable[[str], dict[str, Any]],
-    verdict: Callable[[dict[str, Any]], tuple[bool, str]],
+    verdict: Callable[[dict[str, Any], str], tuple[bool, str]],
 ) -> CheckResult:
-    """Run a cluster-local tool once per DISTINCT endpoint, aggregate PASS iff every
-    probed cluster passed. Clusters sharing an endpoint (per-cluster URLs unwired) are
-    SKIPped, not double-probed."""
+    """Run a cluster-local tool once per DISTINCT endpoint, aggregate PASS iff EVERY
+    requested cluster passed. FAIL-CLOSED on missing coverage: a cluster with no
+    endpoint, or one that shares an endpoint with another (per-cluster URLs unwired),
+    is a FAIL — never silently skipped-and-passed. A cluster that isn't actually probed
+    must never let the check go green (that hid whole-cluster failures)."""
     cvs: list[ClusterVerdict] = []
     endpoint_owner: dict[str, str] = {}
     for cl in clusters:
         base = _endpoint_for(cl)
         if not base:
-            cvs.append(ClusterVerdict(cl, 'FAIL', 'no MCP endpoint (LEARTECH_MCP_URL[_<CLUSTER>] unset)'))
+            cvs.append(ClusterVerdict(cl, 'FAIL', 'no MCP endpoint (LEARTECH_MCP_URL[_<CLUSTER>] unset) — cluster not verified'))
             continue
         if base in endpoint_owner:
             cvs.append(
                 ClusterVerdict(
                     cl,
-                    'SKIP',
-                    f'shares endpoint with {endpoint_owner[base]} — set LEARTECH_MCP_URL_{cl.upper()} '
-                    'for a distinct per-cluster probe',
+                    'FAIL',
+                    f'not verified: shares one MCP endpoint with {endpoint_owner[base]} '
+                    f'(k8s/tekton reads are cluster-local) — set LEARTECH_MCP_URL_{cl.upper()} '
+                    'to probe this cluster distinctly',
                 )
             )
             continue
@@ -264,12 +286,29 @@ async def _run_per_cluster(
         if err:
             cvs.append(ClusterVerdict(cl, 'FAIL', f'{tool} call failed: {err}'))
             continue
-        ok, reason = verdict(structured)
+        ok, reason = verdict(structured, cl)
         cvs.append(ClusterVerdict(cl, 'PASS' if ok else 'FAIL', reason, structured))
-    probed = [v for v in cvs if v.verdict in ('PASS', 'FAIL')]
-    ok = bool(probed) and all(v.verdict == 'PASS' for v in probed)
-    reason = 'all probed clusters passed' if ok else _fail_reason(cvs)
+    ok = bool(cvs) and all(v.verdict == 'PASS' for v in cvs)
+    reason = 'all requested clusters verified + passed' if ok else _fail_reason(cvs)
     return CheckResult(action, tool, 'PASS' if ok else 'FAIL', reason, cvs)
+
+
+async def _promote_versions(
+    service: str, clusters: tuple[str, ...], caller: ToolCaller
+) -> dict[str, str]:
+    """Per-cluster target version from promote_status (parsed from the promote PR
+    title). Feeds deploy-health so it asserts the NEW version is what's running. Returns
+    {} on any error — deploy-health then FAILs closed (never a version-blind pass)."""
+    base = _endpoint_for(clusters[0]) or os.environ.get('LEARTECH_MCP_URL', '').rstrip('/')
+    structured, err = await caller(base, 'jx_release', 'promote_status', {'service': service, 'clusters': list(clusters)})
+    if err:
+        return {}
+    out: dict[str, str] = {}
+    for c in structured.get('clusters') or []:
+        cl, ver = str(c.get('cluster', '')), c.get('version')
+        if cl and isinstance(ver, str) and ver:
+            out[cl] = ver
+    return out
 
 
 async def _run_promote_status(
@@ -320,17 +359,22 @@ async def run_check(
     if action == 'deploy-health':
         service = _req(inputs, 'service')
         namespace = str(inputs.get('namespace') or 'jx-staging')
-        version = _version(inputs)
+        explicit = _version(inputs)
+        # Establish each cluster's NEW version so "healthy" means "the new release is
+        # out", not "something healthy is up". Explicit `version` overrides; otherwise
+        # derive per cluster from promote_status. No expected version → FAIL closed.
+        version_by_cluster: dict[str, str] = {} if explicit else await _promote_versions(service, clusters, caller)
 
         def _deploy_args(cl: str) -> dict[str, Any]:
             args: dict[str, Any] = {'service': service, 'namespace': namespace, 'cluster': cl}
-            if version:
-                args['expected_version'] = version
+            expected = explicit or version_by_cluster.get(cl, '')
+            if expected:
+                args['expected_version'] = expected
             return args
 
         return await _run_per_cluster(
             action, 'k8s', 'deploy_health', clusters, caller,
-            build_args=_deploy_args, verdict=_verdict_deploy_health(version),
+            build_args=_deploy_args, verdict=_make_deploy_verdict(explicit, version_by_cluster),
         )
 
     if action == 'bootjob-for-commit':

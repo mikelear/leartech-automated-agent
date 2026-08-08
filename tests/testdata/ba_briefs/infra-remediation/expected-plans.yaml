@@ -3,7 +3,7 @@
 # This YAML is a LIST of plans; the harness treats the whole list as the
 # BA's output for one brief. In this scenario the brief resolves a SINGLE
 # PlanRef, so we expect ONE authored plan that copies it into `remediates`
-# and appends a release-health-check as the final step.
+# and appends a deploy-health check as the final verification step.
 #
 # The intermediate step ("wait-for-deploy") is what the BA would typically
 # schedule between reading the brief and re-verifying — it's illustrative;
@@ -39,7 +39,7 @@
         dependsOn: [wait-for-deploy]
         repo: ''
         inputs:
-          action: release-health-check
+          action: deploy-health
           service: foo-service
           namespace: jx-staging
           healthPath: /health/live

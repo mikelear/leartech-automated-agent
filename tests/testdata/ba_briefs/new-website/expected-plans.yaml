@@ -52,7 +52,7 @@
         dependsOn: [scaffold]
         repo: ''
         inputs:
-          action: release-health-check
+          action: deploy-health
           service: leartech-marketing-microsite
           namespace: jx-staging
           healthPath: /health
