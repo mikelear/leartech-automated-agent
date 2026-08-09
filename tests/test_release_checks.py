@@ -300,3 +300,47 @@ def test_run_check_action_exit_codes() -> None:
 
     assert _run(run_check_action('bootjob-for-commit', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(ok))) == 0
     assert _run(run_check_action('bootjob-for-commit', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(bad))) == 1
+
+
+# ── release-verify POLL behaviour (the "watch the release through" fix) ──────────
+def test_release_check_polls_until_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient FAIL (release still running) is re-checked until it reaches a
+    terminal PASS — the check WAITS for the stage instead of one-shot-failing."""
+    import gate.agent.release_checks as rc
+
+    monkeypatch.setattr(rc, 'POLL_INTERVAL_S', 0)  # no real sleeping in the test
+    calls = {'n': 0}
+
+    def fn(base: str, server: str, tool: str, args: dict) -> tuple[dict, None]:
+        calls['n'] += 1
+        if calls['n'] == 1:  # first look: fired but still running → transient
+            return {'fired': True, 'passed': False, 'failed': False, 'running': True, 'run': {'name': 'r-1'}}, None
+        return {'fired': True, 'passed': True, 'failed': False, 'run': {'name': 'r-1'}}, None  # then passed
+
+    code = _run(run_check_action('release-pipeline-status', {'repo': 'r', 'sha': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    assert code == 0  # polled through to PASS
+    assert calls['n'] >= 2  # it did NOT one-shot — it re-checked after "still running"
+
+
+def test_release_check_poll_times_out_without_hanging(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A persistently transient stage FAILs (not hangs) once the budget is exhausted."""
+    import gate.agent.release_checks as rc
+
+    monkeypatch.setattr(rc, 'POLL_BUDGET_S', 0)  # deadline == now → single shot, no wait
+
+    def fn(base: str, server: str, tool: str, args: dict) -> tuple[dict, None]:
+        return {'fired': True, 'passed': False, 'failed': False, 'running': True, 'run': {'name': 'r-1'}}, None
+
+    code = _run(run_check_action('release-pipeline-status', {'repo': 'r', 'sha': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    assert code == 1  # transient but out of budget → FAIL (timeout), never hangs
+
+
+def test_single_cluster_default_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no explicit clusters, the check verifies only the LOCAL cluster
+    (LEARTECH_CLUSTER) — no cross-cluster fan-out."""
+    import gate.agent.release_checks as rc
+
+    monkeypatch.setenv('LEARTECH_CLUSTER', 'gcp')
+    assert rc._resolve_clusters({}) == ('gcp',)
+    # explicit clusters still honoured
+    assert rc._resolve_clusters({'clusters': ['az']}) == ('az',)

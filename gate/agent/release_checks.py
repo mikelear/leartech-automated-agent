@@ -29,8 +29,10 @@ concern, not a release false-FAIL.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -40,6 +42,41 @@ from gate.mcp_servers.remote import discover_mounts, mint_mcp_token
 from gate.mcp_servers.stdio_bridge import _with_downstream
 
 DEFAULT_CLUSTERS: tuple[str, ...] = ('gcp', 'az')
+
+# ── release-verify POLL config ──────────────────────────────────────────────────
+# The release-verify checks verify a release that unfolds over ~15-40 min
+# (fire → promote → boot → deploy). A one-shot check that FAILs on "not fired yet"
+# / "still running" gives up long before the stage lands (the Job backoffLimit is
+# ~2 min). So a check POLLS its stage until it reaches a TERMINAL state (PASS or a
+# real FAIL) or the budget expires — this is what lets verify-release-flow "watch a
+# release through". Budget/interval are env-overridable; defaults sit well inside
+# the AgentType activeDeadlineSeconds (4 h).
+POLL_BUDGET_S: int = int(os.environ.get('LEARTECH_RELEASE_VERIFY_BUDGET_S', '1800'))
+POLL_INTERVAL_S: int = int(os.environ.get('LEARTECH_RELEASE_VERIFY_INTERVAL_S', '20'))
+
+# A FAIL carrying any TRANSIENT marker just means "the stage hasn't reached terminal
+# yet" → keep polling. A TERMINAL-FAIL marker (real failure) stops the poll now.
+_TRANSIENT_MARKERS: tuple[str, ...] = (
+    'still running', 'did not fire', 'no run matched', 'not fire',
+    'no promote pr', 'awaiting', 'checks pending', 'pending/red',
+    'version mismatch', 'expected new', 'not run yet', 'indeterminate',
+    'call failed',  # transient MCP/read errors → retry within budget
+)
+_TERMINAL_FAIL_MARKERS: tuple[str, ...] = (
+    'pipeline failed', 'closed without merging', 'closed_unmerged',
+    'qa-gate failed', 'gate failed',
+)
+
+
+def _is_transient(result: 'CheckResult') -> bool:
+    """True when a FAIL is a not-yet-terminal stage state the poll should WAIT on."""
+    if result.verdict == 'PASS':
+        return False
+    reasons = ' '.join([result.reason] + [c.reason for c in result.clusters]).lower()
+    if any(m in reasons for m in _TERMINAL_FAIL_MARKERS):
+        return False
+    return any(m in reasons for m in _TRANSIENT_MARKERS)
+
 _CALL_TIMEOUT = 120.0
 
 # The check actions this module owns — the no-LLM deterministic path. Two of these
@@ -152,6 +189,13 @@ def _resolve_clusters(inputs: dict[str, object]) -> tuple[str, ...]:
         out = tuple(str(c).strip().lower() for c in raw if str(c).strip())
         if out:
             return out
+    # No explicit clusters → verify the LOCAL cluster only. Each cluster's controller
+    # runs its own release-verify against its own (cluster-local) Tekton/deploy, so no
+    # cross-cluster MCP endpoint is needed. LEARTECH_CLUSTER is injected per-cluster by
+    # the controller chart; absent it, fall back to the historical both-cluster default.
+    local = os.environ.get('LEARTECH_CLUSTER', '').strip().lower()
+    if local:
+        return (local,)
     return DEFAULT_CLUSTERS
 
 
@@ -408,15 +452,38 @@ async def run_check_action(
     structured ``check_verdict`` log line, and returns the process exit code
     (PASS → 0, else 1 — fail-closed)."""
     obslog.info('run_start', f'infra check action={action}', logger='infra', action=action, check=True)
-    try:
-        result = await run_check(action, inputs, caller=caller)
-    except ValueError as exc:  # missing/invalid required input → deterministic FAIL
-        obslog.error(
-            'check_verdict', f'{action} FAIL: {exc}', logger='infra',
-            action=action, verdict='FAIL', reason=str(exc), exit_code=1,
+    # POLL until the stage reaches a TERMINAL state (PASS or a real FAIL) or the budget
+    # expires. A transient FAIL ("still running" / "not fired yet" / "version mismatch")
+    # means the release stage the check verifies simply hasn't landed yet — so we WAIT
+    # rather than give up (the old one-shot behaviour died in ~2 min on the Job
+    # backoffLimit, long before a ~15-40 min release completed).
+    deadline = time.monotonic() + POLL_BUDGET_S
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            result = await run_check(action, inputs, caller=caller)
+        except ValueError as exc:  # missing/invalid required input → deterministic FAIL (never retried)
+            obslog.error(
+                'check_verdict', f'{action} FAIL: {exc}', logger='infra',
+                action=action, verdict='FAIL', reason=str(exc), exit_code=1,
+            )
+            obslog.info('run_end', f'infra check action={action} done', logger='infra', action=action, exit_code=1)
+            return 1
+        if not _is_transient(result) or time.monotonic() >= deadline:
+            if result.verdict != 'PASS' and _is_transient(result):  # budget exhausted while still pending
+                result = CheckResult(
+                    result.action, result.tool, 'FAIL',
+                    f'timed out after {POLL_BUDGET_S}s waiting for terminal state — last: {result.reason}',
+                    result.clusters,
+                )
+            break
+        obslog.info(
+            'check_waiting',
+            f'{action} not terminal yet (attempt {attempt}); re-checking in {POLL_INTERVAL_S}s: {result.reason}',
+            logger='infra', action=action, attempt=attempt, reason=result.reason,
         )
-        obslog.info('run_end', f'infra check action={action} done', logger='infra', action=action, exit_code=1)
-        return 1
+        await asyncio.sleep(POLL_INTERVAL_S)
     exit_code = 0 if result.verdict == 'PASS' else 1
     obslog.info(
         'check_verdict', f'{action} verdict={result.verdict}: {result.reason}', logger='infra',
