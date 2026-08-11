@@ -462,7 +462,17 @@ def _post_crash_sticky(*, qualified_repo: str, pr_number: int | None, body: str)
 # new Haiku-default + tighter quotas, 200 is a more honest safety net that
 # also caps any runaway burn quickly. Override per-run via `--max-turns N`
 # for genuinely larger initiatives.
-DEFAULT_INITIATIVE_MAX_TURNS = 200
+#
+# 2026-08-11: raised 200 → 300. A full from-scratch site build (re-scaffold +
+# 5 pages + design system + SSG + JSON-LD/llms.txt + unit + e2e specs, then
+# drive gates green) legitimately exceeds 200 — mortgagesourcing-website-visual
+# hit the 200 cap mid-build at turn 201 (SDK crashes abruptly on cap-hit, #913)
+# having pushed only incomplete work, so its PR gates were red for missing specs
+# it hadn't reached yet. With the resume-fetch fix above a cap-hit is now
+# survivable (retry resumes the pushed branch), but 300 gives a single run enough
+# headroom to finish + drive gates for these larger website builds without a
+# forced retry. Still a hard runaway ceiling; override per-run for bigger jobs.
+DEFAULT_INITIATIVE_MAX_TURNS = 300
 
 # Standard write-mode toolkit. Bash gives `git`, `gh`, `npm`, etc.; the rest are file ops.
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']
@@ -850,7 +860,19 @@ def _fetch_and_checkout_existing(*, cwd: Path, branch: str) -> bool:
         )
 
     try:
-        fetch = _run(['git', 'fetch', 'origin', branch], timeout=60)
+        # Explicit refspec so the remote-tracking ref origin/<branch> is created
+        # locally. Plain `git fetch origin <branch>` only populates FETCH_HEAD, so
+        # the checkout below (`-B <branch> origin/<branch>`) then fails with
+        # "origin/<branch> is not a commit" — especially on the pod's shallow
+        # clone, which has no origin/<branch> ref. That false-negative dropped
+        # resume to fresh-start and made every retry redo the whole build from
+        # main (observed: mortgagesourcing-website-visual PR #3, 2026-08-11 — a
+        # cap-hit retry threw away 88%-done pushed work). The refspec fetches the
+        # branch tip AND wires origin/<branch> so the checkout resumes on it.
+        fetch = _run(
+            ['git', 'fetch', 'origin', f'+refs/heads/{branch}:refs/remotes/origin/{branch}'],
+            timeout=60,
+        )
         if fetch.returncode != 0:
             click.echo(
                 click.style(

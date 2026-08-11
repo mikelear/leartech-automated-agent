@@ -201,10 +201,14 @@ def test_fetch_and_checkout_returns_true_when_both_commands_succeed(tmp_path: Pa
         ]
         assert _fetch_and_checkout_existing(cwd=tmp_path, branch='agent/foo') is True
 
-    # First call: git fetch origin <branch>
+    # First call: git fetch origin with an EXPLICIT refspec, so the remote-tracking
+    # ref origin/<branch> is created locally (a bare `git fetch origin <branch>`
+    # only populates FETCH_HEAD, so the `checkout -B <branch> origin/<branch>`
+    # below fails with "origin/<branch> is not a commit" — the resume bug that
+    # dropped retries to fresh-start).
     first = mock_run.call_args_list[0][0][0]
     assert first[0:3] == ['git', 'fetch', 'origin']
-    assert 'agent/foo' in first
+    assert first[3] == '+refs/heads/agent/foo:refs/remotes/origin/agent/foo'
     # Second call: git checkout -B <branch> origin/<branch>
     second = mock_run.call_args_list[1][0][0]
     assert second[0:3] == ['git', 'checkout', '-B']
