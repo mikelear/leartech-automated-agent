@@ -462,7 +462,17 @@ def _post_crash_sticky(*, qualified_repo: str, pr_number: int | None, body: str)
 # new Haiku-default + tighter quotas, 200 is a more honest safety net that
 # also caps any runaway burn quickly. Override per-run via `--max-turns N`
 # for genuinely larger initiatives.
-DEFAULT_INITIATIVE_MAX_TURNS = 200
+#
+# 2026-08-11: raised 200 → 300. A full from-scratch site build (re-scaffold +
+# 5 pages + design system + SSG + JSON-LD/llms.txt + unit + e2e specs, then
+# drive gates green) legitimately exceeds 200 — mortgagesourcing-website-visual
+# hit the 200 cap mid-build at turn 201 (SDK crashes abruptly on cap-hit, #913)
+# having pushed only incomplete work, so its PR gates were red for missing specs
+# it hadn't reached yet. With the resume-fetch fix above a cap-hit is now
+# survivable (retry resumes the pushed branch), but 300 gives a single run enough
+# headroom to finish + drive gates for these larger website builds without a
+# forced retry. Still a hard runaway ceiling; override per-run for bigger jobs.
+DEFAULT_INITIATIVE_MAX_TURNS = 300
 
 # Standard write-mode toolkit. Bash gives `git`, `gh`, `npm`, etc.; the rest are file ops.
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']
@@ -850,7 +860,19 @@ def _fetch_and_checkout_existing(*, cwd: Path, branch: str) -> bool:
         )
 
     try:
-        fetch = _run(['git', 'fetch', 'origin', branch], timeout=60)
+        # Explicit refspec so the remote-tracking ref origin/<branch> is created
+        # locally. Plain `git fetch origin <branch>` only populates FETCH_HEAD, so
+        # the checkout below (`-B <branch> origin/<branch>`) then fails with
+        # "origin/<branch> is not a commit" — especially on the pod's shallow
+        # clone, which has no origin/<branch> ref. That false-negative dropped
+        # resume to fresh-start and made every retry redo the whole build from
+        # main (observed: mortgagesourcing-website-visual PR #3, 2026-08-11 — a
+        # cap-hit retry threw away 88%-done pushed work). The refspec fetches the
+        # branch tip AND wires origin/<branch> so the checkout resumes on it.
+        fetch = _run(
+            ['git', 'fetch', 'origin', f'+refs/heads/{branch}:refs/remotes/origin/{branch}'],
+            timeout=60,
+        )
         if fetch.returncode != 0:
             click.echo(
                 click.style(
@@ -874,6 +896,42 @@ def _fetch_and_checkout_existing(*, cwd: Path, branch: str) -> bool:
         click.echo(click.style(f'  resume fetch/checkout errored: {exc}', fg='yellow'), err=True)
         return False
     return True
+
+
+def _checkpoint_wip_on_crash(*, cwd: Path, branch: str) -> None:
+    """Best-effort commit + push of the working tree when the SDK crashes.
+
+    The SDK terminates abruptly mid-turn on cap-hit (#913), so whatever the agent
+    did in its final turns (e.g. freshly-written test files) is left UNCOMMITTED
+    and lost — resume-on-retry then continues from the agent's last self-push and
+    redoes that chunk. This preserves it: push a checkpoint commit so resume picks
+    up the TRUE latest work. Paired with the resume-fetch fix (resume is only as
+    good as what got pushed). No-op on a clean tree; every failure is swallowed —
+    we are already in the crash path and must not mask the original exception.
+    """
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60, cwd=str(cwd))
+
+    try:
+        if not _run(['git', 'status', '--porcelain']).stdout.strip():
+            return  # clean tree — the agent already pushed everything
+        _run(['git', 'add', '-A'])
+        # --no-verify: skip hooks (a WIP checkpoint must not be blocked by a
+        # lint/test pre-commit hook — the point is to preserve work, not gate it).
+        _run(['git', 'commit', '--no-verify', '-m', 'wip: turn-cap checkpoint (auto — resumable)'])
+        push = _run(['git', 'push', 'origin', f'HEAD:{branch}'])
+        ok = push.returncode == 0
+        click.echo(
+            click.style(
+                f'  {"✓ pushed" if ok else "✗ could not push"} a WIP checkpoint of uncommitted '
+                f'work to {branch} so resume continues from the latest'
+                + ('' if ok else f' (push exit {push.returncode}: {push.stderr.strip()[:150]})'),
+                fg='green' if ok else 'yellow',
+            ),
+            err=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — crash-path best-effort; never re-raise
+        click.echo(click.style(f'  WIP checkpoint errored (non-fatal): {exc}', fg='yellow'), err=True)
 
 
 def _build_resume_preamble(*, branch: str, base: str, pr_number: int | None) -> str:
@@ -1623,6 +1681,12 @@ async def run_initiative(
         # the cap, it's almost certainly a cap-hit; otherwise it's a real crash.
         # In either case the agent never reached its own step-11 sticky, so the harness
         # posts a crash sticky itself once we've resolved the PR number below.
+        #
+        # First: best-effort push a checkpoint of any UNCOMMITTED work. The SDK
+        # crashes mid-turn, so the final chunk (the tests it was writing when PR #3
+        # hit the cap) is otherwise lost and redone on retry. Preserve it so
+        # resume-on-retry continues from the true latest.
+        _checkpoint_wip_on_crash(cwd=cwd, branch=primary.branch)
         if last_turn_count >= max_turns:
             click.echo(
                 click.style(
