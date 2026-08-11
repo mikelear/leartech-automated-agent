@@ -57,6 +57,7 @@ from gate.agent.initiative import (
     ResumeContext,
     RunSummary,
     _build_resume_preamble,
+    _checkpoint_wip_on_crash,
     _detect_resume_context,
     _fetch_and_checkout_existing,
     _remote_branch_exists,
@@ -243,6 +244,45 @@ def test_fetch_and_checkout_returns_false_on_subprocess_timeout(tmp_path: Path) 
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd='git', timeout=60)
         assert _fetch_and_checkout_existing(cwd=tmp_path, branch='agent/foo') is False
+
+
+# ─── _checkpoint_wip_on_crash ───────────────────────────────────────────
+
+
+def test_checkpoint_noop_on_clean_tree(tmp_path: Path) -> None:
+    """Clean tree (empty `git status --porcelain`) → no commit/push: the agent
+    already pushed everything, nothing to preserve."""
+    with patch('gate.agent.initiative.subprocess.run') as mock_run:
+        mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
+        _checkpoint_wip_on_crash(cwd=tmp_path, branch='agent/foo')
+    # Exactly one call — the status probe; no add/commit/push.
+    assert mock_run.call_count == 1
+    assert mock_run.call_args_list[0][0][0][0:3] == ['git', 'status', '--porcelain']
+
+
+def test_checkpoint_commits_and_pushes_dirty_tree(tmp_path: Path) -> None:
+    """Dirty tree → add + commit (--no-verify) + push HEAD:<branch>, so resume
+    continues from the crash-time work, not the agent's last self-push."""
+    with patch('gate.agent.initiative.subprocess.run') as mock_run:
+        mock_run.side_effect = [
+            subprocess.CompletedProcess(args=[], returncode=0, stdout=' M src/foo.ts\n', stderr=''),  # status: dirty
+            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),  # add
+            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),  # commit
+            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),  # push
+        ]
+        _checkpoint_wip_on_crash(cwd=tmp_path, branch='agent/foo')
+    calls = [c[0][0] for c in mock_run.call_args_list]
+    assert calls[1][0:2] == ['git', 'add']
+    assert calls[2][0:2] == ['git', 'commit'] and '--no-verify' in calls[2]
+    assert calls[3] == ['git', 'push', 'origin', 'HEAD:agent/foo']
+
+
+def test_checkpoint_swallows_errors(tmp_path: Path) -> None:
+    """Crash-path best-effort: a subprocess failure must NOT raise (we're already
+    handling the original SDK exception)."""
+    with patch('gate.agent.initiative.subprocess.run') as mock_run:
+        mock_run.side_effect = OSError('git missing')
+        _checkpoint_wip_on_crash(cwd=tmp_path, branch='agent/foo')  # must not raise
 
 
 # ─── _build_resume_preamble ─────────────────────────────────────────────

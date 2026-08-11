@@ -898,6 +898,42 @@ def _fetch_and_checkout_existing(*, cwd: Path, branch: str) -> bool:
     return True
 
 
+def _checkpoint_wip_on_crash(*, cwd: Path, branch: str) -> None:
+    """Best-effort commit + push of the working tree when the SDK crashes.
+
+    The SDK terminates abruptly mid-turn on cap-hit (#913), so whatever the agent
+    did in its final turns (e.g. freshly-written test files) is left UNCOMMITTED
+    and lost — resume-on-retry then continues from the agent's last self-push and
+    redoes that chunk. This preserves it: push a checkpoint commit so resume picks
+    up the TRUE latest work. Paired with the resume-fetch fix (resume is only as
+    good as what got pushed). No-op on a clean tree; every failure is swallowed —
+    we are already in the crash path and must not mask the original exception.
+    """
+    def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60, cwd=str(cwd))
+
+    try:
+        if not _run(['git', 'status', '--porcelain']).stdout.strip():
+            return  # clean tree — the agent already pushed everything
+        _run(['git', 'add', '-A'])
+        # --no-verify: skip hooks (a WIP checkpoint must not be blocked by a
+        # lint/test pre-commit hook — the point is to preserve work, not gate it).
+        _run(['git', 'commit', '--no-verify', '-m', 'wip: turn-cap checkpoint (auto — resumable)'])
+        push = _run(['git', 'push', 'origin', f'HEAD:{branch}'])
+        ok = push.returncode == 0
+        click.echo(
+            click.style(
+                f'  {"✓ pushed" if ok else "✗ could not push"} a WIP checkpoint of uncommitted '
+                f'work to {branch} so resume continues from the latest'
+                + ('' if ok else f' (push exit {push.returncode}: {push.stderr.strip()[:150]})'),
+                fg='green' if ok else 'yellow',
+            ),
+            err=True,
+        )
+    except Exception as exc:  # noqa: BLE001 — crash-path best-effort; never re-raise
+        click.echo(click.style(f'  WIP checkpoint errored (non-fatal): {exc}', fg='yellow'), err=True)
+
+
 def _build_resume_preamble(*, branch: str, base: str, pr_number: int | None) -> str:
     """Render the "RESUME MODE" block prepended to the user prompt.
 
@@ -1645,6 +1681,12 @@ async def run_initiative(
         # the cap, it's almost certainly a cap-hit; otherwise it's a real crash.
         # In either case the agent never reached its own step-11 sticky, so the harness
         # posts a crash sticky itself once we've resolved the PR number below.
+        #
+        # First: best-effort push a checkpoint of any UNCOMMITTED work. The SDK
+        # crashes mid-turn, so the final chunk (the tests it was writing when PR #3
+        # hit the cap) is otherwise lost and redone on retry. Preserve it so
+        # resume-on-retry continues from the true latest.
+        _checkpoint_wip_on_crash(cwd=cwd, branch=primary.branch)
         if last_turn_count >= max_turns:
             click.echo(
                 click.style(
