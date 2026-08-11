@@ -61,6 +61,7 @@ from gate.agent.test_mode import (
     parse_test_mode,
     run_test_mode,
 )
+from gate.agent.tool_logging import log_tool_call, log_tool_result
 from gate.initiatives import load_initiative
 from gate.mcp_servers import (
     build_agent_local_server,
@@ -1288,6 +1289,9 @@ async def run_initiative(
     # loop. Gating on the no-tool turn means we never cut off the "ready for
     # review" sticky (a tool call) or a some_failed→fix iteration.
     wait_for_terminal_tool_ids: set[str] = set()
+    # tool_use_id → tool name, so a ToolResultBlock (which carries only the id)
+    # can be logged against the tool that produced it. See log_tool_result below.
+    tool_names_by_id: dict[str, str] = {}
     terminal_all_passed_seen = False
     turn_made_tool_call = False
     # Reliability — resume-on-retry seed for the exit-code normalisation below
@@ -1413,6 +1417,12 @@ async def run_initiative(
                         click.echo(block.text)
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
+                        # Structured, redacted trajectory → Loki. The '→ name'
+                        # echo above is for a human tailing the pod; this carries
+                        # the actual command/input so operators aren't blind to
+                        # WHAT ran (e.g. how a private gs:// artifact was read).
+                        tool_names_by_id[block.id] = block.name
+                        log_tool_call(block.name, block.input)
                         # Post-green hard-stop safety net — this turn made a
                         # tool call, so it is NOT the agent's final
                         # no-tool "I'm done" summary turn. Record the
@@ -1453,12 +1463,21 @@ async def run_initiative(
                 content = message.content
                 if isinstance(content, list):
                     for block in content:
-                        if (
-                            isinstance(block, ToolResultBlock)
-                            and block.tool_use_id in wait_for_terminal_tool_ids
-                            and _tool_result_reports_all_passed(block)
-                        ):
-                            terminal_all_passed_seen = True
+                        if isinstance(block, ToolResultBlock):
+                            # Structured, redacted tool OUTPUT → Loki, paired with
+                            # the tool name via the id map. Completes the trajectory
+                            # so a failed/odd command shows its result, not just
+                            # that it ran.
+                            log_tool_result(
+                                tool_names_by_id.get(block.tool_use_id),
+                                block.content,
+                                is_error=bool(getattr(block, 'is_error', False)),
+                            )
+                            if (
+                                block.tool_use_id in wait_for_terminal_tool_ids
+                                and _tool_result_reports_all_passed(block)
+                            ):
+                                terminal_all_passed_seen = True
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
                 terminate_state.last_turn_count = last_turn_count

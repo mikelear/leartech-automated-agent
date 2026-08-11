@@ -10,6 +10,14 @@ dependencies = [
     "claude-agent-sdk>=0.1.72",
     "click>=8.1.0",
     "fastapi>=0.115.0",
+    # GCS client, baked into the runtime venv so it is inherited by EVERY agent
+    # image (go/ng/rust/py are all FROM the runtime base) with no per-language
+    # install. Consumes GOOGLE_APPLICATION_CREDENTIALS (materialised by
+    # gate.agent.gcp_credentials) so an agent told to read a private gs://
+    # artifact uses `python3 -c "from google.cloud import storage"`
+    # deterministically instead of pip-installing it mid-run (fragile: needs
+    # egress, silently degradable) — observed on the first artifact-driven plan.
+    "google-cloud-storage>=2.18.0",
     "httpx>=0.27.0",
     # Standard MCP client/server library — the agent's stdio↔http MCP bridge
     # (gate/mcp_servers/stdio_bridge.py) imports it directly. Already resolved
