@@ -465,14 +465,29 @@ async def run_test_mode(
         spec.delay_seconds,
     )
 
-    run_id = (os.environ.get('LEARTECH_RUN_ID') or '').strip()
-    namespace = (os.environ.get('AGENT_RUN_NAMESPACE') or '').strip()
+    # Identity via the captured snapshot rather than :data:`os.environ` —
+    # ``gate.agent.initiative.run_initiative`` STRIPS ``AGENT_RUN_NAMESPACE``
+    # from the env at startup so subprocesses can't reach the AgentRun,
+    # but this same-process code still legitimately needs the handle. See
+    # :mod:`gate.identity` for the design.
+    from gate import identity  # local import: keep test_mode importable in tools without gate.identity resolved
+
+    run_id = identity.get_run_id()
+    namespace = identity.get_namespace()
     can_patch_agentrun = bool(run_id) and bool(namespace)
     if not can_patch_agentrun:
+        # Post-strip (sanitise-subprocess-identity) the strict "should never
+        # happen in a controller-spawned Job" reading no longer holds: a
+        # test-mode invocation firing from a subprocess (e.g. a Bash-tool
+        # ``uv run pytest`` inside the agent's own gate suite) sees an
+        # EXPECTED empty identity because the parent stripped it. The
+        # message is now honest about both paths.
         logger.warning(
-            'test-mode: LEARTECH_RUN_ID (%r) / AGENT_RUN_NAMESPACE (%r) unset — '
-            'AgentRun annotation + status patches will be skipped. This is normal on a '
-            'laptop invocation but should NEVER happen in a controller-spawned Job.',
+            'test-mode: run_id (%r) / namespace (%r) unavailable — AgentRun '
+            'annotation + status patches will be skipped. This is EXPECTED '
+            'on a laptop invocation, or in a subprocess whose parent stripped '
+            'the identity env (see gate.identity). It should NOT happen at '
+            'the top of a controller-spawned Job before any strip has fired.',
             run_id,
             namespace,
         )
@@ -538,9 +553,16 @@ def maybe_open_pr_args_for_initiative(
     The controller-spawned Job already carries LEARTECH_RUN_ID +
     AGENT_RUN_NAMESPACE, so the tool call publishes the synthetic PR against
     THIS run — matching the real path's behaviour.
+
+    Identity via the captured snapshot: ``gate.agent.initiative.run_initiative``
+    strips these vars from :data:`os.environ` at startup, but this helper
+    still needs the values to build a well-formed ``open_pr`` request.
+    See :mod:`gate.identity` for the design.
     """
-    run_id = os.environ.get('LEARTECH_RUN_ID', '')
-    namespace = os.environ.get('AGENT_RUN_NAMESPACE', '')
+    from gate import identity  # local import: matches ``run_test_mode``'s pattern
+
+    run_id = identity.get_run_id()
+    namespace = identity.get_namespace()
     return {
         'run_id': run_id,
         'namespace': namespace,

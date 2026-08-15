@@ -21,8 +21,63 @@ lockout.
 from __future__ import annotations
 
 import os
+from collections.abc import Iterator
+
+import pytest
 
 # Applied AT IMPORT TIME so it lands before pytest starts collecting tests
 # (and therefore before any test module runs `from app.main import app`,
 # which triggers the middleware install).
 os.environ.setdefault('LEARTECH_AUTH_REQUIRED', 'false')
+
+
+# AgentRun identity env vars whose PRESENCE + non-empty value in
+# ``os.environ`` is what makes the ``_backstop_target_pr`` /
+# ``run_test_mode`` code paths issue live k8s writes. The autouse
+# fixture below scrubs them at test start so a stray pod env can never
+# turn a unit test into an incident against the run hosting the pytest.
+_AGENTRUN_IDENTITY_ENV_VARS = (
+    'AGENT_RUN_NAME',
+    'AGENT_RUN_NAMESPACE',
+    'LEARTECH_AGENTRUN_STATUS',
+    'LEARTECH_RUN_ID',
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_identity_snapshot(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Reset :mod:`gate.identity` module state AND scrub identity env before each test.
+
+    Added by the sanitise-subprocess-identity initiative. Two side-effects:
+
+    1. **Snapshot reset.** The identity module caches a captured snapshot
+       from ``os.environ`` at
+       :func:`gate.agent.initiative.run_initiative` entry and strips those
+       vars from the env. That's process-scoped state: if a first test
+       runs ``run_initiative``, it captures identity + strips env; a later
+       test that ``monkeypatch.setenv`` the identity vars would then find
+       its reads still hitting the stale FIRST test's snapshot instead of
+       the freshly-set env. Resetting between tests keeps the
+       accessor-fallback-to-``os.environ`` contract intact: any test that
+       hasn't explicitly captured sees its ``monkeypatch`` env directly.
+
+    2. **Identity env scrub.** When this pytest runs INSIDE a
+       leartech-automated-agent pod (self-referential — the exact incident
+       shape this initiative fixes), the pod env carries live
+       ``AGENT_RUN_NAME`` / ``AGENT_RUN_NAMESPACE`` / etc. A test that
+       accidentally hits ``_backstop_target_pr`` under those live vars would
+       patch the AgentRun hosting the pytest — the 12:48:43 incident.
+       Delenv-by-default here means every test starts with a clean slate;
+       tests that legitimately need identity set (e.g.
+       :file:`tests/test_initiative_targetpr_backstop.py`) monkeypatch.setenv
+       within the test itself, which overrides this scrub for their duration.
+    """
+    from gate import identity
+
+    identity.reset_for_tests()
+    for _var in _AGENTRUN_IDENTITY_ENV_VARS:
+        monkeypatch.delenv(_var, raising=False)
+    try:
+        yield
+    finally:
+        identity.reset_for_tests()
