@@ -1,36 +1,35 @@
 """Cluster-aware configuration for the ``leartech-agent`` CLI.
 
 Operators install the CLI once (via ``pipx``) and then point it at any
-cluster's orchestrator + agent ingress without editing source. The
-resolution priority for a given URL key (``orch_url`` / ``agent_url``) is:
+cluster's agent ingress without editing source. The resolution priority
+for ``agent_url`` is:
 
-1. The matching ``--*-url`` flag on the invocation (highest).
-2. The matching ``LEARTECH_<KEY>_URL`` env var
-   (``LEARTECH_ORCH_URL`` / ``LEARTECH_AGENT_URL``).
+1. The ``--url`` flag on the invocation (highest).
+2. The ``LEARTECH_AGENT_URL`` env var.
 3. The cluster picked by ``--cluster`` (or, absent that, the
    ``default_cluster`` in the config file) — looked up in the
    ``clusters:`` map of ``~/.config/leartech-agent/config.yaml``.
 4. A built-in default (staging URL pattern), if a known cluster key
    was named.
-5. ``http://localhost:8080`` laptop fallback (agent URL only).
+5. ``http://localhost:8080`` laptop fallback.
 
-The config file uses the shape documented in the
-``cli-add-chat-repl-and-install-paths`` initiative goal:
+The config file uses the shape:
 
 .. code-block:: yaml
 
     default_cluster: gcp-staging
     clusters:
       gcp-staging:
-        orch_url: https://leartech-orchestrator-jx-staging.jx.leartech.com
         agent_url: https://leartech-automated-agent-jx-staging.jx.leartech.com
       az-staging:
-        orch_url: https://leartech-orchestrator-jx-staging.az.leartech.com
         agent_url: https://leartech-automated-agent-jx-staging.az.leartech.com
 
-The same config file is reusable by the future MCP-for-Claude surface —
-this module exposes the keys + the merged-cluster lookup so other
-packages don't have to re-parse YAML.
+Legacy note — ``orch_url``: earlier versions of this CLI also carried an
+``orch_url`` field pointing at the ``leartech-orchestrator`` service.
+That service has been decommissioned. Existing on-disk configs may still
+carry the key; :func:`load_config` reads and discards it silently rather
+than erroring, so an operator's pipx install keeps working across the
+transition.
 """
 
 from __future__ import annotations
@@ -56,11 +55,9 @@ CONFIG_FILENAME = 'config.yaml'
 # writing the same key into ``~/.config/leartech-agent/config.yaml``.
 _BUILTIN_CLUSTERS: dict[str, dict[str, str]] = {
     'gcp-staging': {
-        'orch_url': 'https://leartech-orchestrator-jx-staging.jx.leartech.com',
         'agent_url': 'https://leartech-automated-agent-jx-staging.jx.leartech.com',
     },
     'az-staging': {
-        'orch_url': 'https://leartech-orchestrator-jx-staging.az.leartech.com',
         'agent_url': 'https://leartech-automated-agent-jx-staging.az.leartech.com',
     },
 }
@@ -73,11 +70,10 @@ class ClusterConfig:
     """One cluster's URL set. Frozen so callers can't mutate the file's view."""
 
     name: str
-    orch_url: str
     agent_url: str
 
     def as_dict(self) -> dict[str, str]:
-        return {'orch_url': self.orch_url, 'agent_url': self.agent_url}
+        return {'agent_url': self.agent_url}
 
 
 @dataclass
@@ -132,7 +128,13 @@ def config_path() -> Path:
 
 
 def _normalise_file_clusters(raw: dict[str, Any]) -> dict[str, ClusterConfig]:
-    """Validate + lift the ``clusters:`` dict from the file into typed records."""
+    """Validate + lift the ``clusters:`` dict from the file into typed records.
+
+    A stray legacy ``orch_url`` key inside a cluster body is silently
+    dropped — the leartech-orchestrator service that owned it has been
+    decommissioned, and rejecting the config just because an operator's
+    file still names it would break their pipx install for no benefit.
+    """
     out: dict[str, ClusterConfig] = {}
     clusters = raw.get('clusters') or {}
     if not isinstance(clusters, dict):
@@ -140,11 +142,11 @@ def _normalise_file_clusters(raw: dict[str, Any]) -> dict[str, ClusterConfig]:
     for name, body in clusters.items():
         if not isinstance(body, dict):
             raise ValueError(f'clusters.{name}: must be a mapping, got {type(body).__name__}')
-        orch_url = body.get('orch_url')
         agent_url = body.get('agent_url')
-        if not isinstance(orch_url, str) or not isinstance(agent_url, str):
-            raise ValueError(f'clusters.{name}: both `orch_url` and `agent_url` are required (strings).')
-        out[name] = ClusterConfig(name=name, orch_url=orch_url, agent_url=agent_url)
+        if not isinstance(agent_url, str):
+            raise ValueError(f'clusters.{name}: `agent_url` is required (string).')
+        # Legacy `orch_url` is tolerated + ignored — see module docstring.
+        out[name] = ClusterConfig(name=name, agent_url=agent_url)
     return out
 
 
@@ -154,14 +156,11 @@ def load_config(path: Path | None = None) -> CliConfig:
     Built-ins seed the cluster map first so a fresh install (no file)
     still resolves ``gcp-staging`` / ``az-staging``. The file's entries
     override built-ins by key, so an operator can rebind
-    ``gcp-staging.orch_url`` to a hotfix instance without dropping the
+    ``gcp-staging.agent_url`` to a hotfix instance without dropping the
     other clusters.
     """
     target = path if path is not None else config_path()
-    clusters = {
-        name: ClusterConfig(name=name, orch_url=body['orch_url'], agent_url=body['agent_url'])
-        for name, body in _BUILTIN_CLUSTERS.items()
-    }
+    clusters = {name: ClusterConfig(name=name, agent_url=body['agent_url']) for name, body in _BUILTIN_CLUSTERS.items()}
     default_cluster = DEFAULT_CLUSTER
     source: Path | None = None
     if target.is_file():
@@ -213,14 +212,14 @@ def resolve_url(
     config: CliConfig | None = None,
     env: dict[str, str] | None = None,
 ) -> str:
-    """Resolve one URL key (``orch_url`` / ``agent_url``) by priority chain.
+    """Resolve one URL key (``agent_url``) by priority chain.
 
     Order: ``--<key>-url`` flag → ``LEARTECH_<KEY>_URL`` env → config
     file (cluster lookup) → built-in default for the named cluster.
 
     ``env`` is exposed for tests; defaults to ``os.environ``.
     """
-    if key not in {'orch_url', 'agent_url'}:
+    if key != 'agent_url':
         raise ValueError(f'resolve_url: unknown key {key!r}')
     if flag_value:
         return flag_value

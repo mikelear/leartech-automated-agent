@@ -1,15 +1,15 @@
 """``leartech-agent config show|set-cluster|use-cluster`` — local config CRUD.
 
 Operators install the CLI once (via ``pipx``) and need to point it at any
-cluster's orchestrator + agent URLs without editing source. The
-`config` subgroup is the official entry-point — it writes
-``~/.config/leartech-agent/config.yaml`` directly so the same file is
-reusable by adjacent tooling (e.g. the future MCP-for-Claude wrapper).
+cluster's agent URL without editing source. The `config` subgroup is the
+official entry-point — it writes ``~/.config/leartech-agent/config.yaml``
+directly so the same file is reusable by adjacent tooling (e.g. the
+future MCP-for-Claude wrapper).
 
 Commands:
 
 * ``config show`` — render the merged view (built-ins + file overrides)
-* ``config set-cluster <name> --orch-url ... --agent-url ...`` — write/rebind
+* ``config set-cluster <name> --agent-url ...`` — write/rebind
 * ``config use-cluster <name>`` — flip ``default_cluster:`` to ``name``
 
 The file path is shown in every render so operators can ``cat`` it
@@ -57,33 +57,29 @@ def config_show() -> None:
 
     table = Table(title='Clusters', box=box.SIMPLE_HEAD)
     table.add_column('Name', style='bold')
-    table.add_column('Orchestrator URL')
     table.add_column('Agent URL')
     table.add_column('Default', justify='center')
     for name in sorted(cfg.clusters):
         cluster = cfg.clusters[name]
         marker = '[green]✓[/green]' if name == cfg.default_cluster else ''
-        table.add_row(name, cluster.orch_url, cluster.agent_url, marker)
+        table.add_row(name, cluster.agent_url, marker)
     console.print(table)
 
 
 @config_group.command('set-cluster')
 @click.argument('name')
-@click.option('--orch-url', required=True, help='Orchestrator base URL (POST /chat lives here).')
 @click.option('--agent-url', required=True, help='Automated-agent base URL.')
-def config_set_cluster(name: str, orch_url: str, agent_url: str) -> None:
+def config_set_cluster(name: str, agent_url: str) -> None:
     """Add (or rebind) a cluster entry.
 
-    Re-running with the same ``name`` overwrites the URLs in-place — that
+    Re-running with the same ``name`` overwrites the URL in-place — that
     is the operator's intended workflow when an ingress hostname moves
     or a new cluster comes online.
     """
     cfg = load_config()
-    cfg.clusters[name] = ClusterConfig(name=name, orch_url=orch_url, agent_url=agent_url)
+    cfg.clusters[name] = ClusterConfig(name=name, agent_url=agent_url)
     target = save_config(cfg)
-    console.print(
-        f'[green]✓[/green] Set cluster [bold]{name}[/bold] (orch={orch_url}, agent={agent_url}) → written to {target}'
-    )
+    console.print(f'[green]✓[/green] Set cluster [bold]{name}[/bold] (agent={agent_url}) → written to {target}')
 
 
 @config_group.command('use-cluster')
@@ -100,7 +96,7 @@ def config_use_cluster(name: str) -> None:
         available = sorted(cfg.clusters)
         console.print(
             f'[red]Unknown cluster {name!r}.[/red] '
-            f'Add it first with `leartech-agent config set-cluster {name} --orch-url ... --agent-url ...` '
+            f'Add it first with `leartech-agent config set-cluster {name} --agent-url ...` '
             f'or pick from: {available}'
         )
         raise SystemExit(1)
@@ -112,7 +108,7 @@ def config_use_cluster(name: str) -> None:
     target = save_config(new_config)
     console.print(
         f'[green]✓[/green] Default cluster now [bold]{name}[/bold] '
-        f'(orch={cfg.clusters[name].orch_url}) → written to {target}'
+        f'(agent={cfg.clusters[name].agent_url}) → written to {target}'
     )
 
 

@@ -24,7 +24,10 @@ ingresses). That contract mismatch produced the
 ``Invalid value for '--cluster'`` / DNS-resolution-error pair fixed in
 PR ``cli-fix-cluster-flag-name-mismatch``. The cluster map now lives in
 exactly one place — :mod:`app.agent_cli.config` — and is keyed by the
-canonical ``<cloud>-<env>`` names.
+canonical ``<cloud>-<env>`` names. An earlier revision also carried an
+``orch_url`` per cluster (paired with the now-decommissioned
+``leartech-orchestrator`` service); that field was removed from
+``ClusterConfig`` in ``chore/drop-orch-cli-client``.
 """
 
 from __future__ import annotations

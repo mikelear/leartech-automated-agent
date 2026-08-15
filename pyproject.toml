@@ -25,7 +25,6 @@ dependencies = [
     # MCP client (Phase 2, provider-portability direction).
     "mcp>=1.20",
     "kubernetes-asyncio~=32.0",
-    "prompt-toolkit>=3.0.0",
     "pydantic>=2.0",
     "pydantic-settings>=2.0",
     "python-jose[cryptography]>=3.3.0",
@@ -113,15 +112,6 @@ plugins = ["pydantic.mypy"]
 # leartech-ai-classifier uses for the kubernetes sync client.
 [[tool.mypy.overrides]]
 module = ["kubernetes_asyncio.*"]
-ignore_missing_imports = true
-
-# prompt_toolkit ships type info as `py.typed` only in 3.0.50+; older
-# versions (pinned via uv.lock at run time) trip the import-not-found
-# check. The CLI's chat REPL uses just two symbols and we wrap them
-# behind a thin facade in `commands/chat.py`, so silencing the imports
-# costs nothing.
-[[tool.mypy.overrides]]
-module = ["prompt_toolkit", "prompt_toolkit.*"]
 ignore_missing_imports = true
 
 # python-jose ships type stubs as `types-python-jose` in a separate dist,
