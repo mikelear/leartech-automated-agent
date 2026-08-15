@@ -95,7 +95,9 @@ def test_release_pipeline_not_fired_is_fail() -> None:
     def fn(base, server, tool, args):
         return {'fired': False, 'passed': False, 'failed': False}, None
 
-    res = _run(run_check('release-pipeline-status', {'repo': 'r', 'sha': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    res = _run(
+        run_check('release-pipeline-status', {'repo': 'r', 'sha': 's', 'clusters': ['gcp']}, caller=_caller_for(fn))
+    )
     assert res.verdict == 'FAIL'
     assert 'did not fire' in res.reason
 
@@ -123,7 +125,9 @@ def test_deploy_health_version_mismatch_is_fail() -> None:
     def fn(base, server, tool, args):
         return {'healthy': True, 'available_replicas': 2, 'observed_version': '0.0.13', 'version_match': False}, None
 
-    res = _run(run_check('deploy-health', {'service': 's', 'version': '0.0.14', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    res = _run(
+        run_check('deploy-health', {'service': 's', 'version': '0.0.14', 'clusters': ['gcp']}, caller=_caller_for(fn))
+    )
     assert res.verdict == 'FAIL'
     assert 'version mismatch' in res.reason
 
@@ -132,7 +136,9 @@ def test_deploy_health_unhealthy_is_fail() -> None:
     def fn(base, server, tool, args):
         return {'healthy': False, 'available_replicas': 0, 'reason': 'ImagePullBackOff'}, None
 
-    res = _run(run_check('deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    res = _run(
+        run_check('deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp']}, caller=_caller_for(fn))
+    )
     assert res.verdict == 'FAIL'
     assert 'unhealthy' in res.reason
 
@@ -142,7 +148,10 @@ def test_deploy_health_derives_new_version_from_promote_status() -> None:
     # version per cluster, and asserts the RUNNING image equals it.
     def fn(base, server, tool, args):
         if tool == 'promote_status':
-            return {'all_merged': True, 'clusters': [{'cluster': 'gcp', 'merged': True, 'version': '0.0.14', 'pr_number': 1348}]}, None
+            return {
+                'all_merged': True,
+                'clusters': [{'cluster': 'gcp', 'merged': True, 'version': '0.0.14', 'pr_number': 1348}],
+            }, None
         assert args.get('expected_version') == '0.0.14'  # derived version threaded into deploy_health
         return {'healthy': True, 'available_replicas': 2, 'observed_version': '0.0.14', 'version_match': True}, None
 
@@ -275,7 +284,11 @@ def test_shared_endpoint_fails_closed_no_blind_pass(monkeypatch: pytest.MonkeyPa
         calls.append(base)
         return {'healthy': True, 'available_replicas': 1, 'observed_version': '0.0.1', 'version_match': True}, None
 
-    res = _run(run_check('deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp', 'az']}, caller=_caller_for(fn)))
+    res = _run(
+        run_check(
+            'deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp', 'az']}, caller=_caller_for(fn)
+        )
+    )
     assert len(calls) == 1  # probed ONCE, not twice
     verdicts = {c.cluster: c.verdict for c in res.clusters}
     assert verdicts['gcp'] == 'PASS' and verdicts['az'] == 'FAIL'  # az NOT silently passed
@@ -286,7 +299,9 @@ def test_tool_error_is_fail_not_crash() -> None:
     def fn(base, server, tool, args):
         return {}, 'downstream MCP call failed: timeout'
 
-    res = _run(run_check('deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    res = _run(
+        run_check('deploy-health', {'service': 's', 'version': '0.0.1', 'clusters': ['gcp']}, caller=_caller_for(fn))
+    )
     assert res.verdict == 'FAIL'
     assert 'call failed' in res.reason
 
@@ -298,8 +313,13 @@ def test_run_check_action_exit_codes() -> None:
     def bad(base, server, tool, args):
         return {'found': False}, None
 
-    assert _run(run_check_action('bootjob-for-commit', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(ok))) == 0
-    assert _run(run_check_action('bootjob-for-commit', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(bad))) == 1
+    assert (
+        _run(run_check_action('bootjob-for-commit', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(ok))) == 0
+    )
+    assert (
+        _run(run_check_action('bootjob-for-commit', {'service': 's', 'clusters': ['gcp']}, caller=_caller_for(bad)))
+        == 1
+    )
 
 
 # ── release-verify POLL behaviour (the "watch the release through" fix) ──────────
@@ -317,7 +337,11 @@ def test_release_check_polls_until_terminal(monkeypatch: pytest.MonkeyPatch) -> 
             return {'fired': True, 'passed': False, 'failed': False, 'running': True, 'run': {'name': 'r-1'}}, None
         return {'fired': True, 'passed': True, 'failed': False, 'run': {'name': 'r-1'}}, None  # then passed
 
-    code = _run(run_check_action('release-pipeline-status', {'repo': 'r', 'sha': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    code = _run(
+        run_check_action(
+            'release-pipeline-status', {'repo': 'r', 'sha': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)
+        )
+    )
     assert code == 0  # polled through to PASS
     assert calls['n'] >= 2  # it did NOT one-shot — it re-checked after "still running"
 
@@ -331,7 +355,11 @@ def test_release_check_poll_times_out_without_hanging(monkeypatch: pytest.Monkey
     def fn(base: str, server: str, tool: str, args: dict) -> tuple[dict, None]:
         return {'fired': True, 'passed': False, 'failed': False, 'running': True, 'run': {'name': 'r-1'}}, None
 
-    code = _run(run_check_action('release-pipeline-status', {'repo': 'r', 'sha': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)))
+    code = _run(
+        run_check_action(
+            'release-pipeline-status', {'repo': 'r', 'sha': 's', 'clusters': ['gcp']}, caller=_caller_for(fn)
+        )
+    )
     assert code == 1  # transient but out of budget → FAIL (timeout), never hangs
 
 

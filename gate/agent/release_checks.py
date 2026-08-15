@@ -57,18 +57,30 @@ POLL_INTERVAL_S: int = int(os.environ.get('LEARTECH_RELEASE_VERIFY_INTERVAL_S', 
 # A FAIL carrying any TRANSIENT marker just means "the stage hasn't reached terminal
 # yet" → keep polling. A TERMINAL-FAIL marker (real failure) stops the poll now.
 _TRANSIENT_MARKERS: tuple[str, ...] = (
-    'still running', 'did not fire', 'no run matched', 'not fire',
-    'no promote pr', 'awaiting', 'checks pending', 'pending/red',
-    'version mismatch', 'expected new', 'not run yet', 'indeterminate',
+    'still running',
+    'did not fire',
+    'no run matched',
+    'not fire',
+    'no promote pr',
+    'awaiting',
+    'checks pending',
+    'pending/red',
+    'version mismatch',
+    'expected new',
+    'not run yet',
+    'indeterminate',
     'call failed',  # transient MCP/read errors → retry within budget
 )
 _TERMINAL_FAIL_MARKERS: tuple[str, ...] = (
-    'pipeline failed', 'closed without merging', 'closed_unmerged',
-    'qa-gate failed', 'gate failed',
+    'pipeline failed',
+    'closed without merging',
+    'closed_unmerged',
+    'qa-gate failed',
+    'gate failed',
 )
 
 
-def _is_transient(result: 'CheckResult') -> bool:
+def _is_transient(result: CheckResult) -> bool:
     """True when a FAIL is a not-yet-terminal stage state the poll should WAIT on."""
     if result.verdict == 'PASS':
         return False
@@ -76,6 +88,7 @@ def _is_transient(result: 'CheckResult') -> bool:
     if any(m in reasons for m in _TERMINAL_FAIL_MARKERS):
         return False
     return any(m in reasons for m in _TRANSIENT_MARKERS)
+
 
 _CALL_TIMEOUT = 120.0
 
@@ -128,9 +141,7 @@ class CheckResult:
 
 # ── MCP tool caller (seam: tests inject a fake, no network) ─────────────────────
 # ToolCaller(base_url, server, tool, args) -> (structured_result, error_or_None)
-ToolCaller = Callable[
-    [str, str, str, dict[str, Any]], Awaitable[tuple[dict[str, Any], "str | None"]]
-]
+ToolCaller = Callable[[str, str, str, dict[str, Any]], Awaitable[tuple[dict[str, Any], 'str | None']]]
 
 
 def _content_text(result: Any) -> str:
@@ -163,9 +174,7 @@ async def _default_tool_caller(
     if not path:
         return {}, f'MCP host {base} does not advertise server {server!r}'
     try:
-        result = await _with_downstream(
-            f'{base}{path}', _CALL_TIMEOUT, lambda s: s.call_tool(tool, args)
-        )
+        result = await _with_downstream(f'{base}{path}', _CALL_TIMEOUT, lambda s: s.call_tool(tool, args))
     except Exception as exc:  # noqa: BLE001 — surface as a clean check error, never hang/crash
         return {}, f'{type(exc).__name__}: {exc}'
     if getattr(result, 'isError', False):
@@ -312,7 +321,11 @@ async def _run_per_cluster(
     for cl in clusters:
         base = _endpoint_for(cl)
         if not base:
-            cvs.append(ClusterVerdict(cl, 'FAIL', 'no MCP endpoint (LEARTECH_MCP_URL[_<CLUSTER>] unset) — cluster not verified'))
+            cvs.append(
+                ClusterVerdict(
+                    cl, 'FAIL', 'no MCP endpoint (LEARTECH_MCP_URL[_<CLUSTER>] unset) — cluster not verified'
+                )
+            )
             continue
         if base in endpoint_owner:
             cvs.append(
@@ -337,14 +350,14 @@ async def _run_per_cluster(
     return CheckResult(action, tool, 'PASS' if ok else 'FAIL', reason, cvs)
 
 
-async def _promote_versions(
-    service: str, clusters: tuple[str, ...], caller: ToolCaller
-) -> dict[str, str]:
+async def _promote_versions(service: str, clusters: tuple[str, ...], caller: ToolCaller) -> dict[str, str]:
     """Per-cluster target version from promote_status (parsed from the promote PR
     title). Feeds deploy-health so it asserts the NEW version is what's running. Returns
     {} on any error — deploy-health then FAILs closed (never a version-blind pass)."""
     base = _endpoint_for(clusters[0]) or os.environ.get('LEARTECH_MCP_URL', '').rstrip('/')
-    structured, err = await caller(base, 'jx_release', 'promote_status', {'service': service, 'clusters': list(clusters)})
+    structured, err = await caller(
+        base, 'jx_release', 'promote_status', {'service': service, 'clusters': list(clusters)}
+    )
     if err:
         return {}
     out: dict[str, str] = {}
@@ -355,13 +368,13 @@ async def _promote_versions(
     return out
 
 
-async def _run_promote_status(
-    inputs: dict[str, object], clusters: tuple[str, ...], caller: ToolCaller
-) -> CheckResult:
+async def _run_promote_status(inputs: dict[str, object], clusters: tuple[str, ...], caller: ToolCaller) -> CheckResult:
     """promote_status is natively cross-cluster (GitHub API) — one call, clusters list."""
     service = _req(inputs, 'service')
     base = _endpoint_for(clusters[0]) or os.environ.get('LEARTECH_MCP_URL', '').rstrip('/')
-    structured, err = await caller(base, 'jx_release', 'promote_status', {'service': service, 'clusters': list(clusters)})
+    structured, err = await caller(
+        base, 'jx_release', 'promote_status', {'service': service, 'clusters': list(clusters)}
+    )
     if err:
         return CheckResult('promote-status', 'promote_status', 'FAIL', f'promote_status call failed: {err}')
     cvs: list[ClusterVerdict] = []
@@ -395,7 +408,11 @@ async def run_check(
     if action == 'release-pipeline-status':
         repo, sha = _req(inputs, 'repo'), _req(inputs, 'sha')
         return await _run_per_cluster(
-            action, 'tekton', 'release_pipeline_status', clusters, caller,
+            action,
+            'tekton',
+            'release_pipeline_status',
+            clusters,
+            caller,
             build_args=lambda _c: {'repo': repo, 'sha': sha},
             verdict=_verdict_release_pipeline,
         )
@@ -417,8 +434,13 @@ async def run_check(
             return args
 
         return await _run_per_cluster(
-            action, 'k8s', 'deploy_health', clusters, caller,
-            build_args=_deploy_args, verdict=_make_deploy_verdict(explicit, version_by_cluster),
+            action,
+            'k8s',
+            'deploy_health',
+            clusters,
+            caller,
+            build_args=_deploy_args,
+            verdict=_make_deploy_verdict(explicit, version_by_cluster),
         )
 
     if action == 'bootjob-for-commit':
@@ -438,16 +460,19 @@ async def run_check(
             return args
 
         return await _run_per_cluster(
-            action, 'k8s', 'bootjob_for_commit', clusters, caller,
-            build_args=_boot_args, verdict=_verdict_bootjob,
+            action,
+            'k8s',
+            'bootjob_for_commit',
+            clusters,
+            caller,
+            build_args=_boot_args,
+            verdict=_verdict_bootjob,
         )
 
     return CheckResult(action, '', 'FAIL', f'unknown check action {action!r}')
 
 
-async def run_check_action(
-    action: str, inputs: dict[str, object], *, caller: ToolCaller = _default_tool_caller
-) -> int:
+async def run_check_action(action: str, inputs: dict[str, object], *, caller: ToolCaller = _default_tool_caller) -> int:
     """Entry point for the infra agent's no-LLM check path. Runs the check, emits one
     structured ``check_verdict`` log line, and returns the process exit code
     (PASS → 0, else 1 — fail-closed)."""
@@ -465,15 +490,22 @@ async def run_check_action(
             result = await run_check(action, inputs, caller=caller)
         except ValueError as exc:  # missing/invalid required input → deterministic FAIL (never retried)
             obslog.error(
-                'check_verdict', f'{action} FAIL: {exc}', logger='infra',
-                action=action, verdict='FAIL', reason=str(exc), exit_code=1,
+                'check_verdict',
+                f'{action} FAIL: {exc}',
+                logger='infra',
+                action=action,
+                verdict='FAIL',
+                reason=str(exc),
+                exit_code=1,
             )
             obslog.info('run_end', f'infra check action={action} done', logger='infra', action=action, exit_code=1)
             return 1
         if not _is_transient(result) or time.monotonic() >= deadline:
             if result.verdict != 'PASS' and _is_transient(result):  # budget exhausted while still pending
                 result = CheckResult(
-                    result.action, result.tool, 'FAIL',
+                    result.action,
+                    result.tool,
+                    'FAIL',
                     f'timed out after {POLL_BUDGET_S}s waiting for terminal state — last: {result.reason}',
                     result.clusters,
                 )
@@ -481,14 +513,23 @@ async def run_check_action(
         obslog.info(
             'check_waiting',
             f'{action} not terminal yet (attempt {attempt}); re-checking in {POLL_INTERVAL_S}s: {result.reason}',
-            logger='infra', action=action, attempt=attempt, reason=result.reason,
+            logger='infra',
+            action=action,
+            attempt=attempt,
+            reason=result.reason,
         )
         await asyncio.sleep(POLL_INTERVAL_S)
     exit_code = 0 if result.verdict == 'PASS' else 1
     obslog.info(
-        'check_verdict', f'{action} verdict={result.verdict}: {result.reason}', logger='infra',
-        action=action, tool=result.tool, verdict=result.verdict, reason=result.reason,
-        clusters=[c.as_dict() for c in result.clusters], exit_code=exit_code,
+        'check_verdict',
+        f'{action} verdict={result.verdict}: {result.reason}',
+        logger='infra',
+        action=action,
+        tool=result.tool,
+        verdict=result.verdict,
+        reason=result.reason,
+        clusters=[c.as_dict() for c in result.clusters],
+        exit_code=exit_code,
     )
     print(f'{action}: {result.verdict} — {result.reason}')
     obslog.info('run_end', f'infra check action={action} done', logger='infra', action=action, exit_code=exit_code)
