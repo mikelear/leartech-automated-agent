@@ -46,9 +46,9 @@ _REDACTED = '***REDACTED***'
 # harmless, a leaked credential is not.
 _SECRET_PATTERNS = (
     re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----', re.DOTALL),
-    re.compile(r'ya29\.[A-Za-z0-9._\-]+'),          # GCP OAuth access tokens
-    re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}'),      # GitHub tokens
-    re.compile(r'sk-[A-Za-z0-9_\-]{20,}'),          # OpenAI/Anthropic-style keys
+    re.compile(r'ya29\.[A-Za-z0-9._\-]+'),  # GCP OAuth access tokens
+    re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}'),  # GitHub tokens
+    re.compile(r'sk-[A-Za-z0-9_\-]{20,}'),  # OpenAI/Anthropic-style keys
     re.compile(r'eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+'),  # JWTs
 )
 
@@ -104,9 +104,7 @@ def log_tool_result(tool: str | None, content: Any, *, is_error: bool = False) -
     output. ``content`` is the SDK ``ToolResultBlock.content`` — a str or a list
     of ``{type,text}`` blocks."""
     if isinstance(content, list):
-        text = '\n'.join(
-            str(part.get('text', '')) for part in content if isinstance(part, dict)
-        )
+        text = '\n'.join(str(part.get('text', '')) for part in content if isinstance(part, dict))
     else:
         text = '' if content is None else str(content)
     detail = _clip(text)

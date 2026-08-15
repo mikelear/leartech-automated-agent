@@ -909,6 +909,7 @@ def _checkpoint_wip_on_crash(*, cwd: Path, branch: str) -> None:
     good as what got pushed). No-op on a clean tree; every failure is swallowed —
     we are already in the crash path and must not mask the original exception.
     """
+
     def _run(argv: list[str]) -> subprocess.CompletedProcess[str]:
         return subprocess.run(argv, capture_output=True, text=True, check=False, timeout=60, cwd=str(cwd))
 
@@ -1531,9 +1532,8 @@ async def run_initiative(
                                 block.content,
                                 is_error=bool(getattr(block, 'is_error', False)),
                             )
-                            if (
-                                block.tool_use_id in wait_for_terminal_tool_ids
-                                and _tool_result_reports_all_passed(block)
+                            if block.tool_use_id in wait_for_terminal_tool_ids and _tool_result_reports_all_passed(
+                                block
                             ):
                                 terminal_all_passed_seen = True
             elif isinstance(message, ResultMessage):
