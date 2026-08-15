@@ -21,17 +21,14 @@ def _multi_gcp_config() -> CliConfig:
     clusters = {
         'gcp-staging': ClusterConfig(
             name='gcp-staging',
-            orch_url='https://orch-staging.example.com',
             agent_url='https://agent-staging.example.com',
         ),
         'gcp-prod': ClusterConfig(
             name='gcp-prod',
-            orch_url='https://orch-prod.example.com',
             agent_url='https://agent-prod.example.com',
         ),
         'az-staging': ClusterConfig(
             name='az-staging',
-            orch_url='https://orch-az.example.com',
             agent_url='https://agent-az.example.com',
         ),
     }
@@ -66,10 +63,9 @@ def test_exact_match_wins_over_prefix_match() -> None:
     name is *not* itself a configured key).
     """
     clusters = {
-        'gcp': ClusterConfig(name='gcp', orch_url='https://o.example.com', agent_url='https://a.example.com'),
+        'gcp': ClusterConfig(name='gcp', agent_url='https://a.example.com'),
         'gcp-staging': ClusterConfig(
             name='gcp-staging',
-            orch_url='https://o-staging.example.com',
             agent_url='https://a-staging.example.com',
         ),
     }
