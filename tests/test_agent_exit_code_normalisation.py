@@ -223,8 +223,24 @@ def _enter_common_patches(
     tool-result prose scrape was removed (it mis-captured cited PRs / the
     targetPR wrong-PR bug). So the "PR opened → downgrade" cases set
     ``resolved_pr`` to a real number; the "no PR" cases leave it None.
+
+    IMPORTANT (containment fix #3 in sanitise-subprocess-identity):
+    explicitly REMOVE the AgentRun identity env vars from ``os.environ``
+    for the duration of every test in this file. ``clear=False`` preserves
+    the pod env by design (so ``ANTHROPIC_API_KEY`` and friends are inherited),
+    but that same defence let the pod's real ``AGENT_RUN_NAME`` /
+    ``AGENT_RUN_NAMESPACE`` / ``LEARTECH_AGENTRUN_STATUS`` slip into every
+    test — and any test hitting the ``_backstop_target_pr`` code path then
+    issued a live k8s patch against the AgentRun this pytest is running
+    inside (the 12:48:43 incident). Belt-and-braces on top of the
+    ``gate.identity.capture_and_strip`` guard: the strip protects
+    subprocesses; this scrub protects the pytest process itself.
+    Mirrors how :file:`tests/test_agent_test_mode.py` already defends
+    every case with ``monkeypatch.delenv('LEARTECH_RUN_ID')``.
     """
     stack.enter_context(patch.dict(os.environ, {'ANTHROPIC_API_KEY': 'test'}, clear=False))
+    for _var in ('AGENT_RUN_NAME', 'AGENT_RUN_NAMESPACE', 'LEARTECH_AGENTRUN_STATUS', 'LEARTECH_RUN_ID'):
+        os.environ.pop(_var, None)
     stack.enter_context(patch('gate.agent.initiative.load_initiative', return_value=_FakeInitiative()))
     stack.enter_context(patch('gate.agent.initiative.query', _make_query_yielding(messages, raise_at_end=raise_at_end)))
     stack.enter_context(patch('gate.agent.initiative._resolve_pr_number', return_value=resolved_pr))

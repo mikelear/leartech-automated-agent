@@ -33,7 +33,7 @@ from claude_agent_sdk.types import (
 from app.db import dispose_engine as _dispose_engine
 from app.db import init_engine as _init_engine
 from app.db import is_db_enabled
-from gate import obslog
+from gate import identity, obslog
 from gate.agent import agentrun_client
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.commands import (
@@ -220,10 +220,15 @@ async def _resolve_target_pr(qualified_repo: str, branch: str) -> int | None:
 
     Never raises: a status-read failure degrades to the ``gh`` fallback, and a
     fallback failure yields ``None`` (a genuine "no PR" the fail-fast then catches).
+
+    Reads identity via :mod:`gate.identity` so this resolver keeps working
+    against the CAPTURED handle after :func:`run_initiative` strips those vars
+    from :data:`os.environ` — the strip is for subprocesses, not for the
+    in-process code that legitimately needs the handle.
     """
-    run_name = (os.environ.get('AGENT_RUN_NAME') or '').strip()
-    namespace = (os.environ.get('AGENT_RUN_NAMESPACE') or '').strip()
-    status_enabled = (os.environ.get('LEARTECH_AGENTRUN_STATUS') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    run_name = identity.get_run_name()
+    namespace = identity.get_namespace()
+    status_enabled = identity.is_status_enabled()
 
     # 1. Authoritative: the value open_pr (MCP) wrote onto the CRD status.
     if run_name and namespace and status_enabled:
@@ -281,11 +286,21 @@ async def _backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: in
     Fully best-effort: only runs as a real AgentRun; does nothing (no patch, no
     event) when open_pr already set the field or when no PR was resolved; and any
     failure here is swallowed so it never changes the run's exit code.
+
+    Identity reads go through :mod:`gate.identity` — that means (a) a
+    subprocess (e.g. this repo's own pytest suite invoked via the SDK's Bash
+    tool) whose stripped env carries NO identity gets a clean skip via the
+    fresh-module-state fallback, and (b) the parent agent process keeps the
+    handle it captured at run entry. Fix #1 in the sanitise-subprocess-identity
+    initiative — the "existing guard skips entirely" comment now genuinely
+    holds for subprocesses instead of being a hoped-for property.
     """
-    run_name = (os.environ.get('AGENT_RUN_NAME') or '').strip()
-    namespace = (os.environ.get('AGENT_RUN_NAMESPACE') or '').strip()
-    status_enabled = (os.environ.get('LEARTECH_AGENTRUN_STATUS') or '').strip().lower() in ('1', 'true', 'yes', 'on')
+    run_name = identity.get_run_name()
+    namespace = identity.get_namespace()
+    status_enabled = identity.is_status_enabled()
     # Local/dev runs (no AgentRun identity or status reporting disabled) → skip entirely.
+    # Post-strip a Bash subprocess (pytest included) sees NO identity, so this
+    # branch is what fires instead of a live k8s patch into someone else's run.
     if not run_name or not namespace or not status_enabled:
         return
     try:
@@ -302,17 +317,30 @@ async def _backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: in
         # LOUD, deliberate forensic signal: greppable in Loki as
         # event="targetpr_backstop_fired". A downstream forensic / scrum-master agent
         # harvests these to spot plans/agents that skip the open_pr tool (plan health).
-        obslog.emit(
-            'WARN',
-            'targetpr_backstop_fired',
-            'runtime recovered targetPR — agent opened a PR without calling open_pr',
-            logger='agent.initiative',
-            run_id=run_name,
-            repo=qualified_repo,
-            branch=branch,
-            targetPR=pr_number,
-            reason='open_pr_not_called',
-        )
+        #
+        # Guarded by a nested try so an obslog transport failure (the incident
+        # this whole initiative fixes — the 12:48:43 pytest traceback where
+        # emit raised and the signal never reached Loki) does NOT crash the
+        # backstop path. Fix #4 in sanitise-subprocess-identity: obslog.emit
+        # is now internally failure-proof too, but the belt-and-braces is
+        # cheap and specific.
+        try:
+            obslog.emit(
+                'WARN',
+                'targetpr_backstop_fired',
+                'runtime recovered targetPR — agent opened a PR without calling open_pr',
+                logger='agent.initiative',
+                run_id=run_name,
+                repo=qualified_repo,
+                branch=branch,
+                targetPR=pr_number,
+                reason='open_pr_not_called',
+            )
+        except Exception as exc:  # noqa: BLE001 — a failed signal must not disappear the backstop
+            logger.warning(
+                'targetPR backstop obslog signal failed (patch already applied): %s',
+                exc,
+            )
     except Exception as exc:  # noqa: BLE001 — backstop must never change the run's exit code
         logger.warning('targetPR backstop failed (non-fatal): %s', exc)
 
@@ -380,7 +408,8 @@ def _fail_fast_if_expected_pr_missing(
         # A PR exists on the branch — the PR-backed step did its job.
         return exit_code
     # PR expected + confidently no PR on the branch → fail the run.
-    run_name = (os.environ.get('AGENT_RUN_NAME') or '').strip() or None
+    # Identity read via the snapshot — see :mod:`gate.identity` for why.
+    run_name = identity.get_run_name() or None
     # LOUD, deliberate signal: greppable in Loki as event="expected_pr_missing".
     obslog.emit(
         'ERROR',
@@ -995,6 +1024,76 @@ def _build_resume_preamble(*, branch: str, base: str, pr_number: int | None) -> 
     )
 
 
+# The agent-runtime repo: the ONE consumer whose test suite exercises
+# AgentRun-patching code, because it IS the AgentRun runtime. Any run whose
+# ``initiative.primary.qualified_repo`` matches this triggers the
+# ``self_referential_repo`` signpost so incident triage instantly spots the
+# self-reference. Matched case-insensitive and by suffix so an unqualified
+# ``leartech-automated-agent`` or a rehomed ``someorg/leartech-automated-agent``
+# both fire — no false negatives.
+_AGENT_RUNTIME_REPO_SUFFIX = 'leartech-automated-agent'
+
+# Module-level flag so the signpost fires AT MOST ONCE per Python process
+# regardless of how many times ``run_initiative`` is invoked (e.g. within a
+# unit-test session that runs many initiatives). One line per run is enough
+# for a signpost; more would be noise.
+_self_referential_signpost_emitted: bool = False
+
+
+def _emit_self_referential_repo_signpost_if_applicable(initiative: object) -> None:
+    """Emit ``self_referential_repo`` WARN once when the target repo is THIS repo.
+
+    Fix #2 in sanitise-subprocess-identity. This is the one repo whose test
+    suite implements — and therefore exercises — the code that patches
+    AgentRun status. Anyone debugging a "run status looks wrong" symptom
+    on this repo needs to know that a stray k8s write inside a test IS a
+    hazard even when the code looks innocent. The line carries:
+
+    - ``event="self_referential_repo"`` (stable, greppable) so a single
+      Loki query finds every such run;
+    - the ambient run fields (``run_id`` + ``namespace``) via obslog's own
+      ``_context()`` so operators can pivot from the signpost to the run;
+    - a message spelling out the diagnostic route (``managedFields`` →
+      audit log → user-agent), including the critical caveat that
+      ``kubectl logs`` is not sufficient because it dies with the pod.
+
+    Not a running commentary — one line per process. Duplicates would
+    drown the signal.
+    """
+    global _self_referential_signpost_emitted
+    if _self_referential_signpost_emitted:
+        return
+    try:
+        primary = getattr(initiative, 'primary', None)
+        repo = str(getattr(primary, 'qualified_repo', '') or '').strip().lower()
+    except Exception:  # noqa: BLE001 — signpost must never crash the run
+        return
+    if not repo or not repo.endswith(_AGENT_RUNTIME_REPO_SUFFIX):
+        return
+    _self_referential_signpost_emitted = True
+    obslog.emit(
+        'WARN',
+        'self_referential_repo',
+        (
+            'This run targets leartech-automated-agent — the ONE repo whose '
+            'test suite exercises code that patches AgentRun status. The '
+            'AgentRun identity has been stripped from subprocess env '
+            '(AGENT_RUN_NAME/NAMESPACE/STATUS), so a test running in a '
+            'Bash-tool subprocess CANNOT reach the live AgentRun; if run '
+            'status still looks wrong, that is a regression in this guard, '
+            'not a test-suite bug. To diagnose: inspect '
+            'AgentRun.metadata.managedFields to find the manager owning '
+            'status.phase, then cross-reference with the GKE audit log '
+            'for the ServiceAccount + user-agent that made the write. '
+            '`kubectl logs` is NOT sufficient — the responsible pod dies '
+            'with the run and its logs go with it.'
+        ),
+        logger='agent.initiative',
+        repo=str(getattr(primary, 'qualified_repo', '') or ''),
+        subprocess_env_stripped=True,
+    )
+
+
 async def run_initiative(
     initiative_path: Path,
     *,
@@ -1004,6 +1103,31 @@ async def run_initiative(
 ) -> RunSummary:
     """Drive a single initiative end-to-end. Returns a summary of the run."""
     initiative = load_initiative(initiative_path)
+
+    # ── SANITISE THE SUBPROCESS ENVIRONMENT ────────────────────────────────
+    # Fix #1 in sanitise-subprocess-identity. The AgentRun identity is needed
+    # ONLY by this process's own code (backstop patch, test-mode phase report,
+    # obslog correlation). Nothing this process shells out to — the SDK's
+    # Bash tool, ``uv run pytest`` from the gate suite, git, jx CLI, … —
+    # should ever see it. Capture into an in-memory snapshot, then strip
+    # ``AGENT_RUN_NAME`` + ``AGENT_RUN_NAMESPACE`` + ``LEARTECH_AGENTRUN_STATUS``
+    # from :data:`os.environ` so every downstream subprocess inherits an
+    # env that CANNOT reach the AgentRun CR. ``LEARTECH_RUN_ID`` is kept
+    # for Loki correlation — see :mod:`gate.identity`.
+    #
+    # Must fire BEFORE the test-mode short-circuit and the resume-detection
+    # git shells below — everything that could spawn a child needs the
+    # stripped env inherited from us.
+    identity.capture_and_strip()
+
+    # ── SELF-REFERENTIAL REPO SIGNPOST ─────────────────────────────────────
+    # Fix #2 in sanitise-subprocess-identity. This is the ONLY repo whose
+    # test suite exercises code that patches AgentRun status, because it
+    # IMPLEMENTS the AgentRun runtime. Emit one prominent WARN-level Loki
+    # line at the top of every run against this repo so anyone debugging
+    # the incident class (or its recurrence) can spot the self-reference
+    # without having to know it in advance.
+    _emit_self_referential_repo_signpost_if_applicable(initiative)
 
     # ── TEST-MODE short-circuit ────────────────────────────────────────────
     # A plan step may set ``initiative.testMode`` to skip the LLM/SDK loop
@@ -1070,7 +1194,12 @@ async def run_initiative(
     # turn fires. Unset on laptop runs (no router involved) → diagnostics
     # writes become no-ops, by design. We resolve this BEFORE the clone
     # so a clone failure can still attribute itself to the right run.
-    run_id_for_first_turn = os.environ.get('LEARTECH_RUN_ID') or None
+    #
+    # Read via :mod:`gate.identity` so the correlation id survives the
+    # capture_and_strip we ran at the top of this function — LEARTECH_RUN_ID
+    # is CAPTURED (not stripped), but going through the accessor keeps the
+    # code path consistent with every other identity read in this file.
+    run_id_for_first_turn = identity.get_run_id() or None
     db_engine_initialised = False
     if run_id_for_first_turn and is_db_enabled():
         _init_engine()
