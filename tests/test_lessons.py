@@ -113,3 +113,50 @@ def test_render_for_includes_titles_and_bodies() -> None:
     assert 'Calibrations from past runs' in block
     for lesson in relevant:
         assert lesson.title in block
+
+
+# ─── repo-tests-may-touch-k8s-api lesson (2026-08-15 incident) ───────────
+
+
+def test_repo_tests_may_touch_k8s_api_lesson_loads_and_validates() -> None:
+    """Frontmatter validates, applies to initiative_agent, status is encoded."""
+    lessons = load_all_lessons()
+    match = [lesson for lesson in lessons if lesson.id == 'repo-tests-may-touch-k8s-api']
+    assert len(match) == 1, 'expected exactly one repo-tests-may-touch-k8s-api lesson in the catalog'
+    lesson = match[0]
+    assert 'initiative_agent' in lesson.applies_to
+    assert lesson.status == 'encoded'
+    assert lesson.category == 'calibration'
+
+
+def test_repo_tests_may_touch_k8s_api_renders_for_initiative_agent() -> None:
+    """The lesson makes it through the filter → renderer for the initiative agent.
+
+    If a future edit flips the status back to `open` or drops
+    initiative_agent from applies_to, this test surfaces the regression
+    immediately — the warning would silently vanish from the prompt.
+    """
+    block = render_for('initiative_agent')
+    assert 'Calibrations from past runs' in block
+    # A recognisable phrase from the lesson body. If the wording drifts,
+    # update the probe deliberately — do not soften the assertion.
+    assert 'live AgentRun identity' in block
+    assert 'managedFields' in block, 'diagnostic ladder must reach the prompt intact'
+    assert 'load_incluster_config' in block, 'cheap-check probe must reach the prompt intact'
+
+
+def test_pre_push_validation_still_loads_after_amendment() -> None:
+    """Amending pre-push-validation.md to cross-reference the new lesson must
+    not break its frontmatter or body — it's the entry point that carries the
+    warning to the moment of risk."""
+    lessons = load_all_lessons()
+    match = [lesson for lesson in lessons if lesson.id == 'pre-push-validation']
+    assert len(match) == 1
+    lesson = match[0]
+    assert lesson.status == 'encoded'
+    # The pre-push mandate itself must still be present, not weakened by the
+    # cross-reference edit.
+    assert 'do NOT push' in lesson.body
+    # And the cross-reference to the new lesson must be in place at the point
+    # tests are discussed — that's the whole point of the amendment.
+    assert 'repo-tests-may-touch-k8s-api' in lesson.body
