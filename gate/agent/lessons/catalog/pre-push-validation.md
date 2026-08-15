@@ -25,6 +25,15 @@ command fails, **do NOT push** — fix the issue and retry. If a toolchain is
 missing (`command -v` fails), note it in the sticky comment as
 "gate `<task>` couldn't be pre-validated (no `<tool>` in image)" and proceed.
 
+> ⚠️ **Before invoking any test suite step below** (`pytest`, `go test`,
+> `npm test`, `cargo test`), read the `repo-tests-may-touch-k8s-api` lesson.
+> Your pod carries live AgentRun identity and real credentials — a test that
+> constructs a real k8s client can act on live cluster state including your
+> own AgentRun. That lesson tells you the cheap checks to run first and the
+> diagnostic ladder to use if something looks foreign-written afterwards.
+> The pre-push mandate itself is unchanged: run the gates locally before
+> pushing, but do so with the hazard in view.
+
 Do NOT try to install missing tools — that is a separate concern (extending
 the base image). The lesson's goal is fast-fail on errors detectable locally,
 not 100% gate parity.
