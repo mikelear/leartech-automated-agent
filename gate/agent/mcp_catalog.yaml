@@ -21,29 +21,18 @@
 # and reference it in the right role's `mcps` list. No agent code changes.
 
 mcp_servers:
-  # Remote — served by the Go `leartech-mcp-servers/jx3_flow` deployment.
-  # Exposes the aggregate PR-check surface previously reimplemented in-process
-  # by the retired `gate.mcp_servers.pipeline_server` shim
-  # (list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass).
-  #
-  # The `${LEARTECH_PLATFORM_MCPS_URL:-<default>}` shape mirrors the sibling
-  # `leartech-tekton` + `leartech-pr-context` entries below/above — the chart
-  # sets LEARTECH_PLATFORM_MCPS_URL per-cluster so each cluster's copy
-  # resolves to its cluster-local platform-mcps deployment via local DNS.
-  # The fallback is a dev-only `http://localhost:8899` (matches the local
-  # `go run ./cmd/server` port) — NO hardcoded `*.jx.leartech.com` cluster URL
-  # in source (leartech convention); the chart always injects the env var in
-  # every real cluster deployment.
+  # These `url:` values are schema-only — gate/mcp_servers/remote.py builds live
+  # connections from LEARTECH_MCP_URL and discovers mounts at runtime. The
+  # localhost default is for local dev (Go server's own default port); the
+  # AgentType CRDs set LEARTECH_MCP_URL in every cluster.
   leartech-jx3-flow:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/jx3_flow/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/jx3_flow/sse
     description: |
-      PR-check status across both clusters — list_pr_checks,
-      wait_for_terminal, wait_for_first_failure_or_all_pass. Served
-      remotely by the Go `leartech-mcp-servers/jx3_flow` deployment; the
-      former in-process SDK shim (`gate.mcp_servers.pipeline_server`) has
-      been deleted. New features for the pipeline MCP land in the
-      leartech-mcp-servers repo.
+      PR-check status — list_pr_checks, wait_for_terminal,
+      wait_for_first_failure_or_all_pass. Each result carries a `coverage`
+      block naming which clusters were actually observed; an aggregate verdict
+      is not an estate-wide claim. Served by leartech-mcp-servers (Go).
 
   leartech-criteria:
     type: sdk
@@ -52,15 +41,11 @@ mcp_servers:
 
   leartech-pr-context:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/pr-context/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/pr-context/sse
     description: |
-      PR metadata + diff + changed files via platform-mcps — a long-running
-      HTTP/SSE server hosted in each cluster's platform-mcps deployment.
-      `LEARTECH_PLATFORM_MCPS_URL` env var lets the chart point at the
-      cluster-local URL; the source fallback is a dev-only localhost (no
-      hardcoded cluster URL). The previous in-process SDK builder shipped with
-      this repo has been deleted; new features for the pr-context MCP land in
-      the platform-mcps repo.
+      PR metadata + diff + changed files. Served by leartech-mcp-servers (Go);
+      new features for the pr-context MCP land in the
+      leartech-mcp-servers repo.
 
   leartech-test-artifacts:
     type: sdk
@@ -69,34 +54,30 @@ mcp_servers:
 
   leartech-tekton:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/tekton/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/tekton/sse
     description: |
-      Step-aware Tekton PipelineRun inspection served remotely. Surfaces
-      WHICH STEP failed (git-clone vs ruff vs pytest), tails per-step logs,
-      and cancels superseded runs on force-push. The former in-process SDK
-      builder (`gate.mcp_servers.tekton`) has been deleted; the Go
-      `leartech-mcp-servers/tekton` deployment now exposes these
-      tools (list_pipelineruns_for_pr, step_status, step_logs,
-      cancel_pipelinerun, cancel_superseded_for_pr, wait_first_failure, release_pipeline_status
-      (the release-verify `release-passed` check), diagnose_pr_failures.
-      `LEARTECH_PLATFORM_MCPS_URL` env var lets the chart point at the
-      cluster-local URL; the source fallback is a dev-only localhost (no
-      hardcoded cluster URL).
+      Step-aware Tekton PipelineRun inspection. Surfaces WHICH STEP failed
+      (git-clone vs ruff vs pytest), tails per-step logs, and cancels
+      superseded runs on force-push: list_pipelineruns_for_pr, step_status,
+      step_logs, cancel_pipelinerun, cancel_superseded_for_pr,
+      wait_first_failure, release_pipeline_status (the release-verify
+      `release-passed` check), diagnose_pr_failures. Served by
+      leartech-mcp-servers (Go).
 
   leartech-repo-factory:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/repo_factory/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/repo_factory/sse
     description: |
       Server-side deterministic repo-factory ops (infra agent): create_repo
       (owner PAT, rejects bot tokens, invites the 6 bots), register_source_config
       (Contents API, idempotent minimal-diff), scaffold (Git Data API, literal
       rename — no LLM grep). The high-privilege credential (GITHUB_OWNER_ADMIN_PAT)
-      lives in the platform-mcps host, NOT the agent. New features land in the
-      leartech-mcp-servers repo (internal/repofactory).
+      lives in leartech-mcp-servers, NOT the agent. New features land in that
+      repo (internal/repofactory).
 
   leartech-jx-release:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/jx_release/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/jx_release/sse
     description: |
       JX3 release-check primitives the deterministic release-verify checks call
       directly (via the stdio bridge, no LLM): release_status (did the release
@@ -109,7 +90,7 @@ mcp_servers:
 
   leartech-k8s:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/k8s/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/k8s/sse
     description: |
       In-cluster Kubernetes read surface — no kubectl needed on the agent side.
       Exposes deploy_health (Deployment healthy iff >=1 available replica +
@@ -149,7 +130,7 @@ mcp_servers:
   # leartech-mcp-servers `platform_state` deployment.
   leartech-platform-state:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/platform_state/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/platform_state/sse
     description: |
       Read-only view of live platform state — `list_plans`, `list_runs`,
       `get_plan_state`, `deploy_health`. Consumed by the BA agent to
@@ -161,7 +142,7 @@ mcp_servers:
   # leartech-mcp-servers `control_plane` deployment.
   leartech-control-plane:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/control_plane/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/control_plane/sse
     description: |
       Control-plane write surface — `create_plan` and other landscape-level
       authoring tools. The BA agent authors REMEDIATION Plans here
@@ -181,7 +162,7 @@ mcp_servers:
   # `fire_initiative(initiative_body=yaml_body)`.
   leartech-agent-api:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-http://localhost:8899}/mcp/agent_api/sse
+    url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/agent_api/sse
     description: |
       Agent/orchestrator API surface. Authoring surface for BA:
       `amend_plan` (mutate an in-flight plan when re-authoring is safer

@@ -64,14 +64,14 @@ def test_get_role_unknown_raises_keyerror() -> None:
 def test_get_mcp_returns_typed_config() -> None:
     # leartech-criteria is a stable in-process SDK MCP; leartech-jx3-flow (the
     # remote replacement for the retired pipeline_server shim) is exercised by
-    # test_platform_mcps_entries_load_as_http_sse below.
+    # test_remote_mcp_entries_load_as_http_sse below.
     mcp = get_mcp('leartech-criteria')
     assert isinstance(mcp, McpServer)
     assert mcp.type == 'sdk'
     assert mcp.builder == 'gate.mcp_servers.criteria_server:build_criteria_server'
 
 
-def test_platform_mcps_entries_load_as_http_sse() -> None:
+def test_remote_mcp_entries_load_as_http_sse() -> None:
     """leartech-jx3-flow / leartech-tekton / leartech-pr-context are http_sse-hosted
     via platform-mcps.
 
@@ -92,7 +92,7 @@ def test_platform_mcps_entries_load_as_http_sse() -> None:
         assert mcp.type == 'http_sse', f'{name}: expected http_sse, got {mcp.type}'
         assert mcp.url is not None, f'{name}: http_sse MCP must declare url'
         assert mcp.url.endswith(sse_suffix), f'{name}: url {mcp.url!r} does not end with {sse_suffix!r}'
-        # The url is env-templated `${LEARTECH_PLATFORM_MCPS_URL:-<dev-fallback>}`
+        # The url is env-templated `${LEARTECH_MCP_URL:-<dev-fallback>}`
         # and the loader resolves it. With the env var unset (test/dev), it must
         # resolve to the dev-only localhost fallback — NO hardcoded
         # `*.jx.leartech.com` cluster URL in source (leartech convention;
@@ -104,25 +104,19 @@ def test_platform_mcps_entries_load_as_http_sse() -> None:
         assert 'localhost' in mcp.url, f'{name}: dev fallback should be localhost — got {mcp.url!r}'
 
 
-def test_platform_mcps_url_overridable_via_env_var(
+def test_mcp_url_overridable_via_env_var(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """`LEARTECH_PLATFORM_MCPS_URL` env var rewrites the catalog default URL.
-
-    The chart sets this per-cluster so the same catalog YAML routes to the
-    cluster-local platform-mcps deployment instead of going via the staging
-    URL. Verifies the `${VAR:-default}` POSIX-shell substitution actually
-    resolves at load time, not at lookup.
-    """
-    monkeypatch.setenv('LEARTECH_PLATFORM_MCPS_URL', 'https://platform-mcps.internal.test')
+    """`LEARTECH_MCP_URL` rewrites the catalog default URL at load time."""
+    monkeypatch.setenv('LEARTECH_MCP_URL', 'https://mcp-servers.internal.test')
 
     # Write a minimal catalog that uses the same env-var pattern as production.
     catalog_yaml = """
 mcp_servers:
   leartech-tekton:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://default.example.com}/mcp/tekton/sse
+    url: ${LEARTECH_MCP_URL:-https://default.example.com}/mcp/tekton/sse
     description: test
 roles:
   initiative_agent:
@@ -137,7 +131,7 @@ roles:
         catalog = load_catalog(path)
     finally:
         load_catalog.cache_clear()
-    assert catalog.mcp_servers['leartech-tekton'].url == 'https://platform-mcps.internal.test/mcp/tekton/sse'
+    assert catalog.mcp_servers['leartech-tekton'].url == 'https://mcp-servers.internal.test/mcp/tekton/sse'
 
 
 def test_platform_mcps_url_falls_back_to_default_when_env_unset(
@@ -145,13 +139,13 @@ def test_platform_mcps_url_falls_back_to_default_when_env_unset(
     tmp_path: Path,
 ) -> None:
     """With env var unset, `${VAR:-default}` resolves to the literal default."""
-    monkeypatch.delenv('LEARTECH_PLATFORM_MCPS_URL', raising=False)
+    monkeypatch.delenv('LEARTECH_MCP_URL', raising=False)
 
     catalog_yaml = """
 mcp_servers:
   leartech-tekton:
     type: http_sse
-    url: ${LEARTECH_PLATFORM_MCPS_URL:-https://fallback.example.com}/mcp/tekton/sse
+    url: ${LEARTECH_MCP_URL:-https://fallback.example.com}/mcp/tekton/sse
     description: test
 roles:
   initiative_agent:
