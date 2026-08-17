@@ -34,7 +34,7 @@ from app.db import dispose_engine as _dispose_engine
 from app.db import init_engine as _init_engine
 from app.db import is_db_enabled
 from gate import identity, obslog
-from gate.agent import agentrun_client
+from gate.agent import agentrun_client, pr_handoff
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.commands import (
     CommandSink,
@@ -55,6 +55,7 @@ from gate.agent.diagnostics import (
 from gate.agent.initiative_prompt import render_initiative_system_prompt
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
+from gate.agent.release_checks import call_mcp_tool
 from gate.agent.run_driver import mark_first_turn, update_run_progress
 from gate.agent.test_mode import (
     maybe_open_pr_args_for_initiative,
@@ -1448,6 +1449,38 @@ async def run_initiative(
     last_turn_count = 0
     last_cost: float | None = None
     crash_sticky_body: str | None = None
+
+    # PR-checkpoint state. Dict rather than closure locals so the per-turn hook
+    # can update it without `nonlocal` gymnastics in this long function.
+    # `pr` is cached once resolved: status.targetPR is written by the open_pr MCP
+    # tool and does not change for the life of the run.
+    handoff_state: dict[str, int] = {'turn': 0, 'pr': 0}
+
+    async def _handoff_checkpoint(*, turns: int, cost_usd: float | None, last_tool_call: str | None) -> None:
+        """Write a durable checkpoint to the PR. Never raises — a failed
+        checkpoint must not affect the run."""
+        try:
+            if handoff_state['pr'] <= 0:
+                raw = await agentrun_client.get_target_pr(identity.get_run_name(), identity.get_namespace())
+                if raw and str(raw).strip().lstrip('#').isdigit():
+                    handoff_state['pr'] = int(str(raw).strip().lstrip('#'))
+            if handoff_state['pr'] <= 0:
+                return
+            await pr_handoff.post_handoff(
+                base_url=os.environ.get('LEARTECH_MCP_URL', '').rstrip('/'),
+                repo=primary.qualified_repo,
+                pr_number=handoff_state['pr'],
+                run_id=run_id_for_first_turn,
+                iteration=0,
+                turns=turns,
+                max_turns=max_turns,
+                cost_usd=cost_usd,
+                last_tool_call=last_tool_call,
+                tool_caller=call_mcp_tool,
+            )
+        except Exception as exc:  # noqa: BLE001 — observability must not break the run
+            logger.warning('PR checkpoint failed at turn %s: %s', turns, exc)
+
     # Initiative agent-fix-exit-code-after-pr-opened — distinguish the
     # operator-cancel path from the SDK-crash/max-turns path. The post-loop
     # normaliser preserves exit_code=2 when ``exit_via_cancel`` is set
@@ -1690,6 +1723,27 @@ async def run_initiative(
                         last_tool_call=current_turn_last_tool,
                     )
                 )
+                # Durable PR checkpoint. The in-memory/DB writeback above does
+                # not survive this pod: the AgentRun Job gets no DB DSN, so
+                # run_driver falls back to a process-local dict. A deadline kill
+                # or node move would otherwise leave the successor iteration with
+                # a branch and a PR but no record of where this one got to.
+                # Cadence is decided in pr_handoff; the MCP tool rewrites the
+                # comment only when its state digest changes, so a call that says
+                # nothing new costs one round-trip and no PR edit.
+                if pr_handoff.should_post(
+                    turns=last_turn_count,
+                    max_turns=max_turns,
+                    last_posted_turn=handoff_state['turn'],
+                ):
+                    handoff_state['turn'] = last_turn_count
+                    asyncio.create_task(
+                        _handoff_checkpoint(
+                            turns=last_turn_count,
+                            cost_usd=cost,
+                            last_tool_call=current_turn_last_tool,
+                        )
+                    )
                 current_turn_last_tool = None
                 # Layer 2 — bump the running turn counter + record a
                 # 'turn_end' decision row so the operator's reconstruction

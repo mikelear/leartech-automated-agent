@@ -190,6 +190,12 @@ async def _default_tool_caller(
     return (parsed if isinstance(parsed, dict) else {'result': parsed}), None
 
 
+# Public seam for other deterministic (no-LLM) callers of Go MCP tools — e.g.
+# gate/agent/pr_handoff.py's per-turn PR checkpoint. Same primitive, so there is
+# one implementation of token-mint + discovery + fresh-connection-per-op.
+call_mcp_tool = _default_tool_caller
+
+
 # ── input + endpoint resolution ────────────────────────────────────────────────
 def _resolve_clusters(inputs: dict[str, object]) -> tuple[str, ...]:
     """The requested cluster set — the ONE ``clusters`` list (no ``cluster`` alias)."""
