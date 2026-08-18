@@ -162,11 +162,8 @@ spec:
               exit 0
             fi
             JOB="renovate-after-agent-images-$(date +%s)"
-            SCOPE="mikelear/jx-build-cluster-gsm,mikelear/jx-build-cluster-akv"
-            echo "==> creating one-shot ${JOB} from cronjob/renovate, scoped to ${SCOPE}"
-            kubectl -n jx create job --from=cronjob/renovate "${JOB}" --dry-run=client -o yaml \
-              | kubectl set env --local -f - "RENOVATE_REPOSITORIES=${SCOPE}" -o yaml \
-              | kubectl -n jx apply -f - || \
+            echo "==> creating one-shot ${JOB} from cronjob/renovate-agent-images"
+            kubectl -n jx create job --from=cronjob/renovate-agent-images "${JOB}" || \
               echo "::WARN renovate trigger failed (non-fatal); the scheduled cron will pick up the bump"
           workingDir: /workspace/source
   podTemplate:
