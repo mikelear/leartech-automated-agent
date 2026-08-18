@@ -327,10 +327,11 @@ async def test_no_pr_blocked_fails_via_expected_pr_missing(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_blocked_verdict_records_reason_and_event(tmp_path: Path) -> None:
-    """The failure must be observable: a ``pr_opened_without_green`` failure reason
-    is written AND a structured ``initiative_verdict`` event is emitted (so the
-    controller / forensics read the verdict deterministically, not from prose)."""
+async def test_blocked_verdict_emits_structured_event(tmp_path: Path) -> None:
+    """The failure must be observable: a structured ``initiative_verdict`` event is
+    emitted, so the controller and forensics read the verdict deterministically
+    rather than from prose. (The paired DB failure-reason write is gone — it wrote
+    to a database the AgentRun runtime cannot reach.)"""
     messages = [
         *_adopt_pr_messages(),
         *_fail_fast_no_checks_then_blocked_messages(),
@@ -338,16 +339,10 @@ async def test_blocked_verdict_records_reason_and_event(tmp_path: Path) -> None:
     ]
     with ExitStack() as stack:
         _enter_common_patches(stack, messages, resolved_pr=1)
-        mock_reason = stack.enter_context(patch('gate.agent.initiative.write_failure_reason'))
         mock_obslog = stack.enter_context(patch('gate.agent.initiative.obslog'))
         summary = await run_initiative(**_build_run_kwargs(tmp_path), max_turns=200)
 
     assert summary.exit_code == 1
-    # A pr_opened_without_green failure reason was recorded.
-    reasons = [c.args[1] for c in mock_reason.call_args_list if len(c.args) >= 2]
-    assert any('pr_opened_without_green' in r for r in reasons), (
-        f'expected a pr_opened_without_green failure reason; got {reasons!r}'
-    )
     # A structured initiative_verdict event was emitted.
     verdict_events = [c for c in mock_obslog.emit.call_args_list if 'initiative_verdict' in c.args]
     assert verdict_events, f'expected an initiative_verdict obslog event; got {mock_obslog.emit.call_args_list!r}'

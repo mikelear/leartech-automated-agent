@@ -15,7 +15,7 @@ import logging
 import os
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 import click
@@ -30,33 +30,14 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from app.db import dispose_engine as _dispose_engine
-from app.db import init_engine as _init_engine
-from app.db import is_db_enabled
 from gate import identity, obslog
 from gate.agent import agentrun_client, pr_handoff
 from gate.agent.calibrations import load_jx3_calibration
-from gate.agent.commands import (
-    CommandSink,
-    drain_commands,
-    wait_while_paused,
-)
-from gate.agent.diagnostics import (
-    ConversationBuffer,
-    TerminateState,
-    bump_turn_counter,
-    classify_failure,
-    install_terminate_handler,
-    persist_conversation_snapshot,
-    record_decision,
-    uninstall_terminate_handler,
-    write_failure_reason,
-)
+from gate.agent.diagnostics import classify_failure
 from gate.agent.initiative_prompt import render_initiative_system_prompt
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
 from gate.agent.release_checks import call_mcp_tool
-from gate.agent.run_driver import mark_first_turn, update_run_progress
 from gate.agent.test_mode import (
     maybe_open_pr_args_for_initiative,
     parse_test_mode,
@@ -560,87 +541,6 @@ def _tool_result_reports_all_passed(block: ToolResultBlock) -> bool:
                     parts.append(value)
         text = ' '.join(parts)
     return 'all_passed' in text
-
-
-@dataclass
-class LoopControlState:
-    """Loop-side state for the bidirectional command queue.
-
-    Owned by the run-driver; mutated by the :class:`LoopCommandSink`
-    when the operator queues a command. The SDK loop reads
-    ``cancel_requested`` at each turn boundary and ``paused`` whenever
-    it would otherwise advance to the next SDK message.
-
-    Why a mutable dataclass rather than passing flags through closures:
-
-      The SDK loop runs as an ``async for`` over ``query()`` — it
-      cannot be cleanly interrupted from outside. The natural
-      injection point is at every ResultMessage (end of a model turn),
-      where we drain the command queue and consult these flags. The
-      dataclass gives the sink + the loop a shared, mutable record
-      they can both observe.
-
-    ``injected_guidance`` records text the operator wanted the model
-    to see. In v1 we surface this via the conversation snapshot table
-    (Layer 3 diagnostics) + decision log — operators can inspect what
-    was injected post-run, and a v1.5 migration to
-    :class:`claude_agent_sdk.ClaudeSDKClient` will deliver these into
-    the model's input stream in real time. The CommandSink protocol
-    means no wiring changes downstream when that lands.
-    """
-
-    cancel_requested: bool = False
-    cancel_reason: str | None = None
-    paused: bool = False
-    injected_guidance: list[str] = field(default_factory=list)
-
-
-@dataclass
-class LoopCommandSink:
-    """Concrete :class:`CommandSink` wired to the run-driver loop state.
-
-    Holds references to the :class:`LoopControlState` and the
-    :class:`ConversationBuffer` so each command handler can mutate the
-    right surface. Construction is trivial — the loop builds one of
-    these per run and passes it to :func:`drain_commands`.
-    """
-
-    state: LoopControlState
-    buffer: ConversationBuffer
-
-    def request_cancel(self, reason: str) -> None:
-        # First cancel wins — operators may queue several
-        # back-to-back; we keep the first reason so the failure
-        # column attribution is stable.
-        if not self.state.cancel_requested:
-            self.state.cancel_requested = True
-            self.state.cancel_reason = reason
-
-    def set_pause(self, paused: bool) -> None:
-        self.state.paused = paused
-
-    def inject_user_message(self, text: str) -> None:
-        # Two side-effects in one helper:
-        #   1. Buffer the text for the loop to surface on the next
-        #      poll (v1.5 will pump these into ClaudeSDKClient.query).
-        #   2. Record the synthetic UserMessage in the conversation
-        #      buffer so the snapshot table preserves what the
-        #      operator said for post-run forensics.
-        self.state.injected_guidance.append(text)
-        self.buffer.append(
-            {
-                'role': 'user',
-                'class': 'OperatorInjectedMessage',
-                'content': text,
-                'extras': {'source': 'inject_guidance'},
-            }
-        )
-
-
-# Sanity check: ensure LoopCommandSink actually satisfies the Protocol
-# at type-check time. mypy will catch a missing method here before any
-# runtime invocation.
-_loop_sink_satisfies_protocol: type[CommandSink] = LoopCommandSink
 
 
 def _default_repo_root(repo_name: str) -> Path:
@@ -1201,11 +1101,6 @@ async def run_initiative(
     # is CAPTURED (not stripped), but going through the accessor keeps the
     # code path consistent with every other identity read in this file.
     run_id_for_first_turn = identity.get_run_id() or None
-    db_engine_initialised = False
-    if run_id_for_first_turn and is_db_enabled():
-        _init_engine()
-        db_engine_initialised = True
-
     if not cwd.exists():
         # Cluster mode: the consumer repo isn't pre-mounted, so clone it from GitHub
         # on demand. We use direct `git clone` over HTTPS (with GH_TOKEN injected
@@ -1219,13 +1114,6 @@ async def run_initiative(
             # Layer 1 — Persist the classified clone failure to
             # ``initiative_runs.error`` before exiting so the operator
             # has the reason in the DB without pod-log archaeology.
-            if clone_reason is not None:
-                await write_failure_reason(run_id_for_first_turn, clone_reason)
-            if db_engine_initialised:
-                try:
-                    await _dispose_engine()
-                except Exception as exc:  # noqa: BLE001
-                    click.echo(f'  (db engine dispose failed: {exc})', err=True)
             return RunSummary(exit_code=clone_exit)
 
     # Compose: JX3 platform calibration (static, shipped in wheel) → encoded
@@ -1397,53 +1285,12 @@ async def run_initiative(
     # NOTE: ``run_id_for_first_turn`` + ``db_engine_initialised`` are
     # already resolved above the clone block — they need to be available
     # so a clone failure can attribute itself to the run via Layer 1.
-    first_turn_recorded = False
-
-    # Layer 2/3/4 — install the SIGTERM/atexit handler with a fresh
-    # ``TerminateState`` keyed on this run. The handler reads from the
-    # state at fire time so we can mutate ``last_turn_count`` /
-    # ``buffer.messages`` throughout the loop and the snapshot is always
-    # current.
-    terminate_state = TerminateState(
-        run_id=run_id_for_first_turn,
-        max_turns=max_turns,
-    )
-    install_terminate_handler(terminate_state)
-    conversation_buffer = terminate_state.buffer
-
     # Bidirectional command queue (initiative
     # agent-add-command-queue-with-injection). Operator-issued commands
     # land in ``agent_run_commands`` rows; the SDK loop drains them at
     # each turn boundary and applies the sink's primitives. DB-less
     # mode no-ops the drain — laptop runs see zero command-queue
     # overhead per turn.
-    loop_state = LoopControlState()
-    command_sink = LoopCommandSink(state=loop_state, buffer=conversation_buffer)
-
-    async def _drain_then_check_cancel() -> bool:
-        """Drain pending commands, returning True iff cancel was requested.
-
-        Wraps the common turn-boundary work into one helper so the
-        message-loop body stays readable. The cancel check happens
-        AFTER the drain so a cancel queued in the same batch as
-        other commands is observed in the same poll.
-        """
-        await drain_commands(run_id_for_first_turn, command_sink)
-        if loop_state.paused and not loop_state.cancel_requested:
-            click.echo(
-                click.style(
-                    '\n  ⏸ paused by operator command — waiting for resume',
-                    fg='yellow',
-                ),
-                err=True,
-            )
-            await wait_while_paused(
-                run_id_for_first_turn,
-                command_sink,
-                is_paused=lambda: loop_state.paused and not loop_state.cancel_requested,
-            )
-            click.echo(click.style('  ▶ resumed', fg='yellow'), err=True)
-        return loop_state.cancel_requested
 
     exit_code = 0
     last_turn_count = 0
@@ -1530,107 +1377,8 @@ async def run_initiative(
     # read-only orphan-PR classifier at end-of-run.
     pr_emitted: int | None = resume_context.pr_number if resume_active else None
 
-    async def _record_first_turn_once() -> None:
-        """V5 D2.2 hook — record `started_executing_at` on the first SDK message.
-
-        Fires on the **first iteration of the SDK message loop**, before any
-        message-type branching. The earlier wire-up gated this on the first
-        ``AssistantMessage``; that's the agent's first *reply* but it isn't
-        the only path through the loop's first iteration. A run that
-        receives ``ResultMessage`` or ``SystemMessage`` first — even
-        transiently — would fire the per-turn ``update_run_progress`` hook
-        WITHOUT this writer having run first, leaving ``started_executing_at``
-        NULL while ``turns`` / ``cost_usd`` advance. That's the production
-        regression observed in run a9699b453342 (2026-06-12). Moving the
-        call out of the AssistantMessage branch guarantees the writer fires
-        before ANY per-turn writeback can.
-
-        Idempotency is the contract — the in-process ``first_turn_recorded``
-        flag short-circuits repeat calls and ``mark_first_turn``'s SQL guard
-        (``WHERE started_executing_at IS NULL``) makes the DB write
-        idempotent even across racing replicas.
-
-        Tolerates every failure mode: missing run_id, no DSN, DB
-        unreachable. The SDK loop is the primary mission and must not be
-        aborted by an observability column failing to populate.
-
-        Observability: logs at WARN with the run_id when the writer raises.
-        Without this, a silently-failing writer (the original symptom of
-        the bug above) leaves operators with no signal beyond the eventual
-        NULL column — which is exactly how the regression went unnoticed
-        for so long. Logging at WARN so a log-aggregation query
-        (``level:WARN message:"started_executing_at"``) surfaces the next
-        regression within seconds of it landing.
-        """
-        nonlocal first_turn_recorded
-        if first_turn_recorded or not run_id_for_first_turn:
-            return
-        first_turn_recorded = True
-        try:
-            wrote = await mark_first_turn(run_id_for_first_turn)
-        except Exception as exc:  # noqa: BLE001 — observability hook must not block the loop
-            # WARN-level logger record so log-aggregation pipelines surface
-            # the failure. The historical ``click.echo`` path went to stderr
-            # but not through the logging level system, so structured queries
-            # like ``level:WARN`` missed it. Keep an echo to stderr too —
-            # it's the laptop-CLI human-readable signal — but ensure the
-            # WARN record exists as the durable observability surface.
-            logger.warning(
-                'started_executing_at write failed for run %s: %s',
-                run_id_for_first_turn,
-                exc,
-            )
-            click.echo(
-                click.style(
-                    f'  (started_executing_at write failed for run {run_id_for_first_turn}: {exc})',
-                    fg='yellow',
-                ),
-                err=True,
-            )
-            return
-        if not wrote:
-            # mark_first_turn returns False without raising when:
-            #   - the in-memory record is absent AND the DB UPDATE matched
-            #     0 rows (row missing, or column already non-NULL)
-            #   - DB is disabled AND there's no in-memory record
-            # On a real cluster run the row exists and the column is NULL,
-            # so a False return here signals something is amiss
-            # (e.g. wrong run_id env, schema drift, transient DB read of an
-            # uncommitted row). Surface at WARN so the next regression
-            # shows up in logs — historically this path was completely
-            # silent.
-            logger.warning(
-                'started_executing_at first_turn write returned False for run %s '
-                '(row missing, column already set, or DB disabled with no in-memory record)',
-                run_id_for_first_turn,
-            )
-        else:
-            logger.info(
-                'started_executing_at first_turn write succeeded for run %s',
-                run_id_for_first_turn,
-            )
-
     try:
         async for message in query(prompt=user_prompt, options=options):
-            # Layer 3 — buffer EVERY SDK message so the snapshot table can
-            # be reconstructed on terminal (success, failure, or SIGTERM).
-            # Normalisation happens inside ConversationBuffer.append.
-            conversation_buffer.append(message)
-
-            # V5 D2.2 — record ``started_executing_at`` BEFORE any
-            # message-type branching. The earlier wire-up nested this
-            # inside ``if isinstance(message, AssistantMessage):`` which
-            # works for the common path (agent emits AssistantMessage
-            # before ResultMessage) but leaves a regression hole if any
-            # other message type arrives first. The per-turn
-            # ``update_run_progress`` writeback fires on
-            # ``ResultMessage`` — by hoisting this call above the
-            # message-type checks we guarantee the first-turn timestamp
-            # lands BEFORE any per-turn snapshot can write.
-            # Idempotency is enforced by the ``first_turn_recorded`` flag
-            # inside the helper, so calling it on every iteration is
-            # effectively free after the first one.
-            await _record_first_turn_once()
 
             if isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -1667,12 +1415,6 @@ async def run_initiative(
                         # the operator can read the agent's turn-by-turn
                         # trajectory from the DB. ``payload`` carries the
                         # tool input so the row is self-contained.
-                        await record_decision(
-                            run_id_for_first_turn,
-                            'tool_call',
-                            f'{block.name}',
-                            payload={'tool': block.name, 'input': block.input},
-                        )
                     elif isinstance(block, ThinkingBlock):
                         pass
             elif isinstance(message, UserMessage):
@@ -1700,37 +1442,15 @@ async def run_initiative(
                                 terminal_all_passed_seen = True
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
-                terminate_state.last_turn_count = last_turn_count
-                usage = message.usage or {}
                 cost = message.total_cost_usd if message.total_cost_usd is not None else 0.0
                 last_cost = cost
-                # Per-turn writeback (initiative
-                # agent-add-per-turn-writeback). Fire-and-forget via
-                # ``asyncio.create_task`` so a slow DB round-trip never
-                # stalls the next turn — the writeback is best-effort
-                # observability, the SDK loop is the primary mission.
-                # We pass the SDK's running ``num_turns`` + cumulative
-                # ``total_cost_usd`` (NOT a delta) so the row always
-                # reflects the latest snapshot. ``current_turn_last_tool``
-                # is whatever the AssistantMessage handler last saw; we
-                # reset it AFTER scheduling the task so the next turn
-                # starts clean.
-                asyncio.create_task(
-                    update_run_progress(
-                        run_id_for_first_turn,
-                        turns=last_turn_count,
-                        cost_usd=cost,
-                        last_tool_call=current_turn_last_tool,
-                    )
-                )
-                # Durable PR checkpoint. The in-memory/DB writeback above does
-                # not survive this pod: the AgentRun Job gets no DB DSN, so
-                # run_driver falls back to a process-local dict. A deadline kill
-                # or node move would otherwise leave the successor iteration with
-                # a branch and a PR but no record of where this one got to.
-                # Cadence is decided in pr_handoff; the MCP tool rewrites the
-                # comment only when its state digest changes, so a call that says
-                # nothing new costs one round-trip and no PR edit.
+                # Durable PR checkpoint — the ONLY record of turn count and spend
+                # that survives this pod. A deadline kill or node move would
+                # otherwise leave the successor iteration with a branch and a PR
+                # but no record of where this one got to. Cadence is decided in
+                # pr_handoff; the MCP tool rewrites the comment only when its
+                # state digest changes, so a call that says nothing new costs one
+                # round-trip and no PR edit.
                 if pr_handoff.should_post(
                     turns=last_turn_count,
                     max_turns=max_turns,
@@ -1745,80 +1465,6 @@ async def run_initiative(
                         )
                     )
                 current_turn_last_tool = None
-                # Layer 2 — bump the running turn counter + record a
-                # 'turn_end' decision row so the operator's reconstruction
-                # has natural turn boundaries even when no tool was called
-                # in this turn.
-                turn_idx = bump_turn_counter(run_id_for_first_turn) if run_id_for_first_turn else 0
-                await record_decision(
-                    run_id_for_first_turn,
-                    'turn_end',
-                    f'turn {turn_idx} ended (sdk num_turns={message.num_turns}, cost=${cost:.4f})',
-                    payload={
-                        'num_turns': message.num_turns,
-                        'cost_usd': cost,
-                        'is_error': message.is_error,
-                        'usage': usage,
-                    },
-                    turn_index=turn_idx,
-                )
-                exit_code = 1 if message.is_error else 0
-
-                # Bidirectional command queue — drain at the natural
-                # turn boundary. The drain itself is sub-millisecond
-                # when no commands are pending (partial index covers
-                # the SELECT). When a cancel arrives, we break out of
-                # the SDK iterator below so the agent shuts down
-                # gracefully — Layer 1 diagnostics + the failure
-                # column attribution flow through the existing
-                # cancellation path.
-                cancel_requested = await _drain_then_check_cancel()
-                if cancel_requested:
-                    reason = loop_state.cancel_reason or 'cancelled_by_operator: <no reason given>'
-                    click.echo(
-                        click.style(
-                            f'\n  ✋ cancel requested by operator — exiting gracefully ({reason})',
-                            fg='red',
-                            bold=True,
-                        ),
-                        err=True,
-                    )
-                    # Layer 1 — surface the cancel reason in the
-                    # error column. We use the well-known
-                    # ``silent_terminate:`` prefix so the existing
-                    # vocabulary catches it; the full reason text
-                    # (including the operator-provided context) goes
-                    # in the suffix per the
-                    # ``<reason>: <context>`` format used everywhere
-                    # else.
-                    await write_failure_reason(
-                        run_id_for_first_turn,
-                        f'silent_terminate: {reason}',
-                    )
-                    await record_decision(
-                        run_id_for_first_turn,
-                        'terminate',
-                        f'agent cancelled by operator command: {reason}',
-                        payload={'reason': reason, 'turn_count': last_turn_count},
-                    )
-                    # Persist a snapshot while the DB connection is
-                    # still hot — exit_code=2 below would otherwise
-                    # fall through to the success-path snapshot
-                    # writer, which is fine, but writing here gives
-                    # us the explicit ``cancelled`` terminal_reason.
-                    await persist_conversation_snapshot(
-                        run_id_for_first_turn,
-                        conversation_buffer,
-                        terminal_reason='cancelled',
-                    )
-                    exit_code = 2
-                    # Initiative agent-fix-exit-code-after-pr-opened — flag
-                    # the cancel path so the post-loop normaliser does NOT
-                    # downgrade this 2 → 0. Operator-intent-to-terminate
-                    # must surface to the Job condition layer even if a PR
-                    # was opened earlier in the run.
-                    exit_via_cancel = True
-                    break
 
                 # Post-green hard-stop safety net
                 # (fix-agent-exit-on-mcp-success). If `wait_for_terminal`
@@ -1844,13 +1490,6 @@ async def run_initiative(
                             bold=True,
                         ),
                         err=True,
-                    )
-                    await record_decision(
-                        run_id_for_first_turn,
-                        'decision',
-                        'post-green hard-stop: wait_for_terminal=all_passed + final no-tool '
-                        'summary turn — ending SDK loop without waiting for merge',
-                        payload={'turn_count': last_turn_count, 'reason': 'all_passed_terminal'},
                     )
                     break
                 # Reset the per-turn tool-call marker for the NEXT turn. Placed
@@ -1917,33 +1556,21 @@ async def run_initiative(
             )
 
         # Layer 1 — Write the classified failure reason to
-        # initiative_runs.error before exiting the exception branch.
-        # ``classify_failure`` chooses the right vocabulary: cap-hit gets
-        # ``agent_sdk_max_turns_exceeded``; everything else gets
+        # Classified reason, surfaced in the crash sticky on the PR. cap-hit
+        # gets ``agent_sdk_max_turns_exceeded``; everything else gets
         # ``agent_sdk_error: <ExcClass>: <message>``.
-        reason = classify_failure(
+        classified_reason = classify_failure(
             exc,
             last_turn_count=last_turn_count,
             max_turns=max_turns,
         )
-        await write_failure_reason(run_id_for_first_turn, reason)
+        logger.warning('initiative terminal: %s', classified_reason)
         # Layer 3 — Persist whatever conversation history is in-flight
         # at the moment of the crash. This is the only chance: the pod
         # may not reach the natural-terminal snapshot writer below.
-        await persist_conversation_snapshot(
-            run_id_for_first_turn,
-            conversation_buffer,
-            terminal_reason='failed',
-        )
         # Layer 2 — Record the terminal decision so the operator's
         # ``SELECT ... FROM agent_run_decisions`` view captures the
         # moment of failure (not just the leading tool calls).
-        await record_decision(
-            run_id_for_first_turn,
-            'terminate',
-            f'agent terminated with exception: {reason}',
-            payload={'reason': reason, 'turn_count': last_turn_count, 'max_turns': max_turns},
-        )
 
     # ── Verdict gate + exit-code normalisation ──────────────────────────
     # Core principle (Mike 2026-08-05): opening a PR is NOT success —
@@ -1993,23 +1620,6 @@ async def run_initiative(
             ),
             err=True,
         )
-        await write_failure_reason(
-            run_id_for_first_turn,
-            f'pr_opened_without_green: PR #{pr_emitted} on {primary.qualified_repo}@{primary.branch} '
-            'never reached wait_for_terminal=all_passed (agent blocked or checks never went green)',
-        )
-        await record_decision(
-            run_id_for_first_turn,
-            'decision',
-            f'verdict gate: pr_opened_without_green pr_number={pr_emitted}, exit_code 0 → 1',
-            payload={
-                'verdict': 'blocked_or_unfinished',
-                'pr_number': pr_emitted,
-                'terminal_all_passed_seen': False,
-                'pre_gate_exit_code': 0,
-                'post_gate_exit_code': 1,
-            },
-        )
         obslog.emit(
             'ERROR',
             'initiative_verdict',
@@ -2045,65 +1655,18 @@ async def run_initiative(
             ),
             err=True,
         )
-        await record_decision(
-            run_id_for_first_turn,
-            'decision',
-            f'exit_code normalisation: confirmed_green pr_number={pr_emitted}, downgrading exit_code {exit_code} → 0',
-            payload={
-                'pre_normalisation_exit_code': exit_code,
-                'normalised_exit_code': 0,
-                'pr_number': pr_emitted,
-                'reason': 'all_passed_before_failure',
-            },
-        )
         exit_code = 0
 
     # Layer 3 — persist the full conversation snapshot on natural
     # terminal (success path). The exception branch above already
     # persisted on failure; this is the success-side companion. Doing it
     # BEFORE engine dispose so we still have a live connection pool.
-    # The SIGTERM handler defers to this when we set
-    # ``natural_terminal_completed`` below.
-    if exit_code == 0:
-        terminal_reason_snapshot = 'complete'
-    else:
-        terminal_reason_snapshot = 'failed'
-    await persist_conversation_snapshot(
-        run_id_for_first_turn,
-        conversation_buffer,
-        terminal_reason=terminal_reason_snapshot,
-    )
-    await record_decision(
-        run_id_for_first_turn,
-        'terminate',
-        f'agent loop exited cleanly (exit_code={exit_code})',
-        payload={
-            'exit_code': exit_code,
-            'turn_count': last_turn_count,
-            'cost_usd': last_cost,
-        },
-    )
-    # Tell the SIGTERM/atexit handler to back off — the natural-terminal
-    # path has already written everything it would have flushed.
-    terminate_state.natural_terminal_completed = True
-    uninstall_terminate_handler()
 
     # V5 D2.2 — release the engine that ``mark_first_turn`` was sharing.
     # Paired with the eager init above so a long-running process doesn't
     # keep a connection pool alive past the SDK loop's lifetime. Tolerate
     # any disposal error — the agent is exiting anyway and the K8s Job
     # tears down the pod regardless.
-    if db_engine_initialised:
-        try:
-            await _dispose_engine()
-        except Exception as exc:  # noqa: BLE001 — disposal failure is non-fatal at end-of-run
-            click.echo(
-                click.style(
-                    f'  (db engine dispose failed: {exc})',
-                    fg='yellow',
-                ),
-                err=True,
-            )
 
     # Reuse the PR resolved once above (status-first, via ``_resolve_target_pr``) —
     # no second ``gh`` shellout, and no divergent representation of the same fact.
@@ -2117,25 +1680,11 @@ async def run_initiative(
     # classification below + the exit-code normalisation + the fail-fast.
     # Layer 1 + 2 — classify the orphan-PR case. When the agent reports
     # success but no PR exists on the branch, the operator needs to know.
-    # The decision log captures the classification; the error column
-    # carries the one-liner so a dashboard query surfaces it cheaply.
     if pr_number is None and exit_code == 0:
-        orphan_reason = (
-            f'pr_link_missing: agent reported success but no open PR on {primary.qualified_repo}@{primary.branch}'
-        )
-        await write_failure_reason(run_id_for_first_turn, orphan_reason)
-        await record_decision(
-            run_id_for_first_turn,
-            'decision',
-            'classified as pr_link_missing — success without observable PR',
-            payload={'qualified_repo': primary.qualified_repo, 'branch': primary.branch},
-        )
-    elif pr_number is not None:
-        await record_decision(
-            run_id_for_first_turn,
-            'decision',
-            f'resolved PR #{pr_number} for {primary.qualified_repo}@{primary.branch}',
-            payload={'pr_number': pr_number},
+        logger.warning(
+            'pr_link_missing: agent reported success but no open PR on %s@%s',
+            primary.qualified_repo,
+            primary.branch,
         )
     if crash_sticky_body is not None:
         _post_crash_sticky(
