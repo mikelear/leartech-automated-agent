@@ -36,7 +36,6 @@ def test_noop_when_env_absent(monkeypatch):
 
 
 def test_noop_when_file_already_configured(monkeypatch):
-    # An operator/base image that already mounted a key file must win — don't clobber.
     monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS_JSON', '{"x":1}')
     monkeypatch.setenv('GOOGLE_APPLICATION_CREDENTIALS', '/pre/existing/key.json')
 

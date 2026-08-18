@@ -43,8 +43,6 @@ from claude_agent_sdk.types import (
 
 from gate.agent.initiative import RunSummary, run_initiative
 
-# ─── Test doubles (mirror tests/test_agent_exit_code_normalisation.py) ──────
-
 
 @dataclass
 class _FakeRepo:
@@ -103,9 +101,6 @@ def _result_message(turns: int = 2, cost: float = 0.01, is_error: bool = False) 
         total_cost_usd=cost,
         usage={'input_tokens': 0, 'output_tokens': 0},
     )
-
-
-# ─── Internal-MCP mock exchanges ────────────────────────────────────
 
 
 def _adopt_pr_messages() -> list[Any]:
@@ -232,9 +227,6 @@ def _enter_common_patches(
     stack.enter_context(patch('gate.agent.initiative._write_pr_number_hint'))
 
 
-# ─── The matrix ─────────────────────────────────────────────────────
-
-
 @pytest.mark.asyncio
 async def test_pr_opened_and_all_passed_exits_zero(tmp_path: Path) -> None:
     """State B — the ONLY success: PR opened AND wait_for_terminal all_passed."""
@@ -343,7 +335,6 @@ async def test_blocked_verdict_emits_structured_event(tmp_path: Path) -> None:
         summary = await run_initiative(**_build_run_kwargs(tmp_path), max_turns=200)
 
     assert summary.exit_code == 1
-    # A structured initiative_verdict event was emitted.
     verdict_events = [c for c in mock_obslog.emit.call_args_list if 'initiative_verdict' in c.args]
     assert verdict_events, f'expected an initiative_verdict obslog event; got {mock_obslog.emit.call_args_list!r}'
     assert verdict_events[0].kwargs.get('verdict') == 'blocked_or_unfinished'

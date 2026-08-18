@@ -41,7 +41,6 @@ def test_complete_omits_optional_params_when_none() -> None:
     with patch('anthropic.Anthropic', return_value=fake_client):
         llm.complete(model='m', max_tokens=8, messages=[{'role': 'user', 'content': 'x'}])
     kwargs = fake_client.messages.create.call_args.kwargs
-    # plain call (e.g. self_retrospect) → no system/tools/tool_choice keys
     assert 'system' not in kwargs
     assert 'tools' not in kwargs
     assert 'tool_choice' not in kwargs

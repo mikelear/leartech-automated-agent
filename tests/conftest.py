@@ -25,17 +25,9 @@ from collections.abc import Iterator
 
 import pytest
 
-# Applied AT IMPORT TIME so it lands before pytest starts collecting tests
-# (and therefore before any test module imports the agent,
-# which triggers the middleware install).
 os.environ.setdefault('LEARTECH_AUTH_REQUIRED', 'false')
 
 
-# AgentRun identity env vars whose PRESENCE + non-empty value in
-# ``os.environ`` is what makes the ``_backstop_target_pr`` /
-# ``run_test_mode`` code paths issue live k8s writes. The autouse
-# fixture below scrubs them at test start so a stray pod env can never
-# turn a unit test into an incident against the run hosting the pytest.
 _AGENTRUN_IDENTITY_ENV_VARS = (
     'AGENT_RUN_NAME',
     'AGENT_RUN_NAMESPACE',

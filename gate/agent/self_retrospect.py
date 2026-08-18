@@ -49,20 +49,10 @@ from typing import Any, cast
 logger = logging.getLogger(__name__)
 
 
-# Default model for the retrospect call. Mirrors the main agent default
-# (claude-opus-4-7) so the verdict is rendered at the same quality bar
-# as the work being retrospected. Override via env if cluster wants
-# cheaper or faster.
 DEFAULT_RETROSPECT_MODEL = os.environ.get('LEARTECH_RETROSPECT_MODEL', 'claude-opus-4-7')
 
-# Skip retrospect on trivial PRs — not worth $0.25 to introspect a
-# one-line fix. Counted as raw lines in the unified diff (added + removed),
-# excluding diff headers.
 MIN_DIFF_LINES_FOR_RETROSPECT = 10
 
-# Cap the diff we send to the LLM. Larger PRs get truncated with a marker.
-# 80k chars ≈ 20k tokens ≈ ~$0.05 input cost; combined with the response
-# cap this keeps the worst-case bill bounded.
 MAX_DIFF_CHARS = 80_000
 
 
@@ -77,8 +67,8 @@ class Finding:
     title: str
     root_cause: str
     proposed_fix: str
-    suggested_form: str  # lesson | criterion | tekton-step | pre-push-check
-    priority: str  # high | medium | low
+    suggested_form: str
+    priority: str
 
 
 def _count_diff_lines(diff: str) -> int:
@@ -88,7 +78,6 @@ def _count_diff_lines(diff: str) -> int:
         if not line:
             continue
         first = line[0]
-        # Skip diff metadata: `+++ b/...`, `--- a/...`, `@@ ... @@`, `diff --git`, `index ...`
         if line.startswith(('+++', '---', '@@', 'diff ', 'index ', 'new file', 'deleted file', 'Binary', 'similarity')):
             continue
         if first in ('+', '-'):
@@ -163,12 +152,10 @@ def _parse_findings(response_text: str) -> list[Finding]:
       - the model returning extra keys per finding
     """
     text = response_text.strip()
-    # Strip markdown fences if present
     if text.startswith('```'):
         text = re.sub(r'^```(?:json)?\s*', '', text)
         text = re.sub(r'\s*```\s*$', '', text)
 
-    # Try direct parse first; fall back to greedy braces match
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
@@ -234,8 +221,6 @@ async def retrospect_after_ready(
     chosen_model = model or DEFAULT_RETROSPECT_MODEL
 
     try:
-        # LLM call goes through the provider seam (gate.llm) — the single
-        # anthropic import site. to_thread keeps the sync SDK call off the loop.
         from gate import llm
 
         resp = await asyncio.to_thread(
@@ -250,7 +235,6 @@ async def retrospect_after_ready(
 
     try:
         first_block = resp.content[0]
-        # The Messages API returns content blocks; we expect a single text block.
         text = getattr(first_block, 'text', None)
         if text is None:
             logger.warning('self_retrospect: response did not include a text block')
@@ -260,7 +244,6 @@ async def retrospect_after_ready(
         logger.warning('self_retrospect parse failed: %s', exc)
         return []
 
-    # Filter low-priority — avoid noise on every PR.
     filtered = [f for f in findings if f.priority in ('high', 'medium')]
     logger.info(
         'self_retrospect for %s#%d: %d findings raw, %d after filter',
@@ -325,7 +308,7 @@ async def file_issue_with_findings(
     enrichment isn't lost.
     """
     if not findings:
-        return None  # nothing to file
+        return None
 
     title = f'Self-retrospective: PR #{pr_number} — {len(findings)} preventable finding(s)'
     body = _render_issue_body(pr_number, findings)
@@ -358,8 +341,6 @@ async def file_issue_with_findings(
         )
         if result.returncode == 0:
             return result.stdout.strip() or None
-        # Most likely cause of failure: label doesn't exist on the repo yet.
-        # Retry once without labels so the Issue still lands.
         logger.warning(
             'self_retrospect: gh issue create with labels failed (exit %d): %s — retrying without labels',
             result.returncode,
@@ -466,8 +447,6 @@ async def fetch_gate_state(pr_repo: str, pr_number: int) -> str:
             check=False,
             timeout=30,
         )
-        # `gh pr checks` exits non-zero if any check is failing — we still want
-        # the body in that case, so don't gate on returncode.
         return result.stdout or ''
     except (subprocess.TimeoutExpired, OSError) as exc:
         logger.warning('self_retrospect: gh pr checks errored: %s', exc)

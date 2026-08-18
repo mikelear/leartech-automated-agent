@@ -60,12 +60,9 @@ from mcp.server.stdio import stdio_server
 log = logging.getLogger('leartech.mcp_bridge')
 
 _BRIDGE_NAME = 'leartech-mcp-bridge'
-# The audience the internal MCP host enforces (matches remote.py / the controller).
 _MCP_AUDIENCE = 'leartech-mcp'
 _DEFAULT_SCOPE = 'leartechapi.internal_services'
 _TOKEN_TIMEOUT = 15.0
-# open_pr does git + GitHub API work; generous but BOUNDED so a hung downstream
-# surfaces as a tool error rather than an indefinite agent hang.
 _DEFAULT_CALL_TIMEOUT = 180.0
 
 CallToolFn = Callable[[str, dict[str, object]], Awaitable[mcp_types.CallToolResult]]
@@ -89,7 +86,7 @@ def _mint_token() -> str | None:
                 'client_id': client_id,
                 'client_secret': client_secret,
                 'scope': scope,
-                'audience': _MCP_AUDIENCE,  # RFC 8707 — Hydra stamps aud on the token
+                'audience': _MCP_AUDIENCE,
             },
             timeout=_TOKEN_TIMEOUT,
         )
@@ -111,7 +108,6 @@ def build_bridge_server(tools: list[mcp_types.Tool], call_tool_fn: CallToolFn) -
     async def _list_tools() -> list[mcp_types.Tool]:
         return tools
 
-    # validate_input=False: the downstream server is the single schema authority.
     @server.call_tool(validate_input=False)
     async def _call_tool(name: str, arguments: dict[str, object]) -> mcp_types.CallToolResult:
         return await call_tool_fn(name, arguments)
@@ -171,8 +167,6 @@ async def _run() -> int:
         return 2
     timeout = float(os.environ.get('LEARTECH_MCP_BRIDGE_TIMEOUT', _DEFAULT_CALL_TIMEOUT))
 
-    # Startup: fetch the tool list (fresh token + connection) so the CLI can
-    # discover tools. No token/session is held past this point.
     list_result = await _with_downstream(url, timeout, lambda s: s.list_tools())
     tools = list_result.tools
     log.info('bridge ready for %s — proxying %d tool(s) (fresh token + connection per call)', url, len(tools))

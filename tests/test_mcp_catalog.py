@@ -25,17 +25,12 @@ def test_load_real_catalog_validates() -> None:
     """The committed mcp_catalog.yaml is valid + parses into the schema."""
     load_catalog.cache_clear()
     catalog = load_catalog()
-    # Core MCPs shipped in the runtime today. leartech-jx3-flow is the
-    # remote replacement for the retired in-process leartech-pipeline shim
-    # (list_pr_checks / wait_for_terminal / wait_for_first_failure_or_all_pass).
     for name in (
         'leartech-jx3-flow',
-        'leartech-criteria',
         'leartech-pr-context',
-        'leartech-test-artifacts',
+        'leartech-tekton',
     ):
         assert name in catalog.mcp_servers, f'expected {name!r} catalogued'
-    # And the four agent roles
     for role in ('initiative_agent', 'review_agent', 'ba_agent', 'forensic_agent'):
         assert role in catalog.roles, f'expected {role!r} role defined'
 
@@ -62,13 +57,25 @@ def test_get_role_unknown_raises_keyerror() -> None:
 
 
 def test_get_mcp_returns_typed_config() -> None:
-    # leartech-criteria is a stable in-process SDK MCP; leartech-jx3-flow (the
-    # remote replacement for the retired pipeline_server shim) is exercised by
-    # test_remote_mcp_entries_load_as_http_sse below.
-    mcp = get_mcp('leartech-criteria')
+    mcp = get_mcp('leartech-jx3-flow')
     assert isinstance(mcp, McpServer)
-    assert mcp.type == 'sdk'
-    assert mcp.builder == 'gate.mcp_servers.criteria_server:build_criteria_server'
+    assert mcp.type == 'http_sse'
+    assert mcp.url
+
+
+def test_no_mcp_is_served_in_process_by_python() -> None:
+    """Every tool the agent calls is served by the Go leartech-mcp-servers deployment.
+
+    A `type: sdk` entry means Python is hosting tools again — the arrangement that
+    produced a stale parity contract against a retired shim, a criteria engine
+    duplicating the language images' own build contract, and a `build_*_server`
+    import graph that kept 6k lines of parsers alive. Third-party stdio MCPs
+    (figma, copilot, lovable) are not ours and are unaffected.
+    """
+    load_catalog.cache_clear()
+    catalog = load_catalog()
+    in_process = {n: m for n, m in catalog.mcp_servers.items() if m.type == 'sdk' or m.builder}
+    assert not in_process, f'Python is hosting MCP tools again: {sorted(in_process)}'
 
 
 def test_remote_mcp_entries_load_as_http_sse() -> None:
@@ -92,12 +99,6 @@ def test_remote_mcp_entries_load_as_http_sse() -> None:
         assert mcp.type == 'http_sse', f'{name}: expected http_sse, got {mcp.type}'
         assert mcp.url is not None, f'{name}: http_sse MCP must declare url'
         assert mcp.url.endswith(sse_suffix), f'{name}: url {mcp.url!r} does not end with {sse_suffix!r}'
-        # The url is env-templated `${LEARTECH_MCP_URL:-<dev-fallback>}`
-        # and the loader resolves it. With the env var unset (test/dev), it must
-        # resolve to the dev-only localhost fallback — NO hardcoded
-        # `*.jx.leartech.com` cluster URL in source (leartech convention;
-        # ai-review flagged the old staging default). In cluster the chart sets
-        # the env var so it resolves to the cluster-local platform-mcps URL.
         assert 'jx.leartech.com' not in mcp.url, (
             f'{name}: no hardcoded cluster URL in the source fallback — got {mcp.url!r}'
         )
@@ -111,7 +112,6 @@ def test_mcp_url_overridable_via_env_var(
     """`LEARTECH_MCP_URL` rewrites the catalog default URL at load time."""
     monkeypatch.setenv('LEARTECH_MCP_URL', 'https://mcp-servers.internal.test')
 
-    # Write a minimal catalog that uses the same env-var pattern as production.
     catalog_yaml = """
 mcp_servers:
   leartech-tekton:
@@ -193,13 +193,6 @@ def test_http_sse_mcp_requires_url() -> None:
         McpServer.model_validate({'type': 'http_sse', 'description': 'd'})
 
 
-def test_reachable_status_for_sdk_returns_ready_for_real_builder() -> None:
-    # leartech-criteria still ships as an in-process SDK MCP (leartech-pipeline
-    # was ported to remote leartech-jx3-flow).
-    mcp = get_mcp('leartech-criteria')
-    assert reachable_status(mcp) == 'ready'
-
-
 def test_reachable_status_for_unbuilt_mcp_reports_not_built() -> None:
     mcp = get_mcp('stitch')
     assert reachable_status(mcp) == 'not_built'
@@ -220,12 +213,8 @@ def test_reachable_status_missing_auth_for_remote_mcp() -> None:
             'auth': {'type': 'bearer', 'token_env': 'NEVER_SET_TEST_VAR_X9Z'},
         },
     )
-    # Make sure the env var really isn't set
     os.environ.pop('NEVER_SET_TEST_VAR_X9Z', None)
     assert reachable_status(mcp) == 'missing_auth'
-
-
-# ─── LlmConfig field tests ────────────────────────────────────────────────────
 
 
 def _synthetic_role(llm: object = None) -> dict[str, object]:
@@ -294,9 +283,6 @@ def test_existing_roles_still_parse() -> None:
     assert initiative.llm.model == 'claude-opus-4-7'
     assert initiative.llm.max_turns == 1000
 
-    # ba_agent pins Opus 4.8 explicitly (NOT "auto") so the gateway's
-    # auto-router can't downgrade a reasoning-heavy authoring pass to GLM.
-    # This is enforced by test_ba_role_pins_opus_not_auto in test_ba_agent.py.
     ba = catalog.roles['ba_agent']
     assert ba.llm is not None, 'ba_agent.llm should be populated (Opus 4.8 pinned)'
     assert ba.llm.backend == 'claude'

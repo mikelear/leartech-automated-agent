@@ -141,7 +141,7 @@ async def test_list_agent_runs(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.asyncio
 async def test_delete_agent_run_swallows_404(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_api(monkeypatch, _FakeApi(delete_status=404))
-    await arc.delete_agent_run('abc', 'ns')  # must not raise
+    await arc.delete_agent_run('abc', 'ns')
 
 
 @pytest.mark.asyncio
@@ -160,7 +160,7 @@ async def test_get_target_pr_returns_string(monkeypatch: pytest.MonkeyPatch) -> 
     assert verb == 'get_status'
     assert kw['plural'] == arc._AGENTRUNS
     assert kw['name'] == 'abc'
-    assert fake.closed  # api client always closed
+    assert fake.closed
 
 
 @pytest.mark.asyncio
@@ -179,14 +179,14 @@ async def test_get_target_pr_none_when_no_status(monkeypatch: pytest.MonkeyPatch
 async def test_get_target_pr_swallows_api_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeApi(get_status_exc=ApiException(status=404))
     _patch_api(monkeypatch, fake)
-    assert await arc.get_target_pr('abc', 'ns') is None  # must not raise
+    assert await arc.get_target_pr('abc', 'ns') is None
     assert fake.closed
 
 
 @pytest.mark.asyncio
 async def test_get_target_pr_swallows_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_api(monkeypatch, _FakeApi(get_status_exc=RuntimeError('boom')))
-    assert await arc.get_target_pr('abc', 'ns') is None  # must not raise
+    assert await arc.get_target_pr('abc', 'ns') is None
 
 
 @pytest.mark.asyncio
@@ -199,7 +199,7 @@ async def test_patch_target_pr_merge_patch_string_body(monkeypatch: pytest.Monke
     assert kw['plural'] == arc._AGENTRUNS
     assert kw['name'] == 'abc'
     assert kw['_content_type'] == 'application/merge-patch+json'
-    assert kw['body'] == {'status': {'targetPR': '42'}}  # STRING in the CRD
+    assert kw['body'] == {'status': {'targetPR': '42'}}
     assert fake.closed
 
 
@@ -207,11 +207,11 @@ async def test_patch_target_pr_merge_patch_string_body(monkeypatch: pytest.Monke
 async def test_patch_target_pr_swallows_api_exception(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeApi(patch_status_exc=ApiException(status=403))
     _patch_api(monkeypatch, fake)
-    await arc.patch_target_pr('abc', 'ns', 42)  # must not raise
+    await arc.patch_target_pr('abc', 'ns', 42)
     assert fake.closed
 
 
 @pytest.mark.asyncio
 async def test_patch_target_pr_swallows_unexpected_error(monkeypatch: pytest.MonkeyPatch) -> None:
     _patch_api(monkeypatch, _FakeApi(patch_status_exc=RuntimeError('boom')))
-    await arc.patch_target_pr('abc', 'ns', 42)  # must not raise
+    await arc.patch_target_pr('abc', 'ns', 42)

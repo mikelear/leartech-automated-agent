@@ -47,10 +47,6 @@ from __future__ import annotations
 
 import os
 
-# The full set of AgentRun-identity env vars we mirror into the in-memory
-# snapshot at run entry. Everything downstream reads via the accessors below,
-# which prefer the snapshot when captured and fall back to ``os.environ``
-# otherwise.
 _CAPTURED_VARS: tuple[str, ...] = (
     'AGENT_RUN_NAME',
     'AGENT_RUN_NAMESPACE',
@@ -58,8 +54,6 @@ _CAPTURED_VARS: tuple[str, ...] = (
     'LEARTECH_RUN_ID',
 )
 
-# The subset we REMOVE from ``os.environ`` post-capture. See the module
-# docstring for why ``LEARTECH_RUN_ID`` is deliberately NOT here.
 _STRIPPED_VARS: tuple[str, ...] = (
     'AGENT_RUN_NAME',
     'AGENT_RUN_NAMESPACE',

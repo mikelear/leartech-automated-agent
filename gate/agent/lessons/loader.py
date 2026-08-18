@@ -56,7 +56,6 @@ class Lesson(BaseModel):
     )
     encoded_at: datetime | None = Field(default=None)
 
-    # For criteria_gap lessons specifically — most actionable kind.
     slipped_past_criteria: list[str] = Field(
         default_factory=list,
         description='Criterion names that should have caught this but did not.',

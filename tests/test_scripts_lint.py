@@ -77,9 +77,6 @@ def test_shellcheck_passes(script: Path) -> None:
     )
 
 
-# Match a `gh` invocation as a command word — start of line or after `|`,
-# `&&`, `;`, `$(`, backtick, or whitespace. We deliberately avoid matching
-# `gh` substring inside other tokens (e.g. `length`, `weight`, etc.).
 _GH_COMMAND_RE = re.compile(r'(^|[\s|&;`$(])gh\s')
 
 
@@ -96,7 +93,6 @@ def test_no_gh_command_in_scripts(script: Path) -> None:
     script by name.
     """
     text = script.read_text()
-    # Strip comment lines so the convention can still be discussed in headers.
     code_lines = [line for line in text.splitlines() if not line.lstrip().startswith('#')]
     code = '\n'.join(code_lines)
 

@@ -40,8 +40,6 @@ from claude_agent_sdk.types import (
 
 from gate.agent.initiative import EXPECTED_PR_MISSING_EXIT_CODE, RunSummary, run_initiative
 
-# ─── Test doubles (mirror tests/test_initiative_pr_open_emit.py) ──────
-
 
 @dataclass
 class _FakeRepo:
@@ -61,22 +59,8 @@ class _FakeInitiative:
     name: str = 'example-initiative'
     is_multi_repo: bool = False
     repos: list[_FakeRepo] = field(default_factory=lambda: [_FakeRepo()])
-    # v6p0.5 step 2 — the loader's Initiative carries this field; the agent's
-    # prompt-construction path reads it to render the previous-attempt
-    # feedback block. The fakes default to an empty list (fresh run, no
-    # respawn) so the prompt code path takes its no-op branch.
     feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
-    # Hold-as-init-option — the loader's Initiative now carries an opt-in
-    # `hold: bool` field (default False); the agent's prompt-construction
-    # path reads it to decide whether to render the `/hold` posting
-    # instruction. Fakes default to False so the compose call matches the
-    # historical (no-hold) prompt shape.
     hold: bool = False
-    # Test-mode directive — the loader's Initiative now carries an opt-in
-    # ``test_mode: dict | None`` field (default None); the agent's run path
-    # reads it to decide whether to short-circuit the SDK loop for
-    # orchestration testing. Fakes default to None so these tests exercise
-    # the real SDK-loop path unchanged.
     test_mode: dict[str, object] | None = None
 
     @property
@@ -247,9 +231,6 @@ def _enter_common_patches(
     stack.enter_context(patch('gate.agent.initiative._write_pr_number_hint'))
 
 
-# ─── Headline cases from the initiative goal ─────────────────────────
-
-
 @pytest.mark.asyncio
 async def test_max_turns_hit_after_pr_opened_exits_zero(
     tmp_path: Path,
@@ -263,11 +244,7 @@ async def test_max_turns_hit_after_pr_opened_exits_zero(
     max_turns = 10
     messages = [
         *_pr_opened_messages(),
-        # Confirmed-green BEFORE the cap-hit — this is what "substantive work
-        # shipped" now means (post-2026-08-05: green, not merely PR-opened).
         *_wait_for_terminal_all_passed_messages(),
-        # last_turn_count must equal max_turns when the exception fires so the
-        # cap-hit branch (not the unexpected-error branch) is exercised.
         _result_message(turns=max_turns),
     ]
 
@@ -301,9 +278,7 @@ async def test_sdk_exception_after_pr_opened_exits_zero(
     """
     messages = [
         *_pr_opened_messages(),
-        # Confirmed-green before the crash → substantive work shipped.
         *_wait_for_terminal_all_passed_messages(),
-        # last_turn_count well below max_turns → unexpected-error branch (not cap-hit).
         _result_message(turns=3),
     ]
 
@@ -320,7 +295,6 @@ async def test_sdk_exception_after_pr_opened_exits_zero(
         f'expected exit_code=0 (downgraded from 1: confirmed-green before SDK crash); got {summary.exit_code}'
     )
     captured = capsys.readouterr()
-    # The warn-level log must still be visible — the crash isn't hidden.
     assert 'Unexpected SDK exception' in captured.err, (
         f'crash warn log must still emit even when exit_code is downgraded. stderr: {captured.err!r}'
     )
@@ -391,10 +365,6 @@ async def test_clean_success_exits_zero(
     genuinely produced a PR)."""
     messages = [
         *_pr_opened_messages(),
-        # A genuine clean success must ALSO reach confirmed-green: with the
-        # verdict gate (#204) a PR opened but never green fails, and with the
-        # expected-PR fail-fast (#203) a PR opened satisfies pr_expected. So the
-        # happy path = PR resolved (513) AND wait_for_terminal all_passed.
         *_wait_for_terminal_all_passed_messages(),
         _result_message(turns=2),
     ]
@@ -450,9 +420,6 @@ async def test_crash_sticky_still_emitted_in_exception_branch(
     """
     messages = [
         *_pr_opened_messages(),
-        # Confirmed-green before the crash so the downgrade path is exercised —
-        # the whole point of this test is that the downgrade doesn't silence the
-        # crash sticky.
         *_wait_for_terminal_all_passed_messages(),
         _result_message(turns=3),
     ]
@@ -471,13 +438,9 @@ async def test_crash_sticky_still_emitted_in_exception_branch(
         )
 
     assert summary.exit_code == 0, 'expected downgrade from 1 → 0 (PR was opened)'
-    # The crash sticky must still have been posted — the downgrade is
-    # purely about the process exit code, not operator visibility.
     mock_sticky.assert_called_once()
     call_kwargs = mock_sticky.call_args.kwargs
     assert call_kwargs.get('pr_number') == 777
-    # The sticky body must mention the SDK exception so operators understand
-    # what happened despite exit_code=0.
     body = call_kwargs.get('body', '')
     assert 'simulated SDK transport error' in body or 'SDK crashed' in body, (
         f'crash sticky body must cite the exception. got: {body!r}'
@@ -498,8 +461,6 @@ async def test_is_error_result_message_after_pr_opened_exits_zero(
     """
     messages = [
         *_pr_opened_messages(),
-        # Confirmed-green THEN an is_error ResultMessage — work shipped despite
-        # the trailing transport-level error, so the downgrade still applies.
         *_wait_for_terminal_all_passed_messages(),
         _result_message(turns=2, is_error=True),
     ]
@@ -514,13 +475,6 @@ async def test_is_error_result_message_after_pr_opened_exits_zero(
     assert summary.exit_code == 0, (
         f'is_error ResultMessage after confirmed-green: expected downgrade to 0; got {summary.exit_code}'
     )
-
-
-# ─── Corrected contract (Mike 2026-08-05): PR-opened ≠ shipped ───────
-# The rescue-to-0 is gated on CONFIRMED-GREEN (wait_for_terminal all_passed),
-# not on a PR merely being open. A crash/max-turns BEFORE green means nothing
-# shipped — the failure must surface so the Job recycles, rather than being
-# masked as success (the false-Succeed bug).
 
 
 @pytest.mark.asyncio
@@ -552,9 +506,7 @@ async def test_sdk_crash_after_pr_opened_without_green_keeps_exit_one(
         f'PR opened but never green + SDK crash: expected exit_code=1 (no rescue); got {summary.exit_code}'
     )
     captured = capsys.readouterr()
-    # The crash warn log still emits — the failure is not hidden.
     assert 'Unexpected SDK exception' in captured.err
-    # And the normalisation must NOT claim a downgrade happened.
     assert 'exit_code normalisation' not in captured.err, (
         f'no confirmed-green → normalisation must not fire. stderr: {captured.err!r}'
     )

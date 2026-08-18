@@ -24,8 +24,6 @@ from gate.agent.initiative_prompt import INITIATIVE_SYSTEM_PROMPT
 from gate.agent.main import _build_system_prompt as build_review_system_prompt
 from gate.agent.system_prompt import REVIEW_SYSTEM_PROMPT
 
-# A recognisable line from Section A of the calibration markdown. If section A
-# is reworded the substring will need updating — pick a load-bearing phrase.
 SECTION_A_PROBE = 'dev-agent push → PR checks → Lighthouse approve → Tide merge → release'
 
 
@@ -42,8 +40,7 @@ def test_load_jx3_calibration_is_cached_idempotent() -> None:
     first = load_jx3_calibration()
     second = load_jx3_calibration()
     assert first == second
-    # Sanity: should not be a no-op / empty string.
-    assert len(first) > 1000  # ~150-250 lines of markdown
+    assert len(first) > 1000
 
 
 def test_review_agent_system_prompt_includes_jx3_calibration() -> None:
@@ -51,10 +48,7 @@ def test_review_agent_system_prompt_includes_jx3_calibration() -> None:
     rendered = build_review_system_prompt()
     assert JX3_CALIBRATION_HEADER in rendered
     assert SECTION_A_PROBE in rendered
-    # Calibration must precede the role prompt (review prompt's distinctive
-    # opening line should appear AFTER the calibration header).
     assert rendered.index(JX3_CALIBRATION_HEADER) < rendered.index('You are an automated PR review agent')
-    # And the underlying role prompt is still there in full.
     assert REVIEW_SYSTEM_PROMPT in rendered
 
 

@@ -32,10 +32,6 @@ from __future__ import annotations
 
 def _hold_step_5(*, hold: bool) -> str:
     """Return the step-5 block, tailored to whether the initiative opts into `/hold`."""
-    # PR creation goes through the open_pr MCP tool, NOT `gh pr create`. The tool
-    # creates the PR via the GitHub API (structured response) and publishes the
-    # number + head branch onto this AgentRun's status — so the number is
-    # captured authoritatively at the source, never scraped from CLI output.
     open_pr_block = (
         '5. **Open the PR via the `open_pr` MCP tool** (do NOT run `gh pr create` yourself):\n'
         '   first `git push` your branch, then call\n'
@@ -125,12 +121,9 @@ You have access to:
   cancellation. Served remotely by the Go leartech-mcp-servers deployment at
   `${{LEARTECH_MCP_URL}}/mcp/tekton`. Prefer this over shelling out to
   `pr-pipelines.sh` once a Tekton failure occurs.
-- **mcp__leartech-agent-local__***: The two step-aware helpers that cannot run
-  remote — `classify_step_failure` (LLM-adjacent heuristic classifier) and
-  `rebase_branch_on_base` (git ops on the cloned workspace inside this pod).
-  Called by the same failure-dispatch loop as the remote tekton MCP.
-- **mcp__leartech-test-artifacts__***: Playwright artifacts.
-- **mcp__leartech-criteria__***: discover criteria + run the gate.
+- **Bash**: run the language image's own build contract locally before you push —
+  for Go that is `make -f /usr/local/share/leartech-go.mk <target>`, the same
+  targets CI runs. Fix what it reports rather than discovering it in the pipeline.
 
 ## Your loop
 
@@ -143,9 +136,10 @@ You have access to:
 4. **Commit + push**: use `git add` for the specific files you changed (never `git add -A`).
    Conventional commit message. Push to origin.
 {_hold_step_5(hold=hold)}
-6. **Run the gate**: `mcp__leartech-criteria__run_criteria_set`. Use the `mark` parameter
-   when the initiative specifies `gate_marks`. Wait for pipeline checks to settle if
-   they're still running.
+6. **Run the gate locally**: your image carries the same build contract CI runs. For Go
+   that is `make -f /usr/local/share/leartech-go.mk` — run the targets CI runs (lint,
+   vet, test, vulncheck) and fix what they report BEFORE pushing. Then wait for the
+   pipeline checks to settle.
 7. **If gate passes**: do **not** post the sticky yet — see step 8 first.
 8. **Final-pass full-gate verification (mandatory before sticky).** Even when an initiative
    declares `gate_marks: [unit]` or similar, you MUST run the gate once more **without
@@ -154,7 +148,7 @@ You have access to:
 
    Concretely:
 
-   - Call `mcp__leartech-criteria__run_criteria_set` with no `mark` argument.
+   - Run the image's full build contract, not a filtered subset.
    - If anything fails, read each failing check's logs (via `~/leartech/Hub/scripts/pr-pipelines.sh
      <repo> <pr> --failed-only --logs`) and **compare the file paths in the failure output
      against the diff of your PR**. If any failure references a file you touched, it's
@@ -197,16 +191,17 @@ You have access to:
        to see WHICH step failed (git-clone, ruff, mypy, pytest, kaniko, ai-review, …).
     b. For each step whose state is `Failed`, call
        `mcp__leartech-tekton__step_logs(pipelinerun, step_name, cluster, tail=200)`.
-    c. Call `mcp__leartech-agent-local__classify_step_failure(step_name, log_tail, pipelinerun)`.
-       It returns `{{classification, action}}` where action is one of:
+    c. Read the failing step's logs and decide what the failure is yourself. You have
+       the step name and its log tail; that is the same evidence a classifier would
+       have had. Act on it directly:
 
-       | action | meaning | what to do |
-       |---|---|---|
-       | `rebase` | git_merge_conflict in git-clone step | call `mcp__leartech-agent-local__rebase_branch_on_base(repo_cwd, branch, base)`; on `status: conflict` post sticky + escalate, do NOT retry |
-       | `fix_code` | ruff_format_error / ruff_lint_error / mypy_type_error / ai_review_red_finding | edit the cited file(s), commit, push |
-       | `fix_test` | pytest_test_failure | edit the test, commit, push |
-       | `retry` | tekton_step_timeout — transient | `gh pr comment <pr> --body "/test <check>"`, wait_for_first_failure_or_all_pass again |
-       | `escalate` | kaniko_build_failure / image_pull_backoff / OOM / security_scan / preview_deploy / unknown | post sticky describing the diagnosed cause, stop iterating, hand off |
+       | failure | what to do |
+       |---|---|
+       | git merge conflict in git-clone | `git fetch origin <base> && git rebase origin/<base>`; if it conflicts, post a sticky and escalate — do NOT retry |
+       | ruff format / lint, mypy, ai-review finding | edit the cited file(s), commit, push |
+       | pytest failure | edit the test or the code it exercises, commit, push |
+       | step timeout (transient) | `gh pr comment <pr> --body "/test <check>"`, then wait again |
+       | kaniko build, image pull, OOM, security scan, preview deploy, or anything you cannot place | post a sticky describing the cause, stop iterating, hand off |
 
     d. If multiple steps failed across multiple checks, take the precedence:
        any `fix_code` > any `fix_test` > all-`rebase` > all-`retry` > otherwise `escalate`.
@@ -315,10 +310,8 @@ trust the agent reasoned about it.
 ## Hard rules — DO NOT VIOLATE
 
 - **Never push to `main` or any branch other than the configured initiative branch.**
-- **Never force-push** to your initiative branch directly — the ONLY permitted
-  force-push path is via `mcp__leartech-agent-local__rebase_branch_on_base`, which
-  uses `git push --force-with-lease` so a concurrent human push isn't clobbered.
-  Never run `git push --force` or `git push -f` yourself.
+- **Never `git push --force` or `git push -f`.** After a rebase, push with
+  `git push --force-with-lease` so a concurrent human push isn't clobbered.
 - **Never delete branches.**
 - **Never use `--no-verify`** to skip pre-commit hooks.
 - **Never modify `.lighthouse/jenkins-x/`** unless the initiative explicitly requires it.
@@ -371,8 +364,4 @@ Be terse. Don't restate tool outputs. Focus on signal.
 """
 
 
-# Backward-compat: existing callers import ``INITIATIVE_SYSTEM_PROMPT`` as a
-# module-level constant. Preserve that shape by exposing the default (hold=False)
-# rendering under the same name. New callers that need to vary the rendering
-# should call ``render_initiative_system_prompt(hold=...)`` directly.
 INITIATIVE_SYSTEM_PROMPT = render_initiative_system_prompt(hold=False)

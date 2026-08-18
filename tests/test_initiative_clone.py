@@ -45,14 +45,11 @@ def test_clone_repo_uses_git_not_gh_with_token_in_url(tmp_path: Path) -> None:
     assert failure_reason is None, 'success path must report no failure reason'
     mock_run.assert_called_once()
     args = mock_run.call_args[0][0]
-    # First two args identify the command — must be `git clone`, not `gh repo clone`.
     assert args[0:2] == ['git', 'clone'], (
         f'expected git clone, got {args[0:2]} — see test docstring for why this matters'
     )
-    # Shallow clone keeps the cluster-pod checkout fast.
     assert '--depth' in args
     assert '1' in args
-    # The URL must embed the token via the `x-access-token:<token>` user.
     url = next(a for a in args if a.startswith('https://'))
     assert 'x-access-token:ghs_secret_token_123@github.com' in url
     assert url.endswith('/mikelear/leartech-automated-agent.git')
@@ -71,9 +68,6 @@ def test_clone_repo_returns_2_when_gh_token_missing(tmp_path: Path) -> None:
         exit_code, failure_reason = _clone_repo(qualified_repo='mikelear/leartech-automated-agent', cwd=target)
 
     assert exit_code == 2
-    # Layer 1 — comprehensive-failure-diagnostics: the failure reason
-    # surfaces the GH_TOKEN gap so the run-driver can persist it to
-    # ``initiative_runs.error`` via ``write_failure_reason``.
     assert failure_reason is not None
     assert failure_reason.startswith('clone_failed:')
     assert 'GH_TOKEN' in failure_reason
@@ -87,8 +81,6 @@ def test_clone_repo_returns_2_on_git_failure_and_redacts_token(tmp_path: Path, c
     """
     target = tmp_path / 'failed-clone'
     fake_token = 'ghs_super_secret_xyz'  # noqa: S105 — synthetic test fixture, not a real credential
-    # Pretend git wrote the auth URL into its error message — happens
-    # in practice when git complains about a 403 with the full URL.
     leaky_stderr = (
         f"fatal: unable to access 'https://x-access-token:{fake_token}@github.com/foo/bar.git/': "
         'The requested URL returned error: 403'
@@ -102,11 +94,8 @@ def test_clone_repo_returns_2_on_git_failure_and_redacts_token(tmp_path: Path, c
 
     assert exit_code == 2
     captured = capsys.readouterr()  # type: ignore[attr-defined]
-    # The token must NOT appear in any echoed output.
     assert fake_token not in captured.err
     assert '***REDACTED***' in captured.err
-    # Layer 1 — failure reason must also be token-free; same redaction
-    # path runs before constructing the reason string.
     assert failure_reason is not None
     assert failure_reason.startswith('clone_failed:')
     assert fake_token not in failure_reason

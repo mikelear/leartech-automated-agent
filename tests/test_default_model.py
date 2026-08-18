@@ -20,7 +20,6 @@ def test_default_model_uses_env_var_when_set(monkeypatch: Any, env_value: str, e
     """When LEARTECH_AGENT_MODEL is set, DEFAULT_MODEL uses that value."""
     monkeypatch.setenv('LEARTECH_AGENT_MODEL', env_value)
 
-    # Reload the module to force re-evaluation of os.environ.get()
     import gate.agent.main
 
     importlib.reload(gate.agent.main)
@@ -29,10 +28,8 @@ def test_default_model_uses_env_var_when_set(monkeypatch: Any, env_value: str, e
 
 def test_default_model_is_opus_when_env_var_unset(monkeypatch: Any) -> None:
     """When LEARTECH_AGENT_MODEL is unset, DEFAULT_MODEL defaults to claude-opus-4-7."""
-    # Ensure the env var is not set
     monkeypatch.delenv('LEARTECH_AGENT_MODEL', raising=False)
 
-    # Reload the module to force re-evaluation of os.environ.get()
     import gate.agent.main
 
     importlib.reload(gate.agent.main)

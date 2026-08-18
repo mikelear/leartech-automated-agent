@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:  # type-only import — no runtime anthropic coupling outside complete()
+if TYPE_CHECKING:
     from anthropic.types import Message
 
 
@@ -48,8 +48,4 @@ def complete(
         kwargs['tools'] = tools
     if tool_choice is not None:
         kwargs['tool_choice'] = tool_choice
-    # The SDK's create() is a heavily-overloaded, strictly-typed method; our
-    # generic kwargs dict satisfies the TypedDict params at runtime but mypy can't
-    # match an overload from a dict-splat (call-overload) and infers Any (no-any-
-    # return). Justified suppression — the seam intentionally wraps the typed API.
     return client.messages.create(**kwargs)  # type: ignore[call-overload, no-any-return]

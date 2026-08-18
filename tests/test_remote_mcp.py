@@ -41,17 +41,10 @@ class _FakeResp:
         return self._payload
 
 
-# Live `/mcps` payload shape (host = source of truth): `mounts` carries the
-# authoritative {name, path}; `servers` (name list) kept for backward-compat.
 def _mounts(*names: str) -> list[dict[str, str]]:
     return [{'name': n, 'path': f'/mcp/{n}'} for n in names]
 
 
-# Advertise every server the agent knows about (including the BA agent's
-# platform_state / control_plane / agent_api trio and the infra agent's
-# k8s + jx_release entries) so the happy-path wire-up assertion exercises the
-# full WANTED_MCP_SERVERS set. Any host-only server not in WANTED would be
-# silently ignored by build_remote_mcp_servers.
 _ALL_ADVERTISED = {
     'servers': [
         'pr_context',
@@ -192,31 +185,21 @@ def test_fully_configured_wires_from_discovery_with_bearer(monkeypatch: pytest.M
         'leartech-jx3-flow',
         'leartech-repo-factory',
         'leartech-jx-release',
-        # Infra agent — in-cluster read surface (deploy_health / get_job_state /
-        # list_jobs_by_label) backing the deterministic deploy-health +
-        # bootjob-for-commit checks (replaces the unreachable-from-sandbox HTTP probe).
         'leartech-k8s',
-        # BA agent surface (platform state + control plane + agent API).
         'leartech-platform-state',
         'leartech-control-plane',
         'leartech-agent-api',
     }
     base = 'http://leartech-mcp-servers.jx-staging.svc.cluster.local'
-    # Phase 2: each server is wired as a stdio bridge. The discovered downstream
-    # URL (base + host-advertised path) + bearer are passed to the bridge via env;
-    # the bridge (not the CLI) makes the authed streamable-HTTP call.
     assert servers['leartech-pr-context']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/pr_context'
     assert servers['leartech-tekton']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/tekton'
     assert servers['leartech-jx3-flow']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/jx3_flow'
-    # BA agent MCPs — host-advertised paths, verbatim.
     assert servers['leartech-platform-state']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/platform_state'
     assert servers['leartech-control-plane']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/control_plane'
     assert servers['leartech-agent-api']['env']['LEARTECH_MCP_BRIDGE_URL'] == f'{base}/mcp/agent_api'
     for cfg in servers.values():
         assert cfg['type'] == 'stdio'
         assert cfg['args'] == ['-m', 'gate.mcp_servers.stdio_bridge']
-        # The bridge mints a FRESH token per call (tokens are ~300s), so it gets
-        # the auth CONFIG, NOT a static token that would expire mid-run.
         assert 'LEARTECH_MCP_BRIDGE_TOKEN' not in cfg['env']
         assert cfg['env']['LEARTECH_AUTH_TOKEN_URL'] == _AUTH_ENV['LEARTECH_AUTH_TOKEN_URL']
         assert cfg['env']['LEARTECH_AUTH_CLIENT_ID'] == _AUTH_ENV['LEARTECH_AUTH_CLIENT_ID']
@@ -229,7 +212,6 @@ def test_wanted_mcp_absent_from_mcps_is_skipped_not_guessed(monkeypatch: pytest.
     only wires what the host actually mounts, so it can't 404 on a stale path."""
     _set_env(monkeypatch, dict(_AUTH_ENV))
     _mock_token(monkeypatch)
-    # Host mounts pr_context + tekton but NOT jx3_flow.
     _mock_discovery(monkeypatch, {'mounts': _mounts('pr_context', 'tekton')})
     servers = remote.build_remote_mcp_servers()
     assert set(servers) == {'leartech-pr-context', 'leartech-tekton'}
@@ -278,7 +260,6 @@ def test_discover_mounts_parses_name_path_map(monkeypatch: pytest.MonkeyPatch) -
         'jx3_flow': '/mcp/jx3_flow',
         'k8s': '/mcp/k8s',
         'agent_api': '/mcp/agent_api',
-        # BA agent surface — the host now advertises these too.
         'platform_state': '/mcp/platform_state',
         'control_plane': '/mcp/control_plane',
         'repo_factory': '/mcp/repo_factory',

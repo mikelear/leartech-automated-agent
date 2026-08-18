@@ -64,25 +64,16 @@ class RepoTarget(BaseModel):
 class Initiative(BaseModel):
     """A single deliverable: scope + intent + acceptance for the agent to drive."""
 
-    # ``populate_by_name=True`` so aliased fields (currently just ``test_mode``
-    # ↔ ``testMode``) can be set via EITHER form. The YAML canonical shape uses
-    # the alias (``testMode``, matching the plan-step ``inputs.testMode`` idiom);
-    # Python code can still write ``initiative.test_mode`` without knowing about
-    # the alias.
     model_config = ConfigDict(extra='forbid', populate_by_name=True)
 
     name: str = Field(min_length=1, description='Short kebab-case identifier — also the branch suffix.')
     description: str = Field(default='', description='Why this initiative exists. For humans, not the agent.')
 
-    # New canonical shape: list of repo targets.
     repos: list[RepoTarget] = Field(
         default_factory=list,
         description='List of (repo, branch, base) targets. Preferred over legacy single-repo fields.',
     )
 
-    # Legacy single-repo shorthand. If present and `repos` is empty, the validator
-    # collects these into a single-element `repos` list. If both are present,
-    # validation fails — pick one shape per initiative.
     repo: str | None = Field(
         default=None, description='Legacy single-repo shorthand. Use `repos: [...]` for new initiatives.'
     )
@@ -150,22 +141,6 @@ class Initiative(BaseModel):
         ),
     )
 
-    # v6p0.5 step 2 — feedback context from a prior failed attempt.
-    #
-    # The PR watcher (see ``gate/watcher/iteration_loop.py``) re-spawns
-    # the agent with this field populated when it detects an actionable
-    # end2end / end2end-ui or ai-review failure. The agent's startup
-    # prompt construction (``gate/agent/initiative.py``) reads it and
-    # surfaces each payload as a "previous attempt failed these checks —
-    # read details and fix" block before the standard initiative loop
-    # runs.
-    #
-    # Each entry is a plain dict carrying at least ``kind:`` (the
-    # discriminator — ``'end2end_failure'`` / ``'ai_review_finding'``)
-    # plus the kind-specific fields documented in
-    # :func:`gate.watcher.iteration_loop.format_feedback_payloads_for_prompt`.
-    # Defaults to an empty list — the field is invisible on first-attempt
-    # runs and only ever populated by the watcher's re-spawn path.
     feedback_payloads: list[dict[str, object]] = Field(
         default_factory=list,
         description=(
@@ -176,17 +151,6 @@ class Initiative(BaseModel):
         ),
     )
 
-    # TEST-MODE directive — a plan step may set ``testMode`` to short-circuit
-    # the SDK/LLM loop for orchestration testing. Actual honoring is gated on
-    # ``LEARTECH_AGENT_TEST_MODE_ALLOWED=true`` in the agent's runtime env — a
-    # stray directive in a production plan MUST be ignored. The chart defaults
-    # the env off; only test-shaped deployments turn it on. See
-    # :mod:`gate.agent.test_mode` for the guard + parse + run path.
-    #
-    # Stored as a raw dict here (not a nested pydantic model) so the initiative
-    # YAML shape isn't coupled to test_mode's implementation — the guarded
-    # parse happens inside ``parse_test_mode`` and can evolve without a schema
-    # migration on every consumer.
     test_mode: dict[str, object] | None = Field(
         default=None,
         alias='testMode',
@@ -218,7 +182,6 @@ class Initiative(BaseModel):
         if legacy_set:
             if not (self.repo and self.branch):
                 raise ValueError('Legacy single-repo shape requires both `repo:` and `branch:`.')
-            # Pydantic v2 models are mutable by default; assign normally.
             self.repos = [RepoTarget(repo=self.repo, branch=self.branch, base=self.base or 'main')]
 
         return self

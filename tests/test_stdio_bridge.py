@@ -60,8 +60,8 @@ async def test_bridge_forwards_call_and_returns_result_verbatim() -> None:
     )
     result = await handler(req)
 
-    assert calls == [('open_pr', {'repo': 'x', 'branch': 'b'})]  # delegated verbatim
-    assert result.root.content[0].text == '{"targetPR": 7}'  # result returned unchanged
+    assert calls == [('open_pr', {'repo': 'x', 'branch': 'b'})]
+    assert result.root.content[0].text == '{"targetPR": 7}'
     assert result.root.isError is False
 
 

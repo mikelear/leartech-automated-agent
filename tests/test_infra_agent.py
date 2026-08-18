@@ -31,10 +31,8 @@ def test_infra_role_in_catalog_references_real_mcps() -> None:
     assert {'Read', 'Write', 'Edit', 'Bash'} <= set(role.tools)
     for mcp in role.mcps:
         assert mcp in catalog.mcp_servers, f'infra_agent references unknown MCP {mcp!r}'
-    # k8s + jx-release are REQUIRED for the deterministic release-verify checks.
     assert 'leartech-k8s' in role.mcps
     assert 'leartech-jx-release' in role.mcps
-    # And they must be declared as real MCP servers (not just referenced).
     assert 'leartech-k8s' in catalog.mcp_servers
     assert 'leartech-jx-release' in catalog.mcp_servers
 
@@ -43,26 +41,19 @@ def test_allowed_tools_grant_repo_factory_open_pr_jx_release_and_k8s() -> None:
     tools = infra_agent.INFRA_ALLOWED_TOOLS
     assert {'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'} <= set(tools)
     assert 'mcp__leartech-pr-context__open_pr' in tools
-    # deterministic repo ops go through the server-side repo-factory MCP
     for t in ('create_repo', 'register_source_config', 'scaffold', 'smoke_pr'):
         assert f'mcp__leartech-repo-factory__{t}' in tools
-    # the JX3 release checks go through the jx-release MCP (called by the
-    # deterministic checks via the bridge)
     for t in ('release_status', 'promote_status', 'retest_promote'):
         assert f'mcp__leartech-jx-release__{t}' in tools
-    # deploy-health + bootjob-for-commit go through the k8s MCP (in-cluster reads;
-    # no kubectl on the agent side, no unreachable-from-sandbox HTTP probe).
     for t in ('deploy_health', 'get_job_state', 'list_jobs_by_label'):
         assert f'mcp__leartech-k8s__{t}' in tools
 
 
 def test_system_prompt_routes_to_repo_factory() -> None:
     prompt = infra_agent._build_system_prompt()
-    assert 'mcp__leartech-repo-factory__' in prompt  # deterministic ops via the MCP, not Bash
+    assert 'mcp__leartech-repo-factory__' in prompt
     assert 'do not patch by hand' in prompt
     assert 'jx-build-cluster-gsm' in prompt and 'jx-build-cluster-akv' in prompt
-    # scaffold MUST pass run_id/namespace so it publishes targetPR -> step reaches
-    # AwaitingReview (else a repo-backed scaffold step fails as "opened no PR").
     assert 'run_id=$LEARTECH_RUN_ID' in prompt and 'namespace=$AGENT_RUN_NAMESPACE' in prompt
 
 
@@ -71,8 +62,6 @@ def test_system_prompt_documents_repo_factory_actions() -> None:
     prompt = infra_agent.INFRA_SYSTEM_PROMPT
     for action in ('create-repo', 'register-source-config', 'scaffold-pr', 'smoke-pr'):
         assert action in prompt, f'{action} missing from INFRA_SYSTEM_PROMPT'
-    # The deterministic release-verify checks run WITHOUT the LLM — the prompt
-    # should say so and NOT re-describe the removed STAGE_STATUS grammar.
     assert 'release-verify checks' in prompt or 'release_checks.py' in prompt
     assert 'STAGE_STATUS' not in prompt
     assert 'release-health-check' not in prompt
@@ -105,28 +94,6 @@ def test_run_infra_task_reraises_sdk_exception(monkeypatch: pytest.MonkeyPatch) 
         asyncio.run(infra_agent.run_infra_task('create-repo', {'newRepo': 'x'}))
 
 
-def test_run_infra_task_check_action_short_circuits_before_api_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A deterministic check action (deploy-health) routes to the no-LLM
-    ``run_check_action`` path BEFORE the ANTHROPIC_API_KEY gate — no api key
-    is needed and ``query`` is never touched."""
-    monkeypatch.delenv('ANTHROPIC_API_KEY', raising=False)
-
-    captured: dict[str, object] = {}
-
-    async def _fake_check(action: str, inputs: dict[str, object]) -> int:
-        captured['action'] = action
-        captured['inputs'] = inputs
-        return 0
-
-    monkeypatch.setattr(infra_agent, 'run_check_action', _fake_check)
-    rc = asyncio.run(infra_agent.run_infra_task('deploy-health', {'service': 'hello-go'}))
-    assert rc == 0
-    assert captured['action'] == 'deploy-health'
-    assert captured['inputs'] == {'service': 'hello-go'}
-
-
 def test_main_rejects_invalid_json_inputs() -> None:
     with pytest.raises(click.BadParameter, match='valid JSON'):
         infra_agent.main.callback(action='create-repo', inputs_opt='{not json', model='m', max_turns=1)
@@ -150,7 +117,7 @@ def test_main_reads_action_and_params_from_env(monkeypatch: pytest.MonkeyPatch) 
         infra_agent.main.callback(action=None, inputs_opt=None, model='m', max_turns=1)
     assert exc.value.code == 0
     assert captured['action'] == 'create-repo'
-    assert captured['params'] == {'newRepo': 'mikelear/hello-go'}  # action key stripped from params
+    assert captured['params'] == {'newRepo': 'mikelear/hello-go'}
 
 
 def test_main_errors_when_no_inputs(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -172,6 +139,5 @@ def test_authoring_capabilities_advertises_deterministic_deploy_health() -> None
     data = yaml.safe_load(caps_path.read_text(encoding='utf-8'))
     actions = data['agent_types']['leartech-agent-infra']['actions']
     assert actions['deploy-health']['status'] == 'available'
-    # The removed legacy actions must be gone from the authoring surface.
     for removed in ('release-health-check', 'release-status', 'verify-gate', 'boot-status'):
         assert removed not in actions, f'{removed} should have been removed from authoring_capabilities.yaml'

@@ -25,16 +25,13 @@ def test_calibration_file_exists_at_package_path() -> None:
 
 def test_calibration_file_is_non_empty_and_reasonable_size() -> None:
     text = CALIBRATION_PATH.read_text(encoding='utf-8')
-    # Strip whitespace before counting so a file of only newlines doesn't pass.
     assert text.strip(), 'Calibration markdown is empty.'
-    # Target is ~150-250 lines per the initiative spec; allow a wider band.
     line_count = len(text.splitlines())
     assert 80 <= line_count <= 400, f'Unexpected line count: {line_count} (target ~150-250).'
 
 
 def test_calibration_contains_required_sections() -> None:
     text = CALIBRATION_PATH.read_text(encoding='utf-8')
-    # Section headings — match on stable substrings, allow tone reflows.
     required_markers = [
         '## A. The rough shape',
         '## B. How to find the truth',
@@ -68,7 +65,6 @@ def test_calibration_cross_references_memory_entries() -> None:
 def test_calibration_warns_against_test_with_cluster_prefix() -> None:
     """Pin the chatops syntax gotcha — `/test gcp/pr` does NOT fire anything."""
     text = CALIBRATION_PATH.read_text(encoding='utf-8')
-    # The substantive warning should mention that prefixed names don't work.
     assert '/test gcp/pr' in text or '/test <cluster>/<check>' in text
     assert 'strips the cluster prefix' in text or 'silently dropped' in text
 
@@ -76,9 +72,7 @@ def test_calibration_warns_against_test_with_cluster_prefix() -> None:
 def test_calibration_parses_as_markdown_round_trip() -> None:
     """Basic sanity: file is valid UTF-8 and has matched fences if any are used."""
     text = CALIBRATION_PATH.read_text(encoding='utf-8')
-    # Triple-backtick fences must be balanced (even count of ``` occurrences).
     fence_count = text.count('```')
     assert fence_count % 2 == 0, f'Unbalanced ``` fences: {fence_count} occurrences.'
-    # No NUL bytes / control chars beyond \t, \n, \r.
     bad = [c for c in text if ord(c) < 32 and c not in '\t\n\r']
     assert not bad, f'Found {len(bad)} control characters in calibration markdown.'

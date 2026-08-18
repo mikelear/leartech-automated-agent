@@ -44,53 +44,11 @@ from claude_agent_sdk.types import McpStdioServerConfig
 
 log = logging.getLogger(__name__)
 
-# The audience the internal MCP host enforces on bearer tokens. Fixed — matches
-# leartech-orchestrator-controller's controller.MCPAudience.
 MCP_AUDIENCE = 'leartech-mcp'
 
 DEFAULT_SCOPE = 'leartechapi.internal_services'
 _TOKEN_TIMEOUT = 15.0
 
-# The remote MCP servers this agent role WANTS, by the SERVER name the host
-# advertises on ``/mcps`` (ground truth, e.g. ``pr_context`` with an underscore).
-# This is role scoping only — it declares intent, NOT paths/URLs. The host is the
-# single source of truth for HOW to reach each server: build_remote_mcp_servers
-# discovers the live ``mounts`` ({name, path}) from ``/mcps`` and wires each
-# wanted server at the host's advertised path VERBATIM. The agent never
-# constructs or guesses a URL, so a path/name drift between this repo and the
-# deployed host can no longer silently 404 the agent (the bug that stranded
-# open_pr). Add a server to this set to consume it; nothing else.
-#
-#   * pr_context  — open_pr (+ get_pr_metadata/diff, list_changed_files).
-#   * tekton      — step-aware PipelineRun inspection (6 tools); the former
-#     in-process shim is gone. classify_step_failure + rebase_branch_on_base
-#     stay in-process under `leartech-agent-local` (LLM diagnosis + workspace git).
-#   * jx3_flow    — aggregate PR-check status (list_pr_checks, wait_for_terminal,
-#     wait_for_first_failure_or_all_pass); replaces the old pipeline_server shim.
-#   * repo_factory — server-side deterministic repo ops (create_repo,
-#     register_source_config, scaffold) for the infra agent; the credential
-#     (GITHUB_OWNER_ADMIN_PAT) lives in the MCP host, not the agent. Only the
-#     infra_agent role's allowed_tools grants these; other agents just don't call them.
-#   * jx_release — JX3 release-check primitives (release_status, promote_status,
-#     retest_promote) the DETERMINISTIC release-verify checks call directly
-#     (gate/agent/release_checks.py — release-pipeline-status / promote-status).
-#   * k8s — in-cluster Kubernetes read surface (deploy_health, get_job_state,
-#     list_jobs_by_label, get_pod_state). The deterministic checks call deploy_health
-#     as the authoritative deploy-health signal (>=1 available replica + NEW version
-#     ⇒ healthy), replacing the httpx /health probe that couldn't reach the ingress
-#     from the infra sandbox. Only the infra_agent role's allowed_tools grants these;
-#     other agents just don't call them.
-#   * platform_state — read-only live-state view for the BA agent: list_plans /
-#     list_runs / get_plan_state / deploy_health. Correlates the brief's
-#     `resolves` (PlanRefs) against what's actually in flight so BA doesn't
-#     re-author an existing plan.
-#   * control_plane — control-plane write path for the BA agent: create_plan
-#     (and any future landscape-level authoring surface). Draft-by-default —
-#     BA sets hold:true + a draft annotation on the created Plans.
-#   * agent_api — orchestrator/agent API surface for the BA agent: amend_plan
-#     (mutate an in-flight plan when re-authoring is safer than a new plan).
-#     Distinct from control_plane so future finer-grained authz can gate the
-#     two independently.
 WANTED_MCP_SERVERS: frozenset[str] = frozenset(
     {
         'pr_context',
@@ -98,13 +56,7 @@ WANTED_MCP_SERVERS: frozenset[str] = frozenset(
         'jx3_flow',
         'repo_factory',
         'jx_release',
-        # k8s — in-cluster reads (deploy_health / get_job_state /
-        # list_jobs_by_label) the deterministic release-verify checks call for
-        # deploy-health + bootjob-for-commit. Deploys the authoritative "healthy
-        # iff >=1 available replica + NEW version" verdict from inside the
-        # cluster (no ingress / kubectl on the agent side).
         'k8s',
-        # BA agent — live-state + authoring surface.
         'platform_state',
         'control_plane',
         'agent_api',
@@ -153,9 +105,6 @@ def discover_mounts(base: str, token: str) -> dict[str, str] | None:
                 out[name] = path
         if out:
             return out
-    # Transitional: host predates the `mounts` field (only `servers`). Derive
-    # the conventional path so the agent keeps working until every host ships
-    # `mounts`; warn so we notice + can drop this branch.
     servers = payload.get('servers')
     if isinstance(servers, list) and servers:
         log.warning(
@@ -181,12 +130,6 @@ def mint_mcp_token() -> str | None:
     scope = os.environ.get('LEARTECH_AUTH_SCOPE', DEFAULT_SCOPE)
     if not (token_url and client_id and client_secret):
         return None
-    # Deliberately SYNCHRONOUS: this runs exactly once during agent startup —
-    # inside the synchronous ClaudeAgentOptions construction, BEFORE the async
-    # `query()` message loop begins. No other coroutines are scheduled yet, so
-    # the blocking grant does not stall concurrent work. Making it async would
-    # force the whole options-construction path (sync by SDK contract) to
-    # become async for no runtime benefit.
     try:
         resp = httpx.post(
             token_url,
@@ -195,8 +138,6 @@ def mint_mcp_token() -> str | None:
                 'client_id': client_id,
                 'client_secret': client_secret,
                 'scope': scope,
-                # RFC 8707 resource-audience binding — Hydra stamps aud on the
-                # access token so the internal MCP's aud gate accepts it.
                 'audience': MCP_AUDIENCE,
             },
             timeout=_TOKEN_TIMEOUT,
@@ -205,7 +146,6 @@ def mint_mcp_token() -> str | None:
         log.warning('remote-MCP token mint failed (transport): %s', exc)
         return None
     if resp.status_code != 200:
-        # Never log the body — it can echo the request; log status only.
         log.warning('remote-MCP token mint failed: HTTP %s', resp.status_code)
         return None
     token = resp.json().get('access_token')
@@ -258,9 +198,6 @@ def build_remote_mcp_servers() -> dict[str, McpStdioServerConfig]:
 
     mounts = discover_mounts(base, token)
     if mounts is None:
-        # Discovery itself failed (host unreachable / auth). Rather than wire
-        # blind against an unverified host, degrade to no remote MCPs — the
-        # agent halts cleanly at PR-open instead of racking up 404s.
         log.warning(
             'remote-MCP discovery failed against %s — wiring NO remote MCPs '
             '(cannot obtain server paths; agent will halt at open_pr).',
@@ -275,21 +212,12 @@ def build_remote_mcp_servers() -> dict[str, McpStdioServerConfig]:
         if not path:
             missing.append(server_name)
             continue
-        # Host path VERBATIM — the agent never constructs the URL beyond joining
-        # its configured base with the host-advertised path. The URL + bearer go
-        # to the stdio bridge via env; the bridge (not the CLI) makes the authed
-        # streamable-HTTP call, so the header is actually sent.
         servers[_agent_mcp_name(server_name)] = McpStdioServerConfig(
             type='stdio',
             command=sys.executable,
             args=['-m', 'gate.mcp_servers.stdio_bridge'],
             env={
                 'LEARTECH_MCP_BRIDGE_URL': f'{base}{path}',
-                # Pass the auth CONFIG, NOT a static token: the aud=leartech-mcp
-                # token is short-lived (~300s), so a token minted here at agent
-                # startup expires long before a multi-minute run reaches open_pr.
-                # The bridge mints a FRESH token per call from these. (The token
-                # minted above is only for the one-shot /mcps discovery.)
                 'LEARTECH_AUTH_TOKEN_URL': os.environ.get('LEARTECH_AUTH_TOKEN_URL', ''),
                 'LEARTECH_AUTH_CLIENT_ID': os.environ.get('LEARTECH_AUTH_CLIENT_ID', ''),
                 'LEARTECH_AUTH_CLIENT_SECRET': os.environ.get('LEARTECH_AUTH_CLIENT_SECRET', ''),
