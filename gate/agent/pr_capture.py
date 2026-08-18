@@ -11,7 +11,7 @@ arbitrary GitHub PR links quoted in narrative, silently overwriting the real
 number with an unrelated PR).
 
 Sole exposed helper: :func:`parse_pr_number_from_gh_output`. Its ONLY consumer is
-:mod:`gate.tools.pr_back` (the MCP admin's ``gh pr create`` subprocess wrapper).
+the ``open_pr`` MCP tool, which publishes ``status.targetPR``.
 The dev-agent loop no longer parses PR URLs at all — ``open_pr`` (MCP) records the
 number from structured API JSON onto ``AgentRun.status.targetPR``, and the runtime
 reads that back (``initiative._resolve_target_pr``). The old SDK-loop
@@ -35,7 +35,7 @@ def parse_pr_number_from_gh_output(text: str) -> int | None:
     by ``\\n``, so a bare ``strip()`` isn't sufficient — the regex
     handles both cases uniformly).
 
-    Its only consumer is :mod:`gate.tools.pr_back`, which parses the URL returned
+    The URL is parsed
     by the MCP admin's ``gh pr create`` subprocess.
     """
     if not text:

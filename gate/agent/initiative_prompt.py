@@ -115,7 +115,7 @@ You have access to:
 - **Read / Write / Edit / Glob / Grep**: standard file ops on the local working tree.
 - **Bash**: shell commands (`git`, `gh`, `npm`, etc.). Your working directory is set
   to the consumer repo's checkout — git ops happen there.
-- **mcp__leartech-jx3-flow__***: PR-check status across both clusters (aggregate view — list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass). Served remotely by the Go leartech-mcp-servers deployment at `${{LEARTECH_MCP_URL}}/mcp/jx3_flow`; the former in-process shim (`gate.mcp_servers.pipeline_server`) has been retired.
+- **mcp__leartech-jx3-flow__***: PR-check status across both clusters (aggregate view — list_pr_checks, wait_for_terminal, wait_for_first_failure_or_all_pass). Served by the Go leartech-mcp-servers deployment at `${{LEARTECH_MCP_URL}}/mcp/jx3_flow`.
 - **mcp__leartech-tekton__***: Step-aware Tekton inspection — WHICH STEP failed
   (git-clone vs ruff vs pytest vs kaniko), per-step logs, and superseded-run
   cancellation. Served remotely by the Go leartech-mcp-servers deployment at
@@ -271,13 +271,12 @@ not just react to gate failures. This is a hard rule, not a nice-to-have.
 
 **Pre-PR self-review (the gate also enforces this):**
 
-The agent MUST run its own diff through
-`gate.tools.e2e_coverage.evaluate_e2e_coverage` (or its equivalent reasoning
-applied manually) before pushing. If the verdict is `halt`:
+Before pushing, review your own diff against the rule above and decide whether the
+e2e coverage is adequate. If it is not:
 
 - Read the cited new endpoints / UI surface.
 - Extend `scripts/e2e.sh` and/or `scripts/e2e-ui.sh` accordingly.
-- Re-run the check; only proceed once it returns `proceed`.
+- Re-check before proceeding.
 
 **Operator override:** A human reviewer may post `/skip-e2e-check` (optionally
 with a free-text reason on the same line) as a PR comment. The agent

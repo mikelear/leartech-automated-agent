@@ -34,7 +34,7 @@ MCP_ALLOWED_TOOLS = [
 
 
 def _build_system_prompt() -> str:
-    """JX3 platform calibration, then catalog lessons for review_agent, then the review prompt."""
+    """JX3 platform calibration, then the review prompt."""
     blocks: list[str] = [load_jx3_calibration()]
     blocks.append(REVIEW_SYSTEM_PROMPT)
     return '\n\n---\n\n'.join(blocks)

@@ -5,10 +5,9 @@ node move can end an iteration mid-thought. The successor then starts with a
 branch and a PR but no record of what its predecessor concluded, which is how a
 fresh iteration came to rubber-stamp an unmerged PR.
 
-Turn count and spend live nowhere durable in the AgentRun runtime. That Job gets
-no DB DSN, so ``run_driver.update_run_progress`` falls back to a process-local
-dict that dies with the pod, and the agent writes only ``status.targetPR`` to the
-CR. This module puts them on the PR instead, via the ``post_pr_handoff`` MCP tool.
+Turn count and spend live nowhere durable: the agent writes only ``status.targetPR``
+to the CR, and anything held in process dies with the pod. This module puts them on
+the PR instead, via the ``post_pr_handoff`` MCP tool.
 
 Deterministic, not prompt-driven: the LLM is not asked to remember to check in.
 Cadence is decided here; the STATE classification (ok / approaching_limit /
