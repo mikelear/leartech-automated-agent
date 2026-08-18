@@ -33,13 +33,13 @@ spec:
             uv sync --dev --frozen --no-cache 2>/dev/null || uv sync --dev --no-cache
 
             echo "=== Ruff Format Check ==="
-            uv run ruff format --check app gate tests
+            uv run ruff format --check gate tests
 
             echo "=== Ruff Lint ==="
-            uv run ruff check app gate tests
+            uv run ruff check gate tests
 
             echo "=== Mypy Type Check ==="
-            uv run mypy app gate
+            uv run mypy gate
   podTemplate:
     tolerations:
     - key: sku

@@ -8,6 +8,7 @@ dependencies = [
     "anthropic>=0.40.0",
     "claude-agent-sdk>=0.1.72",
     "click>=8.1.0",
+    "defusedxml>=0.7.1",
     # image (go/ng/rust/py are all FROM the runtime base) with no per-language
     # install. Consumes GOOGLE_APPLICATION_CREDENTIALS (materialised by
     # gate.agent.gcp_credentials) so an agent told to read a private gs://
@@ -27,6 +28,7 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "types-defusedxml>=0.7",
     "ruff>=0.8.0",
     "bandit>=1.7",
     "mypy>=1.13.0",

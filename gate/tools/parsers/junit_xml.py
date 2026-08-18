@@ -36,7 +36,9 @@ from __future__ import annotations
 import logging
 import re
 from typing import Any
-from xml.etree import ElementTree as ET  # noqa: S405 — see docstring
+from xml.etree.ElementTree import Element, ParseError  # noqa: S405
+
+from defusedxml.ElementTree import fromstring
 
 from gate.tools.parsers._common import Finding, normalise_severity
 
@@ -55,7 +57,7 @@ def _strip_doctype(content: str) -> str:
     return _DOCTYPE_RE.sub('', content)
 
 
-def _safe_text(node: ET.Element | None) -> str:
+def _safe_text(node: Element | None) -> str:
     """Return ``node.text or ''`` — convenience for missing-element cases."""
     if node is None or node.text is None:
         return ''
@@ -67,7 +69,7 @@ def _failure_finding(
     classname: str,
     testname: str,
     failure_kind: str,
-    elem: ET.Element,
+    elem: Element,
 ) -> Finding:
     """Build a Finding from a single ``<failure>``/``<error>``/``<skipped>`` element.
 
@@ -131,13 +133,13 @@ def parse_junit_xml(content: str | bytes) -> list[Finding]:
         return []
 
     try:
-        root = ET.fromstring(content_str)  # noqa: S314 — DOCTYPE stripped above
-    except ET.ParseError as exc:
+        root = fromstring(content_str)
+    except ParseError as exc:
         logger.warning('junit_xml: failed to parse XML (%s); returning empty findings', exc)
         return []
 
     # Normalise to a flat list of testsuite elements.
-    suites: list[ET.Element]
+    suites: list[Element]
     tag = root.tag.lower()
     if tag == 'testsuites':
         suites = [s for s in root.findall('testsuite')]
@@ -145,7 +147,7 @@ def parse_junit_xml(content: str | bytes) -> list[Finding]:
         suites = [root]
     elif tag == 'testcase':
         # Synthesise a minimal suite so the loop below works uniformly.
-        synthetic = ET.Element('testsuite', {'name': ''})
+        synthetic = Element('testsuite', {'name': ''})
         synthetic.append(root)
         suites = [synthetic]
     else:
