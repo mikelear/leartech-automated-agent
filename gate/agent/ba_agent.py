@@ -86,7 +86,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from gate import obslog
 from gate.agent.calibrations import load_jx3_calibration
-from gate.agent.lessons import render_for
 from gate.mcp_servers import build_remote_mcp_servers
 
 DEFAULT_MODEL = os.environ.get('LEARTECH_BA_AGENT_MODEL', 'claude-opus-4-8')
@@ -349,9 +348,6 @@ def _build_system_prompt() -> str:
     """JX3 calibration + any encoded ba_agent lessons + the authorable-capability
     catalog + the BA system prompt."""
     blocks: list[str] = [load_jx3_calibration()]
-    lessons = render_for('ba_agent')
-    if lessons:
-        blocks.append(lessons)
     capabilities = _render_authoring_capabilities()
     if capabilities:
         blocks.append(capabilities)

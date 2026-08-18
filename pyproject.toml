@@ -1,7 +1,7 @@
 [project]
 name = "leartech-automated-agent"
 version = "0.2.0"
-description = "Criteria-driven agent runner for leartech — deployed as a long-running FastAPI service exposing initiative + lessons APIs. Mirrors the leartech-ai-classifier pattern."
+description = "Dev agent for leartech — drives a repo change to a green PR via the Go MCP servers. Packaged as an image the controller spawns; no service."
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -47,7 +47,6 @@ dev = [
 gate = "gate.cli:main"
 agent = "gate.agent.main:main"
 initiative = "gate.agent.initiative:main"
-lessons = "gate.agent.lessons.cli:main"
 
 [tool.ruff]
 target-version = "py312"
@@ -58,19 +57,9 @@ exclude = [".lighthouse"]
 select = ["E", "F", "B", "I", "UP", "S", "N"]
 ignore = ["E501"]
 
-[tool.ruff.lint.flake8-bugbear]
-# FastAPI's canonical idiom is ``Depends(...)`` / ``Query(...)`` etc. as
-# argument defaults — the framework interprets the "call" as a dependency
-# marker, not a live invocation. Marking them immutable-in-defaults quiets
-# the B008 false positive without disabling the rule globally (real B008
-# hits — like ``arg: list = []`` — still surface).
-extend-immutable-calls = [
-]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["S101", "S105", "S106", "S107", "S603", "S607"]  # S105/S106/S107: fake tokens/secrets in test fixtures/helpers are not real credentials
-"gate/criteria/**/*" = ["S101"]
-"gate/tools/*" = ["S603", "S607"]
 "gate/cli.py" = ["S603", "S607"]
 "gate/mcp_servers/*" = ["S603", "S607"]
 "gate/agent/initiative.py" = ["S603", "S607"]  # shells out to `gh repo clone` for cluster-mode consumer-repo bootstrap
@@ -107,7 +96,7 @@ disallow_untyped_calls = false
 warn_return_any = false
 
 [tool.pytest.ini_options]
-testpaths = ["gate/criteria", "tests"]
+testpaths = ["tests"]
 addopts = "--tb=short -ra"
 asyncio_mode = "auto"
 markers = [
@@ -127,7 +116,6 @@ markers = [
 branch = true
 source = ["gate"]
 omit = [
-    "gate/criteria/*",
     "gate/cli.py",
     "gate/mcp_servers/*",
     "gate/agent/__init__.py",
@@ -135,7 +123,6 @@ omit = [
     "gate/agent/crash_sticky.py",
     "gate/agent/initiative.py",
     "gate/agent/initiative_prompt.py",
-    "gate/agent/lessons/*",
     "gate/agent/main.py",
     "gate/agent/mcp_catalog.py",
     "gate/agent/self_retrospect.py",

@@ -170,13 +170,9 @@ def test_initiative_compose_calls_renderer_with_hold() -> None:
     catch it — but pinning the intent surfaces regressions faster.
     """
     from gate.agent.calibrations import JX3_CALIBRATION_HEADER, load_jx3_calibration
-    from gate.agent.lessons import render_for
 
     init = Initiative(name='x', repo='r', branch='b', goal='g', hold=True)
     blocks: list[str] = [load_jx3_calibration()]
-    lessons = render_for('initiative_agent')
-    if lessons:
-        blocks.append(lessons)
     blocks.append(render_initiative_system_prompt(hold=init.hold))
     composed = '\n\n---\n\n'.join(blocks)
 

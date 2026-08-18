@@ -3,8 +3,6 @@
 These are markdown files shipped INSIDE the wheel (not env-var injected) so
 every deployment gets the same calibration without operator-side config. The
 ``LEARTECH_AGENT_CALIBRATIONS`` env var on top of this still composes — the
-lessons-catalog renderer (``gate.agent.lessons.render_for``) is unaffected;
-this just prepends one more static block.
 
 The cache is process-lifetime — file changes require a redeploy anyway since
 the markdown is baked into the image at build time.

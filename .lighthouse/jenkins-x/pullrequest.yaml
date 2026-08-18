@@ -81,11 +81,8 @@ spec:
             echo "=== Running state-machine coverage gate ==="
             uv run pytest --cov --cov-report=xml --cov-report=term tests/
             uv run python scripts/check_state_machine_coverage.py
-        # Phase D.1: smoke-test Dockerfile.runtime on PR. We can't FROM
-        # ghcr.io/mikelear/leartech-agent-base from inside a PR (no ghcr.io
-        # pull auth on PR runs), so we override BASE_IMAGE=python:3.13-slim
-        # to validate the COPY/RUN structure. Kaniko --no-push skips registry
-        # auth entirely. Release builds use the real agent-base.
+            echo "=== Prompt contract: assembled prompt must match the committed artefact ==="
+            uv run python scripts/render_system_prompt.py
         - name: build-runtime-image-smoke
           image: gcr.io/kaniko-project/executor:debug
           command:

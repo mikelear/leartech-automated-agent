@@ -42,7 +42,6 @@ from claude_agent_sdk.types import (
 from gate import obslog
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative import INITIATIVE_TEKTON_TOOLS, WRITE_MODE_TOOLS
-from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
 from gate.mcp_servers import build_remote_mcp_servers
 
@@ -138,9 +137,6 @@ Report concisely what you did, which PRs you opened (numbers), and the pass/fail
 def _build_system_prompt() -> str:
     """JX3 calibration + any encoded infra_agent lessons + the infra system prompt."""
     blocks: list[str] = [load_jx3_calibration()]
-    lessons = render_for('infra_agent')
-    if lessons:
-        blocks.append(lessons)
     blocks.append(INFRA_SYSTEM_PROMPT)
     return '\n\n---\n\n'.join(blocks)
 

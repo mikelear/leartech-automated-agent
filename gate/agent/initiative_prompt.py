@@ -120,7 +120,7 @@ You have access to:
   (git-clone vs ruff vs pytest vs kaniko), per-step logs, and superseded-run
   cancellation. Served remotely by the Go leartech-mcp-servers deployment at
   `${{LEARTECH_MCP_URL}}/mcp/tekton`. Prefer this over shelling out to
-  `pr-pipelines.sh` once a Tekton failure occurs.
+  shelling out once a Tekton failure occurs.
 - **Bash**: run the language image's own build contract locally before you push —
   for Go that is `make -f /usr/local/share/leartech-go.mk <target>`, the same
   targets CI runs. Fix what it reports rather than discovering it in the pipeline.
@@ -149,8 +149,8 @@ You have access to:
    Concretely:
 
    - Run the image's full build contract, not a filtered subset.
-   - If anything fails, read each failing check's logs (via `~/leartech/Hub/scripts/pr-pipelines.sh
-     <repo> <pr> --failed-only --logs`) and **compare the file paths in the failure output
+   - If anything fails, read each failing check's logs with
+     `mcp__leartech-tekton__step_logs` and **compare the file paths in the failure output
      against the diff of your PR**. If any failure references a file you touched, it's
      YOURS — fix and iterate.
    - Only declare done if every catalog check is either SUCCESS, or its failure
@@ -206,12 +206,11 @@ You have access to:
     d. If multiple steps failed across multiple checks, take the precedence:
        any `fix_code` > any `fix_test` > all-`rebase` > all-`retry` > otherwise `escalate`.
 
-    Read the failure log first via `step_logs` BEFORE classifying — never assume.
-    The legacy `~/leartech/Hub/scripts/pr-pipelines.sh` path is a fallback only when
-    the Tekton MCP returns empty (pod GC'd, run name not labelled).
+    Read the failure log with `mcp__leartech-tekton__step_logs` BEFORE deciding — never
+    assume. If it returns empty (pod GC'd, run not labelled), say so in the sticky and
+    escalate; do NOT guess.
 
-    The classifier returns `unknown` + `escalate` for any unrecognised shape. The
-    agent must NOT blindly retry an `unknown` failure — that's the D.5.1.2
+    Never blindly retry a failure you cannot place — that is the
     "hidden merge conflict masked as lint failure" anti-pattern.
 
 11. **Cancel superseded PipelineRuns on every force-push.** Whenever you push a new

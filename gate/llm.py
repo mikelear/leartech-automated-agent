@@ -1,19 +1,5 @@
-"""Provider seam for one-shot LLM completions (runtime-seam refactor, Phase B1).
-
-The agent's one-shot LLM calls (spec_suggester, video_review, self_retrospect)
-each imported ``anthropic`` and built their own client. This module is the SINGLE
-seam they now call — the ONLY ``anthropic`` import site for one-shot completions —
-so a future provider switch (ai-gateway / openai-compat, Phase D) is a change
-here, not across the callers (see memory project_agent_provider_portability).
-
-``complete()`` wraps the Anthropic Messages API. The client reads
-``ANTHROPIC_BASE_URL`` + ``ANTHROPIC_API_KEY`` from the env, so it already routes
-through leartech-ai-gateway when the repoint is active — no caller change needed.
-
-The return is the Anthropic ``Message`` (callers still read ``.content``); fully
-neutralising the response shape is Phase D (openai-compat), where this seam grows
-a second backend. For now it centralises the import, client, and config.
-"""
+"""Provider seam for one-shot LLM completions — the single ``anthropic`` import site,
+so a provider switch is a change here rather than across callers. Used by ba_agent."""
 
 from __future__ import annotations
 

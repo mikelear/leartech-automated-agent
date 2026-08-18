@@ -19,7 +19,6 @@ from claude_agent_sdk.types import (
 )
 
 from gate.agent.calibrations import load_jx3_calibration
-from gate.agent.lessons import render_for
 from gate.agent.system_prompt import REVIEW_SYSTEM_PROMPT
 from gate.mcp_servers import build_remote_mcp_servers
 
@@ -29,6 +28,7 @@ DEFAULT_MAX_TURNS = 20
 MCP_ALLOWED_TOOLS = [
     'mcp__leartech-jx3-flow__list_pr_checks',
     'mcp__leartech-jx3-flow__wait_for_terminal',
+    'mcp__leartech-jx3-flow__wait_for_first_failure_or_all_pass',
     'mcp__leartech-pr-context__open_pr',
 ]
 
@@ -36,9 +36,6 @@ MCP_ALLOWED_TOOLS = [
 def _build_system_prompt() -> str:
     """JX3 platform calibration, then catalog lessons for review_agent, then the review prompt."""
     blocks: list[str] = [load_jx3_calibration()]
-    lessons = render_for('review_agent')
-    if lessons:
-        blocks.append(lessons)
     blocks.append(REVIEW_SYSTEM_PROMPT)
     return '\n\n---\n\n'.join(blocks)
 
