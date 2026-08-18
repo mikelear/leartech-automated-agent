@@ -1,8 +1,8 @@
 """Catalog coverage — every real file in the repo's catalogs loads cleanly.
 
-The existing unit tests (`test_lessons.py`, `test_initiative_loader.py`,
+The existing unit tests (`test_initiative_loader.py`,
 `test_mcp_catalog.py`) verify loader behaviour against synthetic test data. These
-tests verify the *production* catalogs — every lesson .md, every initiative .yaml,
+tests verify the *production* catalogs — every initiative .yaml,
 every MCP entry — round-trips through the production loader without error.
 
 Catches the silent-drift case where someone adds a malformed real file and the
@@ -15,57 +15,11 @@ from pathlib import Path
 
 import pytest
 
-from gate.agent.lessons.loader import CATALOG_DIR as LESSONS_DIR
-from gate.agent.lessons.loader import parse_lesson_file
 from gate.agent.mcp_catalog import load_catalog
 from gate.initiatives.loader import load_initiative
 
 REPO_ROOT = Path(__file__).parent.parent
 INITIATIVES_DIR = REPO_ROOT / 'initiatives'
-
-
-def _lesson_files() -> list[Path]:
-    return sorted(LESSONS_DIR.glob('*.md'))
-
-
-def test_at_least_one_lesson_exists() -> None:
-    """Smoke check that the catalog isn't empty — guards against an accidental wipe."""
-    files = _lesson_files()
-    assert len(files) >= 20, f'Lessons catalog suspiciously small: {len(files)} files'
-
-
-@pytest.mark.parametrize('lesson_path', _lesson_files(), ids=lambda p: p.stem)
-def test_every_lesson_parses_cleanly(lesson_path: Path) -> None:
-    """Production loader must parse every catalog file without error."""
-    lesson = parse_lesson_file(lesson_path)
-
-    assert lesson.id, f'{lesson_path.name}: empty id field'
-    assert lesson.title, f'{lesson_path.name}: empty title field'
-    assert lesson.body.strip(), f'{lesson_path.name}: empty body'
-
-
-@pytest.mark.parametrize('lesson_path', _lesson_files(), ids=lambda p: p.stem)
-def test_lesson_id_matches_filename(lesson_path: Path) -> None:
-    """File `foo-bar.md` must contain `id: foo-bar` — keeps catalog scannable."""
-    lesson = parse_lesson_file(lesson_path)
-    assert lesson.id == lesson_path.stem, f'{lesson_path.name}: id={lesson.id!r} does not match filename stem'
-
-
-@pytest.mark.parametrize('lesson_path', _lesson_files(), ids=lambda p: p.stem)
-def test_calibration_lessons_have_applies_to(lesson_path: Path) -> None:
-    """Calibration lessons must declare which roles they reach.
-
-    `category: architecture` lessons are historical/design records and may have
-    empty `applies_to` — they're not meant to be injected into agent prompts.
-    Other categories without `applies_to` reach no agent and are almost certainly
-    a mistake.
-    """
-    lesson = parse_lesson_file(lesson_path)
-    if lesson.category == 'architecture':
-        return
-    assert lesson.applies_to, (
-        f'{lesson_path.name}: category={lesson.category!r} with empty applies_to — this lesson reaches no agent role'
-    )
 
 
 def _initiative_files() -> list[Path]:

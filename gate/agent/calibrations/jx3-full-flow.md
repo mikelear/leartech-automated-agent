@@ -183,8 +183,7 @@ and both cluster keepers will react.
 - `jx-release-version` runs independently per cluster. Races between
   clusters can produce different semver numbers for the same merge —
   this is why git tags are cluster-suffixed but chart/registry tags
-  are not. Source of truth:
-  `~/leartech/hub/status/multi-cluster-release-pattern.md`.
+  are not.
 - **Single-cluster failure is a decision class, not a code class.**
   When one cluster's check fails but the other cluster passes for the
   same commit, the FIRST hypothesis is infra asymmetry — node

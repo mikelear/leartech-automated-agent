@@ -55,20 +55,12 @@ def test_review_agent_system_prompt_includes_jx3_calibration() -> None:
 def test_initiative_agent_compose_includes_jx3_calibration() -> None:
     """Mirror of the initiative.py compose pipeline.
 
-    We can't easily call ``run_initiative`` in unit tests (it needs an
-    ANTHROPIC_API_KEY + clones repos), so reconstruct the compose-pipeline
-    shape here. If ``initiative.py`` drifts away from this shape, the
-    real-runtime test would catch the regression — but pinning it here
-    surfaces the intent faster.
+    Composed via ``scripts.render_system_prompt.assemble`` — the one implementation the
+    runtime, the committed artefact and this test all share, so the three cannot drift.
     """
-    from gate.agent.lessons import render_for
+    from scripts.render_system_prompt import assemble
 
-    blocks: list[str] = [load_jx3_calibration()]
-    lessons = render_for('initiative_agent')
-    if lessons:
-        blocks.append(lessons)
-    blocks.append(INITIATIVE_SYSTEM_PROMPT)
-    composed = '\n\n---\n\n'.join(blocks)
+    composed = assemble('initiative_agent')
 
     assert JX3_CALIBRATION_HEADER in composed
     assert SECTION_A_PROBE in composed
