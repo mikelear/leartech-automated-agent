@@ -402,6 +402,7 @@ DEFAULT_INITIATIVE_MAX_TURNS = 300
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']
 
 WAIT_FOR_TERMINAL_TOOL_SUFFIX = 'wait_for_terminal'
+CHECKS_STATUS_ALL_PASSED = 'all_passed'
 
 
 def _tool_name_is_wait_for_terminal(name: str) -> bool:
@@ -418,18 +419,37 @@ def _tool_name_is_wait_for_terminal(name: str) -> bool:
     return name.split('__')[-1] == WAIT_FOR_TERMINAL_TOOL_SUFFIX
 
 
-def _tool_result_reports_all_passed(block: ToolResultBlock) -> bool:
-    """Best-effort: True iff a `wait_for_terminal` tool result says `all_passed`.
+def _all_passed_from_text(text: str) -> bool | None:
+    """Read the tool's ``status`` field. None when the payload is not parseable JSON."""
+    for candidate in (text, *text.split('\n')):
+        stripped = candidate.strip()
+        if not stripped.startswith('{'):
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except (ValueError, TypeError):
+            continue
+        if isinstance(parsed, dict) and isinstance(parsed.get('status'), str):
+            return bool(parsed['status'] == CHECKS_STATUS_ALL_PASSED)
+    return None
 
-    The MCP returns a structured ``{status: all_passed|some_failed|timeout, …}``
-    payload, but the SDK surfaces ``ToolResultBlock.content`` as either a plain
-    string or a list of content parts (dicts with a ``text`` field). We stringify
-    whatever shape it is and look for the ``all_passed`` token — a false negative
-    (we fail to spot it) simply means the LLM-driven stop in the prompt remains the
-    sole lever, which is the safe fallback. A false positive is guarded downstream:
-    the loop only acts on this AFTER a turn that made no further tool calls (the
-    agent's own "I'm done" signal), so mis-reading an unrelated payload can't cut
-    off in-flight work.
+
+def _tool_result_reports_all_passed(block: ToolResultBlock) -> bool:
+    """True iff a ``wait_for_terminal`` result reports ``status: all_passed``.
+
+    leartech-mcp-servers returns ``{status: all_passed|some_failed|timeout, checks,
+    clusters_observed, clusters_unobserved, coverage_note, merged}``, so the status
+    field is compared EXACTLY. A substring search for the token is only a fallback for
+    an unparseable payload, and it logs when it is used.
+
+    This matters because the resulting flag has three consumers and two of them turn a
+    failure into a success: the verdict gate stops recording "PR opened but never green"
+    as a failure, and the exit-code normalisation downgrades exit 1/2 to 0 so Kubernetes
+    does not retry. Only the early-stop consumer is additionally guarded by the agent
+    having made no tool call that turn. A loose match here is therefore a false-success
+    risk, which is why the exact field is preferred: `all_passed` is currently only ever
+    a status VALUE on the Go side, but ``coverage_note`` is free text in the same payload
+    and the shape is owned by another repo.
     """
     if block.is_error:
         return False
@@ -447,8 +467,17 @@ def _tool_result_reports_all_passed(block: ToolResultBlock) -> bool:
                 value = part.get('text')
                 if isinstance(value, str):
                     parts.append(value)
-        text = ' '.join(parts)
-    return 'all_passed' in text
+        text = '\n'.join(parts)
+
+    exact = _all_passed_from_text(text)
+    if exact is not None:
+        return exact
+    matched = CHECKS_STATUS_ALL_PASSED in text
+    logger.warning(
+        'wait_for_terminal result was not parseable JSON; fell back to a substring match (matched=%s)',
+        matched,
+    )
+    return matched
 
 
 def _default_repo_root(repo_name: str) -> Path:
