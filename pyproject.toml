@@ -21,7 +21,7 @@ dependencies = [
     # transitively via claude-agent-sdk; pinned explicitly now that we own an
     # MCP client (Phase 2, provider-portability direction).
     "mcp>=1.20",
-    "kubernetes-asyncio~=32.0",
+    "kubernetes-asyncio~=36.1",
     "pydantic>=2.0",
     "pyyaml>=6.0",
 ]
