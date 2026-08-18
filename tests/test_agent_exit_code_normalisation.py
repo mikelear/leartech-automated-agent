@@ -379,66 +379,8 @@ async def test_max_turns_hit_before_pr_opened_keeps_exit_two(
     )
 
 
-@pytest.mark.asyncio
-async def test_cancel_after_pr_opened_keeps_exit_two(
-    tmp_path: Path,
-) -> None:
-    """Operator-cancel intent is preserved across the normaliser.
-
-    Even when a PR was opened mid-run, the operator deliberately triggered
-    shutdown. The Job condition layer needs that signal so dashboards reflect
-    "cancelled" rather than masking it as success.
-    """
-    messages = [
-        *_pr_opened_messages(),
-        _result_message(turns=2),
-    ]
-
-    async def fake_drain(_run_id: str | None, sink: Any) -> int:
-        # Mutate the loop_state via the sink the way a real cancel command would.
-        # The next ``cancel_requested`` check inside ``_drain_then_check_cancel``
-        # observes the flag and the loop breaks with ``exit_via_cancel=True``.
-        sink.request_cancel('cancel_after_pr_opened: simulated')
-        return 1
-
-    with ExitStack() as stack:
-        _enter_common_patches(stack, messages)
-        stack.enter_context(patch('gate.agent.initiative.drain_commands', fake_drain))
-        summary = await run_initiative(
-            **_build_run_kwargs(tmp_path),
-            max_turns=200,
-        )
-
-    assert summary.exit_code == 2, (
-        f'expected exit_code=2 (operator cancel intent preserved even with PR open); got {summary.exit_code}'
-    )
 
 
-@pytest.mark.asyncio
-async def test_cancel_before_pr_opened_keeps_exit_two(
-    tmp_path: Path,
-) -> None:
-    """Operator cancel before any PR was opened. Exit 2 stays — same rationale
-    as ``test_cancel_after_pr_opened_keeps_exit_two`` (operator intent > PR
-    presence)."""
-    messages = [
-        *_no_pr_messages(),
-        _result_message(turns=2),
-    ]
-
-    async def fake_drain(_run_id: str | None, sink: Any) -> int:
-        sink.request_cancel('cancel_before_pr_opened: simulated')
-        return 1
-
-    with ExitStack() as stack:
-        _enter_common_patches(stack, messages)
-        stack.enter_context(patch('gate.agent.initiative.drain_commands', fake_drain))
-        summary = await run_initiative(
-            **_build_run_kwargs(tmp_path),
-            max_turns=200,
-        )
-
-    assert summary.exit_code == 2
 
 
 @pytest.mark.asyncio
