@@ -1379,7 +1379,6 @@ async def run_initiative(
 
     try:
         async for message in query(prompt=user_prompt, options=options):
-
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):

@@ -10,30 +10,52 @@ spec:
       resources: {}
       taskSpec:
         metadata: {}
+        # Explicit steps rather than a shared release task: this repo publishes
+        # IMAGES ONLY. Every python release task in the catalog runs
+        # build-container-build (needs a service Dockerfile) and helm-release
+        # (needs a chart) — this repo has neither, by design.
         stepTemplate:
-          image: uses:mikelear/leartech-pipeline-catalog/tasks/python-no-promote/release.yaml@main
-          name: ""
-          resources: {}
           env:
+          - name: HOME
+            value: /tekton/home
           - name: GIT_TOKEN
             valueFrom:
               secretKeyRef:
                 name: tekton-git
                 key: password
                 optional: true
+          envFrom:
+          - secretRef:
+              name: jx-boot-job-env-vars
+              optional: true
+          name: ""
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
           workingDir: /workspace/source
         steps:
-        - name: ""
+        - image: uses:jenkins-x/jx3-pipeline-catalog/tasks/git-clone/git-clone.yaml@versionStream
+          name: ""
           resources: {}
-        # Phase D.1: publish leartech-agent-runtime alongside the API image,
-        # tagged with the same VERSION the catalog release task computed.
-        #
-        # ghcr.io push requires inline auth injection: the catalog auto-mounts
+        - image: uses:mikelear/leartech-pipeline-catalog/tasks/release/next-version.yaml@main
+          name: ""
+          resources: {}
+        - image: ghcr.io/jenkins-x/jx-boot:3.16.59
+          name: jx-variables
+          resources: {}
+          script: |
+            #!/usr/bin/env sh
+            jx gitops variables
+        - image: uses:mikelear/leartech-pipeline-catalog/tasks/release/promote-cluster-suffixed.yaml@main
+          name: ""
+          resources: {}
+        # ghcr.io push needs inline auth injection: the catalog auto-mounts
         # /tekton/creds/.docker/config.json with cluster-registry creds only
-        # (GAR + ACR), not ghcr.io. We mirror the auth pattern from
+        # (GAR + ACR), not ghcr.io. Same pattern as
         # leartech-dockerfiles/.lighthouse/jenkins-x/leartech-agent-base/release.yaml:
-        # strip credHelpers (kaniko doesn't honour them) and inject a ghcr.io
-        # auth entry built from the tekton-git PAT.
+        # strip credHelpers (kaniko does not honour them) and inject a ghcr.io
+        # entry built from the tekton-git PAT.
         - name: build-agent-images
           image: gcr.io/kaniko-project/executor:v1.8.0-debug
           resources:
@@ -120,7 +142,7 @@ spec:
         # Non-fatal: a failed trigger delays the bump, it does not break the
         # release. The next scheduled Renovate run picks it up.
         - name: trigger-renovate
-          image: gcr.io/jenkinsxio/jx-cli:latest
+          image: alpine/k8s:1.28.4
           resources: {}
           script: |
             #!/bin/sh

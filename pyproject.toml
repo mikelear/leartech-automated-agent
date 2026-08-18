@@ -6,18 +6,14 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "anthropic>=0.40.0",
-    "asyncpg>=0.29.0",
     "claude-agent-sdk>=0.1.72",
     "click>=8.1.0",
-    "fastapi>=0.115.0",
-    # GCS client, baked into the runtime venv so it is inherited by EVERY agent
     # image (go/ng/rust/py are all FROM the runtime base) with no per-language
     # install. Consumes GOOGLE_APPLICATION_CREDENTIALS (materialised by
     # gate.agent.gcp_credentials) so an agent told to read a private gs://
     # artifact uses `python3 -c "from google.cloud import storage"`
     # deterministically instead of pip-installing it mid-run (fragile: needs
     # egress, silently degradable) — observed on the first artifact-driven plan.
-    "google-cloud-storage>=2.18.0",
     "httpx>=0.27.0",
     # Standard MCP client/server library — the agent's stdio↔http MCP bridge
     # (gate/mcp_servers/stdio_bridge.py) imports it directly. Already resolved
@@ -26,12 +22,7 @@ dependencies = [
     "mcp>=1.20",
     "kubernetes-asyncio~=32.0",
     "pydantic>=2.0",
-    "pydantic-settings>=2.0",
-    "python-jose[cryptography]>=3.3.0",
     "pyyaml>=6.0",
-    "rich>=13.7.0",
-    "sqlalchemy[asyncio]>=2.0",
-    "uvicorn>=0.32.0",
 ]
 
 [dependency-groups]
@@ -55,12 +46,11 @@ gate = "gate.cli:main"
 agent = "gate.agent.main:main"
 initiative = "gate.agent.initiative:main"
 lessons = "gate.agent.lessons.cli:main"
-leartech-agent = "app.agent_cli.main:cli"
 
 [tool.ruff]
 target-version = "py312"
 line-length = 120
-exclude = [".lighthouse", "charts", "preview"]
+exclude = [".lighthouse"]
 
 [tool.ruff.lint]
 select = ["E", "F", "B", "I", "UP", "S", "N"]
@@ -73,13 +63,6 @@ ignore = ["E501"]
 # the B008 false positive without disabling the rule globally (real B008
 # hits — like ``arg: list = []`` — still surface).
 extend-immutable-calls = [
-    "fastapi.Body",
-    "fastapi.Depends",
-    "fastapi.File",
-    "fastapi.Form",
-    "fastapi.Header",
-    "fastapi.Path",
-    "fastapi.Query",
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -89,12 +72,7 @@ extend-immutable-calls = [
 "gate/cli.py" = ["S603", "S607"]
 "gate/mcp_servers/*" = ["S603", "S607"]
 "gate/agent/initiative.py" = ["S603", "S607"]  # shells out to `gh repo clone` for cluster-mode consumer-repo bootstrap
-"app/routers/initiatives.py" = ["S603", "S607"]  # shells out to `gh api` for Phase E.1 language detection
-"gate/admin/cleanup.py" = ["S603", "S607"]  # shells out to `gh api` for PR HEAD lookup (Phase B.4)
-"gate/agent/job_reconciler.py" = ["S603", "S607"]  # shells out to `gh pr list` for D.5.1.1 PR fallback lookup
-"app/main.py" = ["S104"]
 # Operator CLI deliberately shells out to mmdc / pbcopy for Mermaid rendering.
-"app/agent_cli/*" = ["S108", "S603", "S607"]
 
 [tool.ruff.format]
 quote-style = "single"
@@ -118,15 +96,6 @@ ignore_missing_imports = true
 # but their JWT helpers' overloads are loose; the strict-mode wrapper in
 # app/auth/middleware.py narrows the call sites we use, so silencing the
 # imports avoids dragging in another dev-only dep just for strict mypy.
-[[tool.mypy.overrides]]
-module = ["jose", "jose.*"]
-ignore_missing_imports = true
-
-# The stdio MCP bridge uses the low-level `mcp` Server decorators
-# (@server.list_tools / @server.call_tool). Those decorators aren't typed to
-# mypy-strict's satisfaction (untyped decorator + untyped call), which would
-# otherwise force noisy per-line ignores. Scope the relaxation to that one
-# module; the rest of the file stays strict.
 [[tool.mypy.overrides]]
 module = ["gate.mcp_servers.stdio_bridge"]
 disallow_untyped_decorators = false
@@ -154,16 +123,11 @@ markers = [
 # rates from `coverage.xml`. Existing global gate (`fail_under` below)
 # is recalibrated to account for branch denominators.
 branch = true
-source = ["gate", "app"]
+source = ["gate"]
 omit = [
     "gate/criteria/*",
     "gate/cli.py",
     "gate/mcp_servers/*",
-    # D3: keep `gate/agent/job_reconciler.py` and `gate/agent/job_runner.py`
-    # measured — these are the V5-D1/D2 state-machine modules gated by
-    # the per-file coverage check. Other `gate/agent/*` files are
-    # orchestration paths exercised via integration, not unit-tested,
-    # so they stay omitted.
     "gate/agent/__init__.py",
     "gate/agent/calibrations/*",
     "gate/agent/crash_sticky.py",
@@ -190,7 +154,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["gate", "app"]
+packages = ["gate"]
 
 [tool.bandit]
 # SAST gate (medium+ severity in the pipeline). Tests excluded; the two B108

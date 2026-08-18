@@ -10,10 +10,7 @@ help:
 	@echo "    fmt          Format code (ruff)"
 	@echo "    lint         Lint code (ruff + mypy)"
 	@echo "    test         Run tests with coverage"
-	@echo "    helm-lint    Lint Helm chart (default + postgresql.enabled toggles)"
-	@echo "    helm-template Render Helm chart, list objects produced"
-	@echo "    helm         helm-lint + helm-template"
-	@echo "    all          fmt + lint + test + helm"
+	@echo "    all          fmt + lint + test"
 	@echo "    check        all + build (pre-push validation)"
 	@echo ""
 	@echo "  Service (HTTP):"
@@ -35,13 +32,13 @@ setup:
 	@echo "Setup complete. Run 'make all' to validate."
 
 fmt:
-	uv run ruff format app gate tests
-	uv run ruff check app gate tests --select I --fix
+	uv run ruff format gate tests
+	uv run ruff check gate tests --select I --fix
 
 lint:
-	uv run ruff format --check app gate tests
-	uv run ruff check app gate tests
-	uv run mypy app gate
+	uv run ruff format --check gate tests
+	uv run ruff check gate tests
+	uv run mypy gate
 
 test:
 	uv run coverage run -m pytest -v
@@ -50,48 +47,14 @@ test:
 # Helm chart validation — render with realistic values and lint. Mirrors
 # what the chart goes through in JX3 release; catches schema breaks +
 # missing toggles locally before they fail in cluster.
-helm-lint:
-	helm lint charts/leartech-automated-agent \
-	  --set image.repository=local --set image.tag=local
-	@echo "✓ helm lint OK (postgresql.enabled=false default)"
-	helm lint charts/leartech-automated-agent \
-	  --set image.repository=local --set image.tag=local \
-	  --set postgresql.enabled=true
-	@echo "✓ helm lint OK (postgresql.enabled=true)"
 
-helm-template:
-	@echo "Rendering with postgresql.enabled=false (default — no DB objects):"
-	@helm template t charts/leartech-automated-agent \
-	  --set image.repository=local --set image.tag=local \
-	  | grep "^kind:" | sort | uniq -c | sed 's/^/  /'
-	@echo ""
-	@echo "Rendering with postgresql.enabled=true (Database + ConfigMap + Job appear):"
-	@helm template t charts/leartech-automated-agent \
-	  --set image.repository=local --set image.tag=local \
-	  --set postgresql.enabled=true \
-	  | grep "^kind:" | sort | uniq -c | sed 's/^/  /'
+all: fmt lint test
 
-helm: helm-lint helm-template
+check: all
 
-all: fmt lint test helm
 
-check: all build
 
-serve:
-	uv run uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 
-api-test:
-	@echo "Smoke-testing /health..."
-	@curl -fsS http://localhost:8080/health | python -m json.tool || { echo "Service not running. Start with 'make serve' in another terminal."; exit 1; }
-
-build:
-	docker build -t leartech-automated-agent .
-
-docker-run: build
-	docker run --rm -p 8080:8080 \
-		-e ANTHROPIC_API_KEY="$$ANTHROPIC_API_KEY" \
-		-e GH_TOKEN="$$(gh auth token 2>/dev/null || echo '')" \
-		leartech-automated-agent
 
 # Direct CLI shortcuts — no service, no HTTP, just `uv run`.
 # These work locally without kubectl, without cluster credentials.

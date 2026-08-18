@@ -52,7 +52,7 @@ spec:
             uv run coverage run -m pytest -v
             uv run coverage report
             echo "=== SAST (bandit) ==="
-            uv run bandit -r app/ -ll -q
+            uv run bandit -r gate/ -ll -q
         # D3 — per-module state-machine coverage gate. Runs AFTER
         # build-python-test (Tekton runs task steps sequentially; a
         # failure above this step short-circuits the rest, so "runs
@@ -81,8 +81,6 @@ spec:
             echo "=== Running state-machine coverage gate ==="
             uv run pytest --cov --cov-report=xml --cov-report=term tests/
             uv run python scripts/check_state_machine_coverage.py
-        - name: build-container-build
-          resources: {}
         # Phase D.1: smoke-test Dockerfile.runtime on PR. We can't FROM
         # ghcr.io/mikelear/leartech-agent-base from inside a PR (no ghcr.io
         # pull auth on PR runs), so we override BASE_IMAGE=python:3.13-slim
@@ -107,8 +105,6 @@ spec:
             requests:
               cpu: 500m
               memory: 2Gi
-        - name: promote-jx-preview
-          resources: {}
   podTemplate:
     tolerations:
     - key: sku

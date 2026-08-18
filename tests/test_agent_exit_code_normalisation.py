@@ -379,10 +379,6 @@ async def test_max_turns_hit_before_pr_opened_keeps_exit_two(
     )
 
 
-
-
-
-
 @pytest.mark.asyncio
 async def test_clean_success_exits_zero(
     tmp_path: Path,
