@@ -2,7 +2,9 @@ ARG BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.30.1
 FROM $BASE_IMAGE
 
 LABEL org.opencontainers.image.source="https://github.com/mikelear/leartech-automated-agent" \
-      org.opencontainers.image.description="Agent runtime layer: Python deps + gate code on leartech-agent-base"
+      org.opencontainers.image.description="Agent runtime layer: Python deps + gate code"
+
+USER root
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 /uv /usr/local/bin/uv
 
@@ -26,6 +28,3 @@ ENV LEARTECH_REPO_ROOT=/workspace
 ENV PATH="/app/.venv/bin:$PATH"
 
 USER agent
-
-# No ENTRYPOINT — this image is a base for variants. They set their own.
-# No EXPOSE — this image is a base; variants/API expose ports.

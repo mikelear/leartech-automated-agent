@@ -94,12 +94,16 @@ spec:
           - -c
           - |
             set -e
-            echo "=== Smoke-building Dockerfile.runtime (no push) ==="
+            echo "=== Smoke-building Dockerfile.runtime on the base the release uses (no push) ==="
+            # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-go-toolset
+            TOOLSET_VERSION=0.49.33
+            mkdir -p /kaniko/.docker
+            sed 's/"credHelpers":{[^}]*},//' /tekton/creds/.docker/config.json > /kaniko/.docker/config.json
             /kaniko/executor \
               --dockerfile=Dockerfile.runtime \
               --context=/workspace/source \
               --no-push \
-              --build-arg=BASE_IMAGE=python:3.13-slim
+              --build-arg=BASE_IMAGE=ghcr.io/mikelear/leartech-agent-go-toolset:${TOOLSET_VERSION}
           workingDir: /workspace/source
           resources:
             requests:
