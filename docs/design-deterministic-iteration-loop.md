@@ -1,4 +1,4 @@
-# Design: Python owns the iteration loop, the LLM owns the change
+# Design: the agent keeps its judgement, Python takes the process
 
 Status: proposed, not implemented. Delete this file when the work lands — the code and
 `tests/` are the record afterwards.
@@ -34,19 +34,40 @@ the 542-line Python relay became dead code. This is the same move one layer up. 
 possible now and was not before, because `pr_gate_snapshot` did not exist when the loop was
 written — the model was the only thing that could see Tekton and GitHub.
 
+## How Python calls a Go MCP server
+
+No new mechanism, and no duplicated tool definitions. `gate/mcp_servers/call.py` is an MCP
+CLIENT: it mints the `aud=leartech-mcp` token, discovers mounts from the host's `/mcps`,
+then opens a streamable-HTTP MCP session and calls the tool. MCP is a client/server
+protocol — the client does not have to be a model. What Python loses by calling directly is
+model-mediated tool use, which is exactly the point for a deterministic step.
+
+Both callers already coexist against the same servers today: Python calls
+`post_pr_handoff` this way, while `open_pr` and the jx3-flow / tekton tools reach the LLM
+through `stdio_bridge`. The tools stay MCP tools, exposed to the agent as MCPs. Python
+calls the same tool when it needs an answer it can act on without a turn.
+
 ## Boundary
 
-**Python owns the loop.** Establish state, branch, commit, push, wait, fetch the failing
-step's log, decide iterate / escalate / stop, cancel superseded runs, count iterations,
-post the handoff, compute the verdict.
+The agent stays an agent. It keeps its MCP tools and its own reasoning inside an iteration —
+reading logs, deciding whether a failure is its own, choosing and making the fix, writing
+its summary. What it stops carrying is PROCESS.
 
-**The LLM owns one bounded task per iteration:** given the goal, the diff so far, and the
-failing step with its log, change the code. It keeps `Read`, `Edit`, `Write`, `Grep`,
-`Glob` and `Bash` (so it can run the language image's `make` targets and inspect the repo).
-It loses the loop-control tools, because it is no longer driving the loop.
+**Python owns the frame:**
 
-The prompt then carries only judgement: what a good fix looks like, what is out of scope,
-when to escalate, the hard rules about pushing. Procedure moves to code.
+- ENTRY — establish state before the model is invoked, and read back the predecessor's
+  handoff so the run starts informed.
+- EXIT — the verdict and the exit code, from state it observed itself rather than scraped.
+- BOOKKEEPING — iteration budget, superseded-run cancellation, the handoff write.
+
+**The agent owns the work inside the frame:** given the situation Python established (PR
+state, which checks failed, the logs, the goal), decide what to do and do it, with the same
+MCP tools it has now.
+
+**The prompt keeps judgement and loses procedure.** Out: which wait tool to call when, the
+branch/commit/push mechanics, cancel-on-force-push, budget arithmetic, the stop rule. In:
+what a good fix looks like, what is out of scope, when to escalate, the hard rules about
+pushing.
 
 ## State machine
 
@@ -66,17 +87,23 @@ so the run starts from what its predecessor concluded rather than from nothing. 
 `_resolve_pr_number`'s `gh pr list` subprocess and `_detect_resume_context`'s branch
 probing.
 
-**ASSESS** — for each failed check, `step_status` then `step_logs`. Deterministic
-classification on the step name where the mapping is unambiguous (git-clone conflict →
-rebase; ruff/mypy/pytest → hand to the LLM with the log; kaniko / image pull / OOM /
-security-scan → escalate). Anything unrecognised escalates with the evidence rather than
-being guessed at.
+**ASSESS** — Python GATHERS, the agent decides. For each failed check it calls
+`step_status` then `step_logs` and hands over which step failed and what its log says.
+Working out WHY it failed, whether it is the agent's own change, and what the fix is stays
+with the agent — that is judgement, and a step-name lookup table would be exactly the
+"lots of code checking what kind of failure this is" that we are removing elsewhere.
 
-**IMPLEMENT** — the bounded LLM call. One task, one failure (or the initial goal), a turn
-budget of its own. Returns a summary of what it changed.
+The one thing Python decides here is whether there is anything to hand over at all: no
+failed checks means WAIT, and a wait that returns neither a failure nor all-green (timeout,
+no checks fired) means ESCALATE, because there is no evidence for the agent to reason from.
 
-**COMMIT** — deterministic: stage the paths the LLM touched, conventional message, push.
-`--force-with-lease` only after a rebase. Cancel superseded PipelineRuns for the PR.
+**IMPLEMENT** — the agent's turn. It is handed the situation, not a procedure: the goal,
+the diff so far, which checks failed and their logs. It reasons and edits with its existing
+tools, commits and pushes, and says what it did. Python does not script these steps; it
+supplies the inputs and records the outcome.
+
+**Superseded runs** are cancelled by Python on each new push, because that is bookkeeping
+with one right answer and no judgement in it.
 
 **WAIT** — `wait_for_first_failure_or_all_pass`. Fail-fast is the in-loop primitive: one
 failure is enough, because the next action is a new commit regardless. `wait_for_terminal`
@@ -91,8 +118,8 @@ not be placed. Exit non-zero so the step recycles.
 
 ## What this deletes
 
-- `terminal_all_passed_seen` and `_tool_result_reports_all_passed` — the loop knows the
-  status because it made the call.
+- `terminal_all_passed_seen` and `_tool_result_reports_all_passed` — Python observes the
+  wait result itself at the frame boundary instead of scraping the transcript.
 - `_resolve_pr_number` and its `gh pr list` subprocesses; `status.targetPR` stays as the
   authoritative record, written by `open_pr`.
 - `_detect_resume_context` / `_remote_branch_exists` — ESTABLISH covers it.
@@ -107,9 +134,10 @@ machine cannot, so unrecognised failures must escalate with evidence. This is a 
 change: the agent will stop more often instead of quietly trying things. That is the
 intended trade — an escalation with a log is worth more than an unexplained green.
 
-**Fixes that need exploration.** The bounded call keeps real tools and its own turn budget,
-so a fix requiring three files and a local test run still works. What it cannot do is
-decide when the loop ends.
+**Over-constraining the agent.** The failure mode of this design is taking away reasoning
+the agent needs. It keeps its MCP tools and its own turn budget within an iteration; only
+the loop's shape and the terminal decision move out. If a change would stop the agent
+reading something or deciding something, it is out of scope for this work.
 
 **Loss of prompt flexibility.** Changing loop behaviour becomes a code change with a test
 rather than a prompt edit. That is the point, but it does mean the feedback loop for
@@ -123,8 +151,9 @@ behaviour changes runs through CI.
 - `pr_gate_snapshot` and `resolve_pr` appear in `allowed_tools` and in the ESTABLISH path.
 - The prompt contains no loop-control instructions; `tests/test_prompt_contract.py` gains a
   rule that it names no tool the loop owns.
-- A real run on a Go repo reaches green with one LLM call per failing iteration, verifiable
-  in Loki by counting `tool_call` events per `run_id`.
+- A real run on a Go repo reaches green, with fewer turns spent on control flow than
+  today — verifiable in Loki by counting `tool_call` events per `run_id` and comparing
+  against a current run.
 
 ## Sequencing
 
