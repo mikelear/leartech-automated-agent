@@ -90,12 +90,7 @@ class RunSummary:
     pr_number: int | None = None
 
 
-# Phase D.7 — file the preStop hook reads to learn the PR number on cancel.
-# Written at end-of-run by ``_resolve_target_pr`` (from the authoritative
-# ``status.targetPR`` when available, else the ``gh`` fallback) so the hook has a
-# value regardless of when the operator triggers cancel. Path is process-local so
-# absence on disk simply means "no PR yet" — the hook skips gracefully.
-PR_NUMBER_HINT_FILE = '/tmp/run_pr_number'  # noqa: S108 — intentional service-internal tmp file
+PR_NUMBER_HINT_FILE = '/tmp/run_pr_number'  # noqa: S108  # nosec B108
 
 
 def _write_pr_number_hint(pr_number: int | None) -> None:
@@ -1379,7 +1374,6 @@ async def run_initiative(
 
     try:
         async for message in query(prompt=user_prompt, options=options):
-
             if isinstance(message, AssistantMessage):
                 for block in message.content:
                     if isinstance(block, TextBlock):

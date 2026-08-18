@@ -25,9 +25,12 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
+
+import httpx
+
+_ARTIFACT_HEADERS = {'User-Agent': 'leartech-automated-agent/0.1'}
 
 # `:white_check_mark: **End-to-end UI: PASS** `[gcp]` — 9/9 browser tests passed`
 _HEADER_RE = re.compile(
@@ -152,23 +155,17 @@ def download_artifact(url: str, dest: Path) -> Path:
     """Fetch a public GCS artifact to `dest`. Returns dest. Raises on HTTP error or empty body."""
     _require_https(url)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    req = urllib.request.Request(url, headers={'User-Agent': 'leartech-automated-agent/0.1'})  # noqa: S310 — scheme guarded by _require_https
-    with urllib.request.urlopen(req, timeout=60) as resp:  # noqa: S310
-        if resp.status != 200:
-            raise RuntimeError(f'GET {url} → HTTP {resp.status}')
-        data = resp.read()
-    if not data:
+    resp = httpx.get(url, timeout=60, follow_redirects=True, headers=_ARTIFACT_HEADERS)
+    if resp.status_code != 200:
+        raise RuntimeError(f'GET {url} → HTTP {resp.status_code}')
+    if not resp.content:
         raise RuntimeError(f'GET {url} returned empty body')
-    dest.write_bytes(data)
+    dest.write_bytes(resp.content)
     return dest
 
 
 def head_artifact(url: str, timeout: float = 15.0) -> int:
     """Return the HTTP status of a HEAD request — use to verify artifact reachability without downloading."""
     _require_https(url)
-    req = urllib.request.Request(url, method='HEAD', headers={'User-Agent': 'leartech-automated-agent/0.1'})  # noqa: S310 — scheme guarded by _require_https
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
-            return int(resp.status)
-    except urllib.error.HTTPError as e:
-        return int(e.code)
+    resp = httpx.head(url, timeout=timeout, follow_redirects=True, headers=_ARTIFACT_HEADERS)
+    return int(resp.status_code)

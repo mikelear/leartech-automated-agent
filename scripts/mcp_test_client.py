@@ -29,8 +29,13 @@ import urllib.error
 import urllib.request
 
 SERVERS = [
-    'pr_context', 'tekton', 'k8s', 'platform_state',
-    'jx3_flow', 'agent_api', 'control_plane',
+    'pr_context',
+    'tekton',
+    'k8s',
+    'platform_state',
+    'jx3_flow',
+    'agent_api',
+    'control_plane',
 ]
 
 
@@ -51,7 +56,7 @@ def _rpc(base: str, server: str, method: str, params: dict | None, token: str | 
     if 'data:' in raw:
         for line in raw.splitlines():
             if line.startswith('data:'):
-                raw = line[len('data:'):].strip()
+                raw = line[len('data:') :].strip()
     try:
         return json.loads(raw)
     except json.JSONDecodeError:

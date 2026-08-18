@@ -47,7 +47,6 @@ RUN_LEVEL_REASONS: frozenset[str] = frozenset(
 ALL_REASONS: frozenset[str] = frozenset(CLASSIFICATIONS.keys()) | RUN_LEVEL_REASONS
 
 
-
 def classify_failure(
     exc: BaseException | None,
     *,
@@ -114,5 +113,3 @@ def classify_step_failure_reason(step_name: str, log_tail: str) -> str:
     if len(snippet) > 160:
         snippet = snippet[:157] + '...'
     return f'{verdict.classification}: {step_name}: {snippet}'
-
-

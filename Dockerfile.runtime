@@ -1,15 +1,10 @@
-# leartech-agent-runtime — Path C Phase D.1
-# Agent code + Python deps on top of leartech-agent-base.
-# Per-language variants FROM this image and add their toolchain.
-# API server image also FROMs this image (eventually) and adds uvicorn.
-
 ARG BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.30.1
 FROM $BASE_IMAGE
 
 LABEL org.opencontainers.image.source="https://github.com/mikelear/leartech-automated-agent" \
-      org.opencontainers.image.description="Agent runtime layer: Python deps + gate/app code on leartech-agent-base"
+      org.opencontainers.image.description="Agent runtime layer: Python deps + gate code on leartech-agent-base"
 
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+COPY --from=ghcr.io/astral-sh/uv:0.12.5@sha256:e85be844203885286c60ffad8a858d48afb6c5a5c237ca0e67f12e74b8f174b1 /uv /usr/local/bin/uv
 
 RUN groupadd -r agent && useradd -r -g agent -u 1000 agent \
     && mkdir -p /home/agent \
@@ -18,7 +13,6 @@ RUN groupadd -r agent && useradd -r -g agent -u 1000 agent \
 WORKDIR /app
 
 COPY --chown=agent:agent pyproject.toml uv.lock* ./
-COPY --chown=agent:agent app/ app/
 COPY --chown=agent:agent gate/ gate/
 COPY --chown=agent:agent initiatives/ initiatives/
 COPY --chown=agent:agent README.md ./

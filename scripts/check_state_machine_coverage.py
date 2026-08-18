@@ -66,19 +66,10 @@ from pathlib import Path
 # State-machine modules under the D1/D2 contract. Paths relative to repo
 # root. Each must be measured by coverage.xml (i.e. NOT excluded by
 # `[tool.coverage.run] omit`).
-STATE_MACHINE_MODULES: tuple[str, ...] = (
-    'gate/agent/job_reconciler.py',
-    # Slice B: job_runner.py retired; agentrun_client.py is the new spawn-side
-    # state-machine surface (create/ensure/cancel AgentRuns).
-    'gate/agent/agentrun_client.py',
-    'app/state.py',
-    # V5 D2.2 — set-once first-turn hook + staleness classifier. The
-    # whole point of this module is to encode the run-driver state
-    # machine (started_executing_at lifecycle, is_run_stale
-    # classification); coverage-gating it is the natural place to keep
-    # the invariants honest as the V3/V4 follow-ups land.
-    'gate/agent/run_driver.py',
-)
+# agentrun_client.py is the spawn-side state machine (create/ensure/cancel
+# AgentRuns) — the surface that survived. job_reconciler.py, run_driver.py and
+# app/state.py were the DB-backed halves and are gone with the service.
+STATE_MACHINE_MODULES: tuple[str, ...] = ('gate/agent/agentrun_client.py',)
 
 STATEMENT_THRESHOLD: float = 0.85  # 85% statement coverage per file
 BRANCH_THRESHOLD: float = 0.70  # 70% branch coverage per file
