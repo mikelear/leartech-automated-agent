@@ -147,9 +147,20 @@ spec:
         - name: trigger-renovate
           image: alpine/k8s:1.28.4
           resources: {}
+          env:
+          - name: CLUSTER_ID
+            valueFrom:
+              configMapKeyRef:
+                name: jx-cluster-config
+                key: CLUSTER_ID
+                optional: true
           script: |
             #!/bin/sh
             set -e
+            if [ "${CLUSTER_ID:-unknown}" != "gcp" ]; then
+              echo "CLUSTER_ID=${CLUSTER_ID:-unknown}: skipping renovate trigger (the renovate cronjob is GCP-only; one cluster triggers so agentTypes.tag gets a single PR per cluster repo)"
+              exit 0
+            fi
             JOB="renovate-after-agent-images-$(date +%s)"
             echo "==> creating one-shot ${JOB} from cronjob/renovate"
             kubectl -n jx create job --from=cronjob/renovate "${JOB}" || \
