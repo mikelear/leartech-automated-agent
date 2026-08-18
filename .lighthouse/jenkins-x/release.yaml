@@ -11,7 +11,7 @@ spec:
       taskSpec:
         metadata: {}
         stepTemplate:
-          image: uses:mikelear/leartech-pipeline-catalog/tasks/python/release.yaml@main
+          image: uses:mikelear/leartech-pipeline-catalog/tasks/python-no-promote/release.yaml@main
           name: ""
           resources: {}
           env:
@@ -34,7 +34,7 @@ spec:
         # leartech-dockerfiles/.lighthouse/jenkins-x/leartech-agent-base/release.yaml:
         # strip credHelpers (kaniko doesn't honour them) and inject a ghcr.io
         # auth entry built from the tekton-git PAT.
-        - name: build-runtime-image
+        - name: build-agent-images
           image: gcr.io/kaniko-project/executor:v1.8.0-debug
           resources:
             requests:
@@ -46,6 +46,18 @@ spec:
               secretKeyRef:
                 name: tekton-git
                 key: password
+                optional: true
+          # Which cluster this release is running on. ghcr.io is the SHARED
+          # registry and AZ owns publishing to it: per-cluster
+          # jx-release-version chains compute different next-versions, and
+          # GCP's chain stalled at v0.10.71-gcp, so its numbers collide with
+          # tags ghcr already holds (DENIED). Canonical gate, same as
+          # leartech-bus-common's tag-release step.
+          - name: CLUSTER_ID
+            valueFrom:
+              configMapKeyRef:
+                name: jx-cluster-config
+                key: CLUSTER_ID
                 optional: true
           script: |
             #!/busybox/sh
@@ -70,32 +82,53 @@ spec:
               cp /workspace/docker-config.json /kaniko/.docker/config.json
             fi
 
-            # Build destination list.
-            # Per-cluster registries (GAR for GCP, ACR for AZ) always get
-            # the push. ghcr.io is the SHARED registry — only AZ pushes
-            # there. Per-cluster `jx-release-version` chains compute
-            # cluster-specific next-version numbers that inevitably
-            # collide on the shared registry when GCP retries (its tag
-            # chain stuck at v0.10.71-gcp after weeks of release failure
-            # means jx-release-version returns 0.10.72, but ghcr.io already
-            # has 0.10.72 from 2026-06-01 → DENIED).
-            # AZ owns the shared-registry publishing. GCP pushes only to
-            # GAR; cross-cluster pulls happen from ghcr.io (AZ-published).
+            # One FINAL agent image per language: this repo's code layered onto the
+            # matching toolset from leartech-dockerfiles. The toolset carries the
+            # build tools for its language (what CI/CD the agent will run); this
+            # layer carries the Dev Agent itself (how to take a PR to green).
             #
-            # NOTE: script runs in /busybox/sh — no bash arrays. Use plain
-            # string with intentional word-splitting at kaniko invocation.
-            DESTS="--destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:${VERSION} --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/leartech-agent-runtime:latest"
-            if [ "${PUSH_CONTAINER_REGISTRY}" = "modernburro.azurecr.io" ]; then
-              DESTS="$DESTS --destination=ghcr.io/mikelear/leartech-agent-runtime:${VERSION} --destination=ghcr.io/mikelear/leartech-agent-runtime:latest"
-            fi
+            # AgentTypes consume ghcr.io/mikelear/leartech-agent-<lang>, so these
+            # ARE the images agents run.
+            #
+            # NOTE: script runs in /busybox/sh — no bash arrays.
+            LANGS="go py ng rust"
 
-            # shellcheck disable=SC2086 — deliberate word-split of $DESTS
-            /kaniko/executor \
-              --dockerfile=Dockerfile.runtime \
-              --context=/workspace/source \
-              $DESTS \
-              --build-arg=BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.30.1 \
-              --cache=true
+            for LANG in $LANGS; do
+              IMG="leartech-agent-${LANG}"
+              DESTS="--destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/${IMG}:${VERSION} --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/${IMG}:latest"
+              if [ "${CLUSTER_ID:-unknown}" = "az" ]; then
+                DESTS="$DESTS --destination=ghcr.io/mikelear/${IMG}:${VERSION} --destination=ghcr.io/mikelear/${IMG}:latest"
+              else
+                echo "==> CLUSTER_ID=${CLUSTER_ID:-unknown}: skipping ghcr push for ${IMG} (AZ owns the shared registry)"
+              fi
+              echo "=== Building ${IMG}:${VERSION} on ${IMG}-toolset ==="
+              # shellcheck disable=SC2086 — deliberate word-split of $DESTS
+              /kaniko/executor \
+                --dockerfile=Dockerfile.runtime \
+                --context=/workspace/source \
+                $DESTS \
+                --build-arg=BASE_IMAGE=ghcr.io/mikelear/${IMG}-toolset:latest \
+                --cache=true
+            done
+          workingDir: /workspace/source
+        # Kick the Renovate cronjob so the GitOps repos pick up the new agent
+        # image version within minutes instead of waiting for Renovate's own
+        # schedule. Renovate bumps agentTypes.tag in both clusters' configs;
+        # those PRs carry the updatebot label, which Keeper's second query
+        # auto-merges once the contexts pass — the same path promote PRs take.
+        #
+        # Non-fatal: a failed trigger delays the bump, it does not break the
+        # release. The next scheduled Renovate run picks it up.
+        - name: trigger-renovate
+          image: gcr.io/jenkinsxio/jx-cli:latest
+          resources: {}
+          script: |
+            #!/bin/sh
+            set -e
+            JOB="renovate-after-agent-images-$(date +%s)"
+            echo "==> creating one-shot ${JOB} from cronjob/renovate"
+            kubectl -n jx create job --from=cronjob/renovate "${JOB}" || \
+              echo "::WARN renovate trigger failed (non-fatal); the scheduled cron will pick up the bump"
           workingDir: /workspace/source
   podTemplate:
     tolerations:
