@@ -24,9 +24,6 @@ def _write(tmp_path: Path, body: str) -> Path:
     return path
 
 
-# Legacy single-repo shape ────────────────────────────────────────────────────
-
-
 def test_minimal_valid_initiative_loads(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
@@ -39,13 +36,11 @@ def test_minimal_valid_initiative_loads(tmp_path: Path) -> None:
     )
     init = load_initiative(path)
     assert init.name == 'x'
-    # Legacy fields hold what the user wrote
     assert init.repo == 'leartech-auth-ui'
     assert init.branch == 'agent/x'
-    # Normalised value (with default `base: main`) lives on `repos[0]`
     assert init.primary.repo == 'leartech-auth-ui'
     assert init.primary.branch == 'agent/x'
-    assert init.primary.base == 'main'  # default applied via normalisation
+    assert init.primary.base == 'main'
     assert init.gate_marks == []
     assert init.max_iterations == 5
     assert not init.is_multi_repo
@@ -71,9 +66,6 @@ def test_gate_marks_expr_empty_when_no_marks() -> None:
     assert init.gate_marks_expr == ''
 
 
-# New multi-repo shape ────────────────────────────────────────────────────────
-
-
 def test_new_repos_shape_loads(tmp_path: Path) -> None:
     path = _write(
         tmp_path,
@@ -92,13 +84,11 @@ def test_new_repos_shape_loads(tmp_path: Path) -> None:
     assert len(init.repos) == 2
     assert init.repos[0].repo == 'webcoder-service'
     assert init.repos[0].branch == 'agent/wire-tenant-list-api'
-    assert init.repos[0].base == 'main'  # default
+    assert init.repos[0].base == 'main'
     assert init.repos[1].repo == 'webcoder-ui'
     assert init.is_multi_repo
-    # Legacy fields are None when new shape was used
     assert init.repo is None
     assert init.branch is None
-    # `primary` and `qualified_repo` still work
     assert init.primary.repo == 'webcoder-service'
     assert init.qualified_repo == 'mikelear/webcoder-service'
 
@@ -128,9 +118,6 @@ def test_single_repo_in_repos_list_is_not_multi_repo(tmp_path: Path) -> None:
     init = load_initiative(path)
     assert len(init.repos) == 1
     assert not init.is_multi_repo
-
-
-# Normalisation error cases ──────────────────────────────────────────────────
 
 
 def test_using_both_shapes_raises(tmp_path: Path) -> None:
@@ -215,9 +202,6 @@ def test_max_iterations_clamped(tmp_path: Path) -> None:
         load_initiative(path)
 
 
-# Worked-example smoke tests ─────────────────────────────────────────────────
-
-
 def test_real_worked_example_loads() -> None:
     """Pin the shape of the worked example so accidental edits to it surface here first.
 
@@ -228,13 +212,9 @@ def test_real_worked_example_loads() -> None:
     init = load_initiative(Path(__file__).parent.parent / 'initiatives' / 'automated-agent-add-changelog-stub.yaml')
     assert init.name == 'automated-agent-add-changelog-stub'
     assert init.qualified_repo == 'mikelear/leartech-automated-agent'
-    # Worked example uses legacy shape, so `init.branch` (legacy field) holds the branch name
     assert init.branch == 'agent/add-changelog-stub'
     assert init.primary.branch == 'agent/add-changelog-stub'
     assert init.gate_marks == ['unit']
-
-
-# Optional `language` field ──────────────────────────────────────────────────
 
 
 def test_language_field_set_when_present(tmp_path: Path) -> None:
@@ -339,9 +319,6 @@ def test_language_field_whitespace_only_treated_as_none(tmp_path: Path) -> None:
     )
     init = load_initiative(path)
     assert init.language is None
-
-
-# Optional `hold` field ──────────────────────────────────────────────────────
 
 
 def test_hold_defaults_to_false_when_omitted(tmp_path: Path) -> None:

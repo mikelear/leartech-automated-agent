@@ -83,7 +83,6 @@ async def test_fires_when_target_pr_empty_and_pr_resolved(monkeypatch: pytest.Mo
 
 @pytest.mark.asyncio
 async def test_does_not_fire_when_target_pr_already_set(monkeypatch: pytest.MonkeyPatch) -> None:
-    # open_pr already published the field → no patch, no event (no false signal).
     rec = _Recorder(current_target_pr='55')
     _wire(monkeypatch, rec)
 
@@ -95,7 +94,6 @@ async def test_does_not_fire_when_target_pr_already_set(monkeypatch: pytest.Monk
 
 @pytest.mark.asyncio
 async def test_does_not_fire_when_no_pr_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Agent legitimately opened no PR on the branch.
     rec = _Recorder(current_target_pr=None)
     _wire(monkeypatch, rec)
 
@@ -107,7 +105,6 @@ async def test_does_not_fire_when_no_pr_resolved(monkeypatch: pytest.MonkeyPatch
 
 @pytest.mark.asyncio
 async def test_does_not_fire_when_not_agentrun(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Local/dev run: no AGENT_RUN_NAME → skip entirely (never even reads status).
     rec = _Recorder(current_target_pr=None)
     _wire(monkeypatch, rec, as_agentrun=False)
 
@@ -133,11 +130,9 @@ async def test_does_not_fire_when_status_reporting_disabled(monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_patch_failure_is_swallowed(monkeypatch: pytest.MonkeyPatch) -> None:
-    # A patch failure must never propagate (would change the run's exit code).
     rec = _Recorder(current_target_pr=None, patch_raises=True)
     _wire(monkeypatch, rec)
 
-    # Must not raise.
     await initiative._backstop_target_pr(qualified_repo='mikelear/x', branch='feat/a', pr_number=77)
 
     assert rec.patch_calls == [('run-1', 'jx-staging', 77)]

@@ -63,16 +63,10 @@ import sys
 import xml.etree.ElementTree as ET  # noqa: S405  # input is a trusted build artifact (see _load_coverage)
 from pathlib import Path
 
-# State-machine modules under the D1/D2 contract. Paths relative to repo
-# root. Each must be measured by coverage.xml (i.e. NOT excluded by
-# `[tool.coverage.run] omit`).
-# agentrun_client.py is the spawn-side state machine (create/ensure/cancel
-# AgentRuns) — the surface that survived. job_reconciler.py, run_driver.py and
-# app/state.py were the DB-backed halves and are gone with the service.
 STATE_MACHINE_MODULES: tuple[str, ...] = ('gate/agent/agentrun_client.py',)
 
-STATEMENT_THRESHOLD: float = 0.85  # 85% statement coverage per file
-BRANCH_THRESHOLD: float = 0.70  # 70% branch coverage per file
+STATEMENT_THRESHOLD: float = 0.85
+BRANCH_THRESHOLD: float = 0.70
 
 
 def _load_coverage(xml_path: Path) -> dict[str, tuple[float, float]]:
@@ -84,10 +78,6 @@ def _load_coverage(xml_path: Path) -> dict[str, tuple[float, float]]:
     dropped — they can't be the state-machine modules anyway because
     those paths are repo-rooted and stable.
     """
-    # S314: coverage.xml is produced by `coverage xml` in the same PR
-    # step that invokes this script — it's a build artifact under our
-    # control, not untrusted external input. defusedxml would add a
-    # dependency for no real security gain.
     tree = ET.parse(xml_path)  # noqa: S314
     root = tree.getroot()
     sources = [Path(s.text) for s in root.findall('sources/source') if s.text]

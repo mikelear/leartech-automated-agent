@@ -87,23 +87,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from gate import obslog
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.lessons import render_for
-from gate.agent.test_mode import parse_test_mode, run_test_mode
-from gate.mcp_servers import build_ai_gateway_web_server, build_remote_mcp_servers
+from gate.mcp_servers import build_remote_mcp_servers
 
-# BA agent runs on Opus 4.8 pinned — NOT "auto". The gateway's router can
-# downgrade "auto" to GLM (cheaper, less capable), which loses the multi-source
-# correlation reasoning the BA depends on. Env-configurable for cluster-side
-# per-role overrides, but the in-code default MUST NOT drift back to "auto".
 DEFAULT_MODEL = os.environ.get('LEARTECH_BA_AGENT_MODEL', 'claude-opus-4-8')
 
-# The BA agent may make many tool calls per plan (list_plans, list_runs,
-# get_plan_state, deploy_health, web_search, web_fetch, create_plan, ...).
-# 200 turns keeps a comfortable ceiling without funding an infinite loop.
 DEFAULT_MAX_TURNS = 200
 
-# Read-only aspects (list / correlate) live on ``leartech-platform-state``;
-# they never mutate state, so listing them explicitly makes it easy to audit
-# what the BA can observe.
 BA_PLATFORM_STATE_TOOLS = [
     'mcp__leartech-platform-state__list_plans',
     'mcp__leartech-platform-state__list_runs',
@@ -111,24 +100,16 @@ BA_PLATFORM_STATE_TOOLS = [
     'mcp__leartech-platform-state__deploy_health',
 ]
 
-# Authoring surfaces — separate MCPs so future finer-grained authz can gate
-# create vs. amend independently.
 BA_AUTHORING_TOOLS = [
     'mcp__leartech-control-plane__create_plan',
     'mcp__leartech-agent-api__amend_plan',
 ]
 
-# Web research via ai-gateway /v1/search + /v1/fetch — in-process MCP wrapping
-# an httpx client that reads ANTHROPIC_BASE_URL + AI_GATEWAY_API_KEY. Wired as
-# tools so the LLM decides *when* to search rather than us pre-fetching.
 BA_WEB_TOOLS = [
     'mcp__leartech-ai-gateway-web__web_search',
     'mcp__leartech-ai-gateway-web__web_fetch',
 ]
 
-# PR context (read-only) — a brief may reference PRs the BA needs to inspect
-# before authoring a remediation plan against them (metadata, diff, changed
-# files). No open_pr — BA does NOT open PRs.
 BA_PR_CONTEXT_TOOLS = [
     'mcp__leartech-pr-context__get_pr_metadata',
     'mcp__leartech-pr-context__get_pr_diff',
@@ -136,10 +117,6 @@ BA_PR_CONTEXT_TOOLS = [
 ]
 
 BA_ALLOWED_TOOLS: list[str] = [
-    # Built-ins — Read/Glob/Grep only. NO Write/Edit/Bash: the BA authors
-    # PLANS (via MCP tool calls), not code. Restricting this keeps a stray
-    # `git commit` from the agent's system prompt from ever producing a
-    # filesystem side effect.
     'Read',
     'Glob',
     'Grep',
@@ -149,15 +126,8 @@ BA_ALLOWED_TOOLS: list[str] = [
     *BA_PR_CONTEXT_TOOLS,
 ]
 
-# Sentinel annotation the BA stamps on every plan it authors. Downstream (the
-# controller / dashboard) can filter on this to distinguish BA drafts from
-# operator-authored plans. Format matches the leartech.io/* annotation
-# convention on the AgentRun CRD.
 DRAFT_ANNOTATION_KEY = 'leartech.io/draft'
 DRAFT_ANNOTATION_VALUE = 'true'
-
-
-# --- Brief schema -------------------------------------------------------------
 
 
 class PlanRef(BaseModel):
@@ -192,7 +162,6 @@ class Brief(BaseModel):
     name: str = Field(min_length=1, description='Short kebab-case identifier for the brief.')
     goal: str = Field(min_length=1, description='What the BA must accomplish. Free text.')
 
-    # The three EXTENDED fields — the whole reason the Brief type exists.
     success_criteria: list[str] = Field(
         default_factory=list,
         alias='successCriteria',
@@ -259,9 +228,6 @@ def load_brief(raw: str) -> Brief:
     if not isinstance(data, dict):
         raise ValueError(f'brief must be a mapping at the top level, got {type(data).__name__}')
     return Brief.model_validate(data)
-
-
-# --- System prompt ------------------------------------------------------------
 
 
 BA_SYSTEM_PROMPT = f"""\
@@ -354,12 +320,6 @@ to any non-MCP path — the MCPs are the only authoring surface.
 """
 
 
-# --- Runtime wiring -----------------------------------------------------------
-
-
-# The authorable capability surface (AgentTypes + infra actions + gaps). Kept as
-# a data file (not hardcoded here) so infra can grow the surface without a
-# ba_agent code change — add an action there, the BA can author it next deploy.
 CAPABILITIES_PATH = Path(__file__).parent / 'authoring_capabilities.yaml'
 
 
@@ -403,13 +363,6 @@ def _build_options(model: str, max_turns: int) -> ClaudeAgentOptions:
     return ClaudeAgentOptions(
         system_prompt=_build_system_prompt(),
         mcp_servers={
-            # In-process — the ai-gateway web layer (search + fetch).
-            'leartech-ai-gateway-web': build_ai_gateway_web_server(),
-            # Remote — platform_state, control_plane, agent_api, pr_context.
-            # `build_remote_mcp_servers` returns `{}` when the auth env is
-            # unset (laptop / test / not-yet-wired); the agent then only has
-            # the in-process MCP + built-in tools, which is the graceful
-            # degradation path.
             **build_remote_mcp_servers(),
         },
         allowed_tools=BA_ALLOWED_TOOLS,
@@ -450,34 +403,6 @@ async def run_ba_task(
     Exit code tracks whether the SDK loop ran to completion without an error,
     not whether any specific plan was authored.
     """
-    # ── TEST-MODE short-circuit ────────────────────────────────────────────
-    # A plan step may set ``brief.testMode`` (as an extra dict, since Brief
-    # uses ``extra='allow'``) to skip the LLM/SDK loop entirely. ONLY
-    # honored when LEARTECH_AGENT_TEST_MODE_ALLOWED=true is set — otherwise
-    # the directive is IGNORED. The BA agent NEVER opens a PR, so we pass
-    # ``open_pr_args=None`` — a ``prOutcome`` other than 'none' just logs a
-    # skip line (BA is not a PR-backed step).
-    test_mode_inputs = brief.model_dump(by_alias=True, mode='json')
-    test_mode_spec = parse_test_mode(test_mode_inputs)
-    if test_mode_spec is not None:
-        obslog.info(
-            'run_start',
-            f'ba agent brief={brief.name} (test-mode)',
-            logger='ba',
-            brief=brief.name,
-            test_mode=True,
-        )
-        exit_code = await run_test_mode(test_mode_spec, open_pr_args=None)
-        obslog.info(
-            'run_end',
-            f'ba agent brief={brief.name} done (test-mode)',
-            logger='ba',
-            brief=brief.name,
-            exit_code=exit_code,
-            test_mode=True,
-        )
-        return exit_code
-
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
             'ANTHROPIC_API_KEY not set. Run `leartech-claude-key` to fetch from the cluster.',
@@ -491,9 +416,6 @@ async def run_ba_task(
 
     exit_code = 0
     try:
-        # Drain the async iterator fully — returning from inside `async for`
-        # leaves the SDK's generator half-shut and raises on cleanup
-        # (mirrors gate/agent/infra_agent.py + gate/agent/main.py).
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -502,8 +424,6 @@ async def run_ba_task(
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
                     elif isinstance(block, ThinkingBlock | ToolResultBlock):
-                        # Thinking = internal reasoning; tool results are seen
-                        # by the agent — surface its synthesis instead.
                         pass
             elif isinstance(message, ResultMessage):
                 exit_code = 1 if message.is_error else 0
@@ -515,9 +435,6 @@ async def run_ba_task(
     return exit_code
 
 
-# The controller inlines the Plan step's `inputs` JSON into this env var
-# (jobspawn.go). An entrypoint-override AgentType gets NO CLI args, so inputs
-# arrive here, not via flags. Same convention as infra_agent.
 INPUTS_ENV = 'LEARTECH_INITIATIVE_YAML'
 
 
@@ -608,7 +525,6 @@ def main(brief_opt: str | None, model: str, max_turns: int, dry_run: bool) -> No
     sys.exit(asyncio.run(run_ba_task(brief, model=model, max_turns=max_turns)))
 
 
-# Re-export for tests / type checkers.
 __all__ = [
     'BA_ALLOWED_TOOLS',
     'BA_AUTHORING_TOOLS',

@@ -39,13 +39,10 @@ def probe_mcp(mcp: McpServer) -> McpStatus:
     collapse to ``'down'``.
     """
     base = reachable_status(mcp)
-    # If the static check already says non-ready, trust it. The active
-    # probe only refines the 'ready' verdict.
     if base != 'ready':
         return base
 
     if mcp.type == 'sdk':
-        # reachable_status() already imported the builder; we're done.
         return 'ready'
 
     if mcp.type == 'stdio':
@@ -64,5 +61,4 @@ def probe_mcp(mcp: McpServer) -> McpStatus:
         except (httpx.HTTPError, OSError):
             return 'down'
 
-    # Unreachable: McpType is a Literal of the four cases above.
     return 'down'

@@ -33,28 +33,20 @@ from pydantic import ValidationError
 from gate.agent import ba_agent
 from gate.agent.mcp_catalog import load_catalog
 
-# --- Catalog wiring -----------------------------------------------------------
-
 
 def test_ba_role_in_catalog_references_real_mcps() -> None:
     """ba_agent role must be defined and every MCP it lists must exist."""
     catalog = load_catalog()
     assert 'ba_agent' in catalog.roles
     role = catalog.roles['ba_agent']
-    # Read + Glob + Grep must be present; Write / Edit / Bash must NOT
-    # (the BA authors PLANS via MCP, not code changes on disk).
     assert {'Read', 'Glob', 'Grep'} <= set(role.tools)
     for forbidden in ('Write', 'Edit', 'Bash'):
         assert forbidden not in role.tools, f'{forbidden!r} in ba_agent tools — BA must not write code / shell out'
-    # Every MCP referenced by the role must exist in the catalog.
     for mcp in role.mcps:
         assert mcp in catalog.mcp_servers, f'ba_agent references unknown MCP {mcp!r}'
-    # The three authoring / state MCPs the initiative requires by name.
     assert 'leartech-platform-state' in role.mcps
     assert 'leartech-control-plane' in role.mcps
     assert 'leartech-agent-api' in role.mcps
-    # Web research MCP wired.
-    assert 'leartech-ai-gateway-web' in role.mcps
 
 
 def test_ba_role_pins_opus_not_auto() -> None:
@@ -77,40 +69,27 @@ def test_platform_state_control_plane_agent_api_in_wanted_remote_mcps() -> None:
     assert 'agent_api' in remote.WANTED_MCP_SERVERS
 
 
-# --- Allowed-tools set --------------------------------------------------------
-
-
 def test_allowed_tools_grant_state_authoring_web_pr_and_not_open_pr() -> None:
     tools = ba_agent.BA_ALLOWED_TOOLS
 
-    # Built-ins: read-only trio.
     assert {'Read', 'Glob', 'Grep'} <= set(tools)
-    # NO write / shell surface — BA must not touch the filesystem.
     for forbidden in ('Write', 'Edit', 'Bash'):
         assert forbidden not in tools, f'{forbidden!r} must not be in BA_ALLOWED_TOOLS'
 
-    # Platform-state (read-only correlation).
     for t in ('list_plans', 'list_runs', 'get_plan_state', 'deploy_health'):
         assert f'mcp__leartech-platform-state__{t}' in tools
 
-    # Authoring — create_plan on control_plane, amend_plan on agent_api.
     assert 'mcp__leartech-control-plane__create_plan' in tools
     assert 'mcp__leartech-agent-api__amend_plan' in tools
 
-    # Web research — through ai-gateway.
     assert 'mcp__leartech-ai-gateway-web__web_search' in tools
     assert 'mcp__leartech-ai-gateway-web__web_fetch' in tools
 
-    # PR context (read-only).
     assert 'mcp__leartech-pr-context__get_pr_metadata' in tools
     assert 'mcp__leartech-pr-context__get_pr_diff' in tools
     assert 'mcp__leartech-pr-context__list_changed_files' in tools
 
-    # Explicitly NO open_pr — BA does NOT open PRs.
     assert 'mcp__leartech-pr-context__open_pr' not in tools
-
-
-# --- Brief schema -------------------------------------------------------------
 
 
 def _minimal_brief_dict() -> dict[str, object]:
@@ -166,9 +145,7 @@ def test_brief_planref_allows_extra_context() -> None:
         {'name': 'foo', 'namespace': 'jx', 'cluster': 'gcp', 'since': '2026-07-27T00:00:00Z'},
     ]
     brief = ba_agent.Brief.model_validate(data)
-    # The typed fields survive validation…
     assert brief.resolves[0].name == 'foo'
-    # …and the extra fields are preserved on the model (Pydantic v2 dumps them).
     dumped = brief.resolves[0].model_dump()
     assert dumped['cluster'] == 'gcp'
     assert dumped['since'] == '2026-07-27T00:00:00Z'
@@ -196,34 +173,23 @@ def test_load_brief_rejects_empty_and_non_mapping() -> None:
     with pytest.raises(ValueError, match='empty brief'):
         ba_agent.load_brief('')
     with pytest.raises(ValueError, match='mapping'):
-        ba_agent.load_brief('- item\n')  # a list, not a mapping
-
-
-# --- System prompt encodes the invariants ------------------------------------
+        ba_agent.load_brief('- item\n')
 
 
 def test_system_prompt_encodes_draft_by_default_and_verification() -> None:
     """The two invariants the BA MUST enforce end up on the LLM's system
     prompt, so a future refactor that drops them fails this test loudly."""
     prompt = ba_agent._build_system_prompt()
-    # Draft-by-default: both the annotation + the hold flag are named.
     assert ba_agent.DRAFT_ANNOTATION_KEY in prompt
     assert ba_agent.DRAFT_ANNOTATION_VALUE in prompt
     assert 'hold: true' in prompt.lower()
-    # Verification step for successCriteria.
     assert 'successCriteria' in prompt
     assert 'verification' in prompt.lower()
-    # The canonical verification step is now the deterministic deploy-health
-    # check (superseding the legacy release-health-check STAGE_STATUS action).
     assert 'deploy-health' in prompt
     assert 'release-health-check' not in prompt
-    # Explicit "no PR" + "no code" invariants.
     assert 'do NOT open a PR' in prompt or 'do not open a PR' in prompt.lower()
-    # BA has ZERO infra-specific knowledge — clear signal in the prompt.
     assert 'ZERO infra' in prompt or 'zero infra' in prompt.lower()
-    # Never post `/hold cancel` — a human clears the hold after review.
     assert '/hold cancel' in prompt
-    # Cluster-wide multi-resolve is a first-class shape.
     assert 'MULTIPLE' in prompt or 'multi-resolve' in prompt
 
 
@@ -236,23 +202,13 @@ def test_system_prompt_names_the_three_authoring_paths() -> None:
     assert 'get_plan_state' in prompt or 'platform_state' in prompt
 
 
-# --- Task prompt embeds the brief --------------------------------------------
-
-
 def test_task_prompt_embeds_brief_body_and_reminders() -> None:
     brief = ba_agent.Brief.model_validate(_minimal_brief_dict())
     out = ba_agent._task_prompt(brief)
-    # The serialised body must use the outward-facing alias
-    # (`successCriteria`, not `success_criteria`).
     assert '"successCriteria"' in out
     assert 'foo-service' in out
-    # The reminders about hold / draft / verification appear in the user turn
-    # too so the LLM sees them alongside the input, not only on system.
     assert ba_agent.DRAFT_ANNOTATION_KEY in out
     assert 'verification' in out.lower()
-
-
-# --- Runtime entrypoint ------------------------------------------------------
 
 
 def test_run_ba_task_returns_2_without_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -325,9 +281,6 @@ def test_run_ba_task_returns_1_when_sdk_reports_error(monkeypatch: pytest.Monkey
     assert rc == 1
 
 
-# --- CLI wiring --------------------------------------------------------------
-
-
 def test_main_reads_brief_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """The controller contract: brief arrives via $LEARTECH_INITIATIVE_YAML."""
     monkeypatch.setenv('LEARTECH_INITIATIVE_YAML', json.dumps(_minimal_brief_dict()))
@@ -385,26 +338,18 @@ def test_main_errors_on_missing_at_file(monkeypatch: pytest.MonkeyPatch, tmp_pat
         ba_agent.main.callback(brief_opt=f'@{missing}', model='m', max_turns=1, dry_run=False)
 
 
-# --- Default model + max_turns are sane defaults ------------------------------
-
-
 def test_default_model_is_opus_not_auto() -> None:
     """Regression guard: DEFAULT_MODEL must be a pinned Opus, not 'auto'.
 
     The initiative is explicit about this: the gateway's auto-router can
     downgrade to GLM. We never want that for BA reasoning-heavy authoring.
     """
-    # Env override is supported — test the DEFAULT in isolation by consulting
-    # the default value the module set at import time.
     assert 'opus' in ba_agent.DEFAULT_MODEL.lower() or ba_agent.DEFAULT_MODEL.startswith('claude-')
     assert ba_agent.DEFAULT_MODEL != 'auto'
 
 
 def test_default_max_turns_is_positive() -> None:
     assert ba_agent.DEFAULT_MAX_TURNS > 0
-
-
-# --- Dry-run mode -------------------------------------------------------------
 
 
 def test_main_dry_run_skips_llm_and_prints_summary(
@@ -428,9 +373,6 @@ def test_main_dry_run_skips_llm_and_prints_summary(
     assert called is False
 
     captured = capsys.readouterr()
-    # Summary is self-describing: names the brief, mentions successCriteria
-    # count, and calls out the resolves shape (the two axes the dry-run
-    # sanity check is meant to help operators eyeball).
     assert 'BA dry-run' in captured.out
     assert 'fix-flaky-release' in captured.out
     assert 'successCriteria' in captured.out
@@ -454,12 +396,8 @@ def test_dry_run_summary_names_multi_resolve_case() -> None:
     brief = ba_agent.Brief.model_validate(_minimal_brief_dict())
     summary = ba_agent._dry_run_summary(brief)
     assert '2 PlanRef(s)' in summary
-    # The individual PlanRefs get listed so operators can eyeball typos.
     assert 'foo-service-release in jx-staging' in summary
     assert 'foo-service-release in jx-production' in summary
-
-
-# --- Authorable capability catalog --------------------------------------------
 
 
 def test_authoring_capabilities_render_has_surface_and_gaps() -> None:
@@ -468,10 +406,8 @@ def test_authoring_capabilities_render_has_surface_and_gaps() -> None:
     cap = ba_agent._render_authoring_capabilities()
     assert 'AUTHORABLE CAPABILITIES' in cap
     assert 'routing' in cap
-    # infra is the restricted, extensible capability-holder
     assert 'leartech-agent-infra' in cap
     assert 'register-source-config' in cap and 'deploy-health' in cap
-    # gaps are reported, not authored as phantom steps
     assert 'capability_gaps' in cap
     assert 'needs-human:provision-secret' in cap
 

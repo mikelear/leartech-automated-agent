@@ -14,8 +14,6 @@ from gate.agent.pr_capture import (
     parse_pr_number_from_gh_output,
 )
 
-# ─── parse_pr_number_from_gh_output ─────────────────────────────────────
-
 
 class TestParsePrNumber:
     def test_parses_from_bare_url(self) -> None:
@@ -65,8 +63,6 @@ class TestParsePrNumber:
             'https://github.com/mikelear/leartech-automated-agent/pull/42\n'
             'https://github.com/mikelear/leartech-automated-agent/pull/99\n'
         )
-        # gh pr create returns ONE URL; the sole consumer (pr_back) parses the
-        # stdout of a single create subprocess, so taking the first is correct.
         assert parse_pr_number_from_gh_output(text) == 42
 
 

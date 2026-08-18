@@ -50,7 +50,7 @@ def test_emit_is_valid_json_with_schema_fields(cap_obslog: io.StringIO) -> None:
     assert rec['event'] == 'run_start'
     assert rec['msg'] == 'starting'
     assert rec['model'] == 'claude-opus-4-8'
-    assert 'time' in rec  # ISO8601 timestamp present
+    assert 'time' in rec
 
 
 def test_context_env_included_and_absent_omitted(cap_obslog: io.StringIO, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -61,16 +61,16 @@ def test_context_env_included_and_absent_omitted(cap_obslog: io.StringIO, monkey
     (rec,) = _lines(cap_obslog)
     assert rec['run_id'] == 's0-run-x'
     assert rec['namespace'] == 'jx-staging'
-    assert 'cluster' not in rec  # absent env → omitted, no crash
+    assert 'cluster' not in rec
 
 
 def test_none_fields_dropped_and_level_normalised(cap_obslog: io.StringIO) -> None:
     obslog.emit('bogus', 'run_end', 'done', exit_code=0, targetPR=None, turns=5)
     (rec,) = _lines(cap_obslog)
-    assert rec['level'] == 'INFO'  # unknown level → INFO
+    assert rec['level'] == 'INFO'
     assert rec['exit_code'] == 0
     assert rec['turns'] == 5
-    assert 'targetPR' not in rec  # None dropped
+    assert 'targetPR' not in rec
 
 
 def test_level_wrappers(cap_obslog: io.StringIO) -> None:

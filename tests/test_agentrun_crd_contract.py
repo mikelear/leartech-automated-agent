@@ -80,7 +80,5 @@ async def test_agenttype_body_satisfies_crd_schema(monkeypatch: pytest.MonkeyPat
 
 
 def test_contract_bites_on_drift() -> None:
-    # Proof the guard actually fails on drift: an AgentRun spec missing the
-    # required agentType must be rejected by the schema.
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(instance={'inputs': {}}, schema=_spec_schema('agent.leartech.io_agentruns.yaml'))

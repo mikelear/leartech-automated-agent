@@ -28,8 +28,6 @@ from typing import Any
 
 from gate import obslog
 
-# Env vars whose VALUES must never appear in a log line. Mirrors the secrets the
-# controller projects into the Job (see gate.agent.gcp_credentials + jobspawn).
 _SECRET_ENVS = (
     'GH_TOKEN',
     'GIT_TOKEN',
@@ -41,19 +39,14 @@ _SECRET_ENVS = (
 
 _REDACTED = '***REDACTED***'
 
-# Pattern backstops for secret SHAPES (independent of env values). Ordered; each
-# applied globally. Kept intentionally broad — a false-positive redaction is
-# harmless, a leaked credential is not.
 _SECRET_PATTERNS = (
     re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----', re.DOTALL),
-    re.compile(r'ya29\.[A-Za-z0-9._\-]+'),  # GCP OAuth access tokens
-    re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}'),  # GitHub tokens
-    re.compile(r'sk-[A-Za-z0-9_\-]{20,}'),  # OpenAI/Anthropic-style keys
-    re.compile(r'eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+'),  # JWTs
+    re.compile(r'ya29\.[A-Za-z0-9._\-]+'),
+    re.compile(r'gh[pousr]_[A-Za-z0-9]{20,}'),
+    re.compile(r'sk-[A-Za-z0-9_\-]{20,}'),
+    re.compile(r'eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+'),
 )
 
-# Cap per-field size so a `cat` of a large file can't flood Loki. Generous enough
-# to keep whole commands and the meaningful head/tail of output.
 _MAX = 2000
 
 
@@ -65,7 +58,7 @@ def redact(text: str) -> str:
     out = str(text)
     for env in _SECRET_ENVS:
         val = os.environ.get(env, '')
-        if val and len(val) >= 8:  # avoid redacting trivially short/empty values
+        if val and len(val) >= 8:
             out = out.replace(val, _REDACTED)
     for pat in _SECRET_PATTERNS:
         out = pat.sub(_REDACTED, out)

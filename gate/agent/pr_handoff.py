@@ -24,14 +24,8 @@ from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
 
-# Post at least this often so a kill never loses more than this many turns of
-# context. The MCP tool rewrites the comment only when the state digest changes,
-# so a call that says nothing new costs one round-trip and no PR edit.
 HANDOFF_EVERY_TURNS = 10
 
-# Absolute floor for "near the ceiling": on a small max_turns a 10% margin is a
-# turn or two, which is no warning at all. Mirrors the server's BudgetWarnTurns
-# for CADENCE only — the server still classifies the state.
 NEAR_LIMIT_TURNS = 15
 NEAR_LIMIT_FRACTION = 0.1
 

@@ -57,7 +57,7 @@ async def ensure_agent_type(
             await api.create_cluster_custom_object(group=_GROUP, version=_VERSION, plural=_AGENTTYPES, body=body)
             _logger.info('created AgentType %s (image=%s)', name, image)
         except ApiException as exc:
-            if exc.status != 409:  # already exists → patch the image
+            if exc.status != 409:
                 raise
             await api.patch_cluster_custom_object(
                 group=_GROUP,

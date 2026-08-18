@@ -44,14 +44,10 @@ from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative import INITIATIVE_TEKTON_TOOLS, WRITE_MODE_TOOLS
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
-from gate.agent.release_checks import is_check_action, run_check_action
-from gate.agent.test_mode import parse_test_mode, run_test_mode
 from gate.mcp_servers import build_remote_mcp_servers
 
 DEFAULT_MAX_TURNS = 200
 
-# The repo-factory MCP tools (server-side, on the platform-mcps host). create/register/
-# scaffold run with the owner PAT server-side — the agent just calls them.
 REPO_FACTORY_TOOLS = [
     'mcp__leartech-repo-factory__create_repo',
     'mcp__leartech-repo-factory__register_source_config',
@@ -59,33 +55,18 @@ REPO_FACTORY_TOOLS = [
     'mcp__leartech-repo-factory__smoke_pr',
 ]
 
-# jx_release MCP — the JX3 release-check primitives (GitHub-API-first, both clusters). The
-# deterministic release-verify checks (gate.agent.release_checks) call these Go MCP tools
-# directly via the bridge to shepherd a release through jx-promote.
 JX_RELEASE_TOOLS = [
     'mcp__leartech-jx-release__release_status',
     'mcp__leartech-jx-release__promote_status',
     'mcp__leartech-jx-release__retest_promote',
 ]
 
-# k8s MCP — in-cluster read surface (no kubectl needed on the agent side). The
-# deterministic release-verify checks call these Go MCP tools directly:
-#   * list_jobs_by_label / get_job_state — did the jx-boot Job for this release
-#     run and succeed on each cluster? (bootjob-for-commit)
-#   * deploy_health — is the Deployment healthy (>=1 available replica) + running
-#     the NEW version on each cluster? (deploy-health — replaces the historical
-#     unreachable HTTP /health probe)
 K8S_TOOLS = [
     'mcp__leartech-k8s__deploy_health',
     'mcp__leartech-k8s__get_job_state',
     'mcp__leartech-k8s__list_jobs_by_label',
 ]
 
-# Write-mode built-ins + the shared MCP surface + step-aware Tekton tools + the repo-factory,
-# jx-release, and k8s MCPs. Deterministic repo ops go through repo-factory (server-side); the
-# deterministic release-verify checks call jx-release + tekton + k8s Go MCP tools directly (no
-# httpx probe, no kubectl on the agent side — the k8s MCP host runs in-cluster with a
-# read-scoped ServiceAccount).
 INFRA_ALLOWED_TOOLS = [
     *WRITE_MODE_TOOLS,
     *MCP_ALLOWED_TOOLS,
@@ -192,46 +173,6 @@ async def run_infra_task(
     max_turns: int = DEFAULT_MAX_TURNS,
 ) -> int:
     """Drive the infra agent through one action. Returns the process exit code."""
-    # ── TEST-MODE short-circuit ────────────────────────────────────────────
-    # A plan step may set ``inputs.testMode`` to skip the LLM/SDK loop
-    # entirely. ONLY honored when LEARTECH_AGENT_TEST_MODE_ALLOWED=true is
-    # set — otherwise the directive is IGNORED. Placed BEFORE the API-key
-    # check because test-mode's whole point is to skip the LLM. The infra
-    # agent's PR-backed actions (register-source-config, smoke-pr) don't
-    # call open_pr directly — the repo-factory MCP handles that — so we
-    # don't build a manual open_pr_args here; the MCP's own test-mode
-    # coverage exercises those flows via a different plan step.
-    test_mode_spec = parse_test_mode(inputs)
-    if test_mode_spec is not None:
-        obslog.info(
-            'run_start',
-            f'infra agent action={action} (test-mode)',
-            logger='infra',
-            action=action,
-            test_mode=True,
-        )
-        exit_code = await run_test_mode(test_mode_spec, open_pr_args=None)
-        obslog.info(
-            'run_end',
-            f'infra agent action={action} done (test-mode)',
-            logger='infra',
-            action=action,
-            exit_code=exit_code,
-            test_mode=True,
-        )
-        return exit_code
-
-    # ── THIN DETERMINISTIC CHECK short-circuit ─────────────────────────────
-    # The release-verify check actions (release-pipeline-status / promote-status /
-    # deploy-health / bootjob-for-commit) are pure Go-MCP-tool relays: call ONE
-    # tool, exit on its typed verdict — NO LLM turn-loop, NO STAGE_STATUS
-    # transcription (see gate/agent/release_checks.py). Placed BEFORE the
-    # ANTHROPIC_API_KEY gate because these never invoke the model; they only need
-    # the MCP host + auth env. This is the runtime side of the verify-release-flow
-    # PlanTemplate — each kind:check step maps to one action here.
-    if is_check_action(action):
-        return await run_check_action(action, inputs)
-
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
             'ANTHROPIC_API_KEY not set. Run `leartech-claude-key` to fetch from the cluster.',
@@ -245,8 +186,6 @@ async def run_infra_task(
 
     exit_code = 0
     try:
-        # Drain the iterator fully (return inside `async for` breaks the SDK's generator
-        # shutdown — see gate/agent/main.py).
         async for message in query(prompt=prompt, options=options):
             if isinstance(message, AssistantMessage):
                 for block in message.content:
@@ -255,25 +194,17 @@ async def run_infra_task(
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
                     elif isinstance(block, ThinkingBlock | ToolResultBlock):
-                        pass  # internal reasoning / tool results — surface the synthesis instead
+                        pass
             elif isinstance(message, ResultMessage):
                 exit_code = 1 if message.is_error else 0
     except Exception as exc:
         obslog.error('run_end', f'infra agent crashed: {exc}', logger='infra', action=action, exit_code=1)
         raise
 
-    # NOTE: the release-verify checks (release-pipeline-status / promote-status / deploy-health /
-    # bootjob-for-commit) are DETERMINISTIC and short-circuit ABOVE via is_check_action — they
-    # never reach this LLM loop. The remaining actions here are the repo-factory ops, whose exit
-    # code tracks SDK success (their real side effect — PRs — is recorded server-side by the
-    # repo-factory MCP). The legacy LLM-transcribed STAGE_STATUS release-health-check verdict
-    # machinery has been removed (superseded by gate/agent/release_checks.py).
     obslog.info('run_end', f'infra agent action={action} done', logger='infra', action=action, exit_code=exit_code)
     return exit_code
 
 
-# The controller inlines the Plan step's `inputs` JSON into this env var (jobspawn.go);
-# an entrypoint-override AgentType gets NO CLI args, so inputs arrive here, not via flags.
 INPUTS_ENV = 'LEARTECH_INITIATIVE_YAML'
 
 

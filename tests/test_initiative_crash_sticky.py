@@ -68,12 +68,10 @@ def test_post_crash_sticky_swallows_gh_failure() -> None:
     """gh exit-nonzero must not raise — we're already in an error path."""
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=1, stdout='', stderr='auth required')
-        # Must not raise.
         _post_crash_sticky(qualified_repo='owner/repo', pr_number=42, body='hello')
 
 
 def test_post_crash_sticky_swallows_subprocess_timeout() -> None:
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
         mock_run.side_effect = subprocess.TimeoutExpired(cmd='gh', timeout=15)
-        # Must not raise.
         _post_crash_sticky(qualified_repo='owner/repo', pr_number=42, body='hello')

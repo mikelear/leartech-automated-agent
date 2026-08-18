@@ -64,5 +64,4 @@ def test_render_topology_unknown_scope_raises() -> None:
 
 
 def test_descriptions_cover_every_scope() -> None:
-    # Future-proof: if we add a new scope, the description map must keep up.
     assert set(TOPOLOGY_DESCRIPTIONS) == {'full', 'feedback'}

@@ -32,14 +32,8 @@ CATALOG_PATH = Path(__file__).parent / 'mcp_catalog.yaml'
 McpType = Literal['sdk', 'stdio', 'http_sse', 'remote']
 McpStatus = Literal['ready', 'not_built', 'down', 'missing_auth']
 
-# Match $ENV_VAR placeholders in catalog values.
 _ENV_REF_RE = re.compile(r'\$(\w+)')
 
-# Match ${VAR} and ${VAR:-default} placeholders in catalog string values.
-# Used for cluster-routable URLs (e.g. LEARTECH_PLATFORM_MCPS_URL override) so
-# the chart can rewrite the catalog default at deploy time without forking the
-# yaml. The :- form mirrors POSIX shell parameter expansion semantics: empty or
-# unset env var falls through to the literal default.
 _ENV_INTERP_RE = re.compile(r'\$\{(\w+)(?::-([^}]*))?\}')
 
 
@@ -90,15 +84,12 @@ class McpServer(BaseModel):
     description: str = Field(min_length=1)
     status: McpStatus = Field(default='ready')
 
-    # type=sdk
     builder: str | None = Field(default=None, description='module:function reference returning McpSdkServerConfig')
 
-    # type=stdio
     command: str | None = None
     args: list[str] = Field(default_factory=list)
     env: dict[str, str] = Field(default_factory=dict)
 
-    # type=http_sse / remote
     url: str | None = None
     auth: McpAuth | None = None
 
@@ -220,7 +211,6 @@ def reachable_status(mcp: McpServer) -> McpStatus:
         return mcp.status
 
     if mcp.type == 'sdk':
-        # Defer import here so a broken builder doesn't break catalog load.
         try:
             module_name, func_name = (mcp.builder or '').split(':', 1)
             mod = __import__(module_name, fromlist=[func_name])
@@ -229,7 +219,6 @@ def reachable_status(mcp: McpServer) -> McpStatus:
         except (ImportError, AttributeError, ValueError):
             return 'down'
 
-    # Non-sdk MCPs: check that required env vars are populated.
     missing_envs: list[str] = []
     for value in mcp.env.values():
         for env_var in _ENV_REF_RE.findall(value):

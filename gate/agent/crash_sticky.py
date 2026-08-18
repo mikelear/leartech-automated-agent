@@ -29,9 +29,6 @@ import click
 
 from gate.agent.initiative import _build_crash_sticky_body, _post_crash_sticky
 
-# Map --reason kebab-case → human-readable sentence. Keeps the YAML for
-# manifest authors small (sh -c '... --reason cancelled ...') while the
-# rendered sticky stays prose-readable.
 _REASON_TEXT: dict[str, str] = {
     'cancelled': 'cancelled by operator via `POST /initiatives/{id}/cancel`',
     'crashed': 'pod terminated unexpectedly',
@@ -81,10 +78,6 @@ def main(reason: str, repo: str, pr: str) -> NoReturn:
 
     body = _build_crash_sticky_body(
         reason=_REASON_TEXT[reason],
-        # Cancel happens at indeterminate turn-count; the harness doesn't
-        # have access to the live counter from inside preStop. Surface 0/0
-        # so the sticky still has a well-formed turn-count field — the
-        # reason text carries the real signal.
         turn_count=0,
         max_turns=0,
         cost=None,

@@ -23,10 +23,6 @@ from __future__ import annotations
 
 import re
 
-# GitHub PR URL — matches ``https://github.com/<owner>/<repo>/pull/<n>``.
-# The number capture is used by :func:`parse_pr_number_from_gh_output`. We match
-# the whole shape (not just ``/pull/(\d+)``) and anchor on ``https://github.com/``
-# so it scopes to a real GitHub PR link within a larger stdout blob.
 PR_URL_RE = re.compile(r'https://github\.com/[^\s/]+/[^\s/]+/pull/(\d+)')
 
 
@@ -50,7 +46,4 @@ def parse_pr_number_from_gh_output(text: str) -> int | None:
     try:
         return int(match.group(1))
     except ValueError:
-        # match.group(1) is guaranteed \d+ by the regex, so ValueError
-        # is unreachable in practice — but the branch keeps the return
-        # type honest for type-checkers.
         return None

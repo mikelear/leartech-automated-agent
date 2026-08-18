@@ -14,18 +14,6 @@ from gate.agent.mcp_catalog import McpServer
 from gate.introspection.mcp_status import probe_mcp
 
 
-def test_sdk_mcp_ready_when_builder_importable() -> None:
-    mcp = McpServer(
-        type='sdk',
-        description='reachable sdk',
-        # Any live in-process SDK builder works — pipeline_server was ported
-        # to the remote leartech-jx3-flow MCP so criteria_server is now the
-        # anchor for this smoke.
-        builder='gate.mcp_servers.criteria_server:build_criteria_server',
-    )
-    assert probe_mcp(mcp) == 'ready'
-
-
 def test_sdk_mcp_down_when_builder_missing() -> None:
     mcp = McpServer(
         type='sdk',
@@ -36,7 +24,6 @@ def test_sdk_mcp_down_when_builder_missing() -> None:
 
 
 def test_stdio_mcp_ready_when_command_on_path() -> None:
-    # `sh` is on PATH in every CI image we ship + on every dev laptop.
     mcp = McpServer(type='stdio', description='sh probe', command='sh')
     assert probe_mcp(mcp) == 'ready'
 

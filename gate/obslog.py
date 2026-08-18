@@ -33,18 +33,6 @@ import os
 import sys
 from datetime import UTC, datetime
 
-# Ambient run context, injected into the Job pod by the controller's jobspawn.
-# Absent on laptop/preview → simply omitted from the record (no crash).
-#
-# The identity subset (run_id + namespace) is read via the identity-snapshot
-# module rather than :data:`os.environ` — this repo (leartech-automated-agent)
-# STRIPS ``AGENT_RUN_NAMESPACE`` from ``os.environ`` at ``run_initiative``
-# entry to prevent subprocesses from patching the live AgentRun. Reading
-# through the snapshot means Loki lines keep their ambient identity even
-# post-strip (the strip is a defence for shells, not a demotion for logs).
-#
-# ``cluster`` + ``version`` are NOT identity — they describe the deployment,
-# not the run — so they stay ``os.environ`` reads with no snapshot layer.
 _CLUSTER_CONTEXT_ENV = {
     'cluster': 'CLUSTER',
     'version': 'VERSION',
@@ -92,14 +80,10 @@ def _context() -> dict[str, str]:
     """
     fields: dict[str, str] = {}
     try:
-        from gate import identity  # local import to avoid a top-level cycle
+        from gate import identity
 
         fields.update(identity.ambient_log_fields())
     except Exception as exc:  # noqa: BLE001 — logging must never raise; drop identity fields on any error
-        # Deliberately silent: the caller (``emit``) is itself failure-proof
-        # and the only alternative here (log via ``obslog.emit`` again) would
-        # recurse. A stderr breadcrumb from this specific path would spam every
-        # record if the import breaks — the ambient-fields loss IS the signal.
         _ = exc  # noqa: F841 — bound purely to satisfy the "log the exception" lint
     for key, env in _CLUSTER_CONTEXT_ENV.items():
         value = os.environ.get(env)
@@ -133,19 +117,13 @@ def emit(level: str, event: str, msg: str, *, logger: str = 'agent', **fields: o
         }
         record.update(_context())
         record.update({k: v for k, v in fields.items() if v is not None})
-        # default=str so a stray non-JSON value degrades to its repr instead of raising.
         _logger.log(_LEVELS[lvl], json.dumps(record, default=str))
     except Exception as exc:  # noqa: BLE001 — logging is best-effort; never raise to callers
-        # Last-ditch breadcrumb so operators can still see the emit failure —
-        # the record itself is lost but its ABSENCE is at least documented.
         try:
             sys.stderr.write(
                 f'obslog.emit failed for event={event!r} level={level!r}: {exc!r}\n',
             )
         except Exception as inner:  # noqa: BLE001 — even stderr write is best-effort in a broken interpreter
-            # Nothing more we can do — a stderr write is the LAST resort. Bind
-            # the exception purely to satisfy the "log the exception" lint;
-            # there is no reachable channel to log it through.
             _ = inner  # noqa: F841
 
 

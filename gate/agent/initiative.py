@@ -33,41 +33,16 @@ from claude_agent_sdk.types import (
 from gate import identity, obslog
 from gate.agent import agentrun_client, pr_handoff
 from gate.agent.calibrations import load_jx3_calibration
-from gate.agent.diagnostics import classify_failure
 from gate.agent.initiative_prompt import render_initiative_system_prompt
 from gate.agent.lessons import render_for
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
-from gate.agent.release_checks import call_mcp_tool
-from gate.agent.test_mode import (
-    maybe_open_pr_args_for_initiative,
-    parse_test_mode,
-    run_test_mode,
-)
 from gate.agent.tool_logging import log_tool_call, log_tool_result
 from gate.initiatives import load_initiative
-from gate.mcp_servers import (
-    build_agent_local_server,
-    build_artifacts_server,
-    build_criteria_server,
-    build_remote_mcp_servers,
-)
-from gate.watcher.iteration_loop import format_feedback_payloads_for_prompt
+from gate.mcp_servers import build_remote_mcp_servers
+from gate.mcp_servers.call import call_mcp_tool
 
 logger = logging.getLogger(__name__)
 
-# Phase G.2 — step-aware failure diagnosis tools wired ONLY into the
-# initiative role (the read-only review_agent in `gate/agent/main.py` keeps
-# the slimmer MCP_ALLOWED_TOOLS set). Catalog (`mcp_catalog.yaml`) is the
-# source of truth for role→MCP wiring; this list mirrors the two MCPs
-# that carry step-aware diagnosis:
-#
-#   * ``leartech-tekton`` — REMOTE (Go leartech-mcp-servers at
-#     ``${LEARTECH_MCP_URL}/mcp/tekton``). Wired via ``REMOTE_MCPS`` in
-#     ``gate.mcp_servers.remote``. Exposes the six kubectl-backed tools.
-#   * ``leartech-agent-local`` — IN-PROCESS SDK
-#     (``gate.mcp_servers.agent_local``). Carries the two tools that
-#     depend on state inside the agent pod (LLM classifier heuristics +
-#     git ops on the cloned workspace) and therefore cannot move remote.
 INITIATIVE_TEKTON_TOOLS = [
     'mcp__leartech-tekton__list_pipelineruns_for_pr',
     'mcp__leartech-tekton__step_status',
@@ -75,14 +50,12 @@ INITIATIVE_TEKTON_TOOLS = [
     'mcp__leartech-tekton__cancel_pipelinerun',
     'mcp__leartech-tekton__cancel_superseded_for_pr',
     'mcp__leartech-tekton__wait_first_failure',
-    'mcp__leartech-agent-local__classify_step_failure',
-    'mcp__leartech-agent-local__rebase_branch_on_base',
 ]
 
 
 @dataclass(frozen=True)
 class RunSummary:
-    """Outcome of a single initiative run — surfaced to API callers via app.state."""
+    """Outcome of a single initiative run."""
 
     exit_code: int
     turns: int | None = None
@@ -111,7 +84,6 @@ def _write_pr_number_hint(pr_number: int | None) -> None:
         with open(PR_NUMBER_HINT_FILE, 'w', encoding='utf-8') as fh:
             fh.write(str(pr_number))
     except OSError:
-        # Non-fatal: the hint file is enrichment, not core flow.
         pass
 
 
@@ -207,7 +179,6 @@ async def _resolve_target_pr(qualified_repo: str, branch: str) -> int | None:
     namespace = identity.get_namespace()
     status_enabled = identity.is_status_enabled()
 
-    # 1. Authoritative: the value open_pr (MCP) wrote onto the CRD status.
     if run_name and namespace and status_enabled:
         current = await agentrun_client.get_target_pr(run_name, namespace)
         if current:
@@ -230,8 +201,6 @@ async def _resolve_target_pr(qualified_repo: str, branch: str) -> int | None:
                 )
                 return number
 
-    # 2. Break-glass fallback: gh, merge-aware. (Step 2 replaces this with the
-    #    pr_context ``resolve_pr`` MCP read so the resolver never touches GitHub.)
     number = _resolve_pr_number(qualified_repo, branch, state='all')
     obslog.emit(
         'INFO',
@@ -275,32 +244,15 @@ async def _backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: in
     run_name = identity.get_run_name()
     namespace = identity.get_namespace()
     status_enabled = identity.is_status_enabled()
-    # Local/dev runs (no AgentRun identity or status reporting disabled) → skip entirely.
-    # Post-strip a Bash subprocess (pytest included) sees NO identity, so this
-    # branch is what fires instead of a live k8s patch into someone else's run.
     if not run_name or not namespace or not status_enabled:
         return
     try:
         current = await agentrun_client.get_target_pr(run_name, namespace)
         if current:
-            # open_pr did its job — the authoritative writer already published the PR.
             return
         if pr_number is None:
-            # Agent legitimately opened no PR on this branch — nothing to record.
             return
-        # Empty status + a PR resolved on the branch → the agent opened a PR without
-        # calling open_pr. Recover the field so the controller can correlate the merge.
         await agentrun_client.patch_target_pr(run_name, namespace, pr_number)
-        # LOUD, deliberate forensic signal: greppable in Loki as
-        # event="targetpr_backstop_fired". A downstream forensic / scrum-master agent
-        # harvests these to spot plans/agents that skip the open_pr tool (plan health).
-        #
-        # Guarded by a nested try so an obslog transport failure (the incident
-        # this whole initiative fixes — the 12:48:43 pytest traceback where
-        # emit raised and the signal never reached Loki) does NOT crash the
-        # backstop path. Fix #4 in sanitise-subprocess-identity: obslog.emit
-        # is now internally failure-proof too, but the belt-and-braces is
-        # cheap and specific.
         try:
             obslog.emit(
                 'WARN',
@@ -322,12 +274,6 @@ async def _backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: in
         logger.warning('targetPR backstop failed (non-fatal): %s', exc)
 
 
-# Distinct non-zero exit for the "expected a PR but none produced" fail-fast.
-# There is no EXIT_* enum in this module today (failure exits are the bare
-# ``1``/``2`` literals used throughout ``run_initiative``), so we reuse the
-# generic failure convention: 1 = the agent's own work is incomplete/wrong,
-# 2 = an environment/config precondition failure. A finished PR-backed run with
-# no PR on its branch is the former.
 EXPECTED_PR_MISSING_EXIT_CODE = 1
 
 
@@ -375,19 +321,12 @@ def _fail_fast_if_expected_pr_missing(
     the confident-None state rather than have this force-fail on ambiguity.
     """
     if not pr_expected:
-        # apply/check-only initiative, BA run, or no PR was expected — nothing to do.
         return exit_code
     if exit_code != 0:
-        # Already a failure (crash / max-turns / cancel) — the exit code already
-        # reflects it and its specific value is meaningful. Don't re-stamp.
         return exit_code
     if pr_number is not None:
-        # A PR exists on the branch — the PR-backed step did its job.
         return exit_code
-    # PR expected + confidently no PR on the branch → fail the run.
-    # Identity read via the snapshot — see :mod:`gate.identity` for why.
     run_name = identity.get_run_name() or None
-    # LOUD, deliberate signal: greppable in Loki as event="expected_pr_missing".
     obslog.emit(
         'ERROR',
         'expected_pr_missing',
@@ -459,34 +398,10 @@ def _post_crash_sticky(*, qualified_repo: str, pr_number: int | None, body: str)
         click.echo(f'  (crash sticky post errored: {exc})', err=True)
 
 
-# 60 → 150 → 1000 → 200. Re-baselined 2026-05-26 after the Phase 1 cascade hit
-# the Anthropic org-level rate limit (20M prompt bytes/hour on Sonnet 4.6).
-# Observed actual usage: agent-base + py + ng finished in 30, 30-something,
-# and 30 turns respectively (~$0.50-$1 each). Even substantial initiatives
-# (catalog-fire-fallback at 134 turns, OAuth challenge at 107) stayed well
-# under 200. The 1000 cap was a "safety net against rabbit-holes" — at our
-# new Haiku-default + tighter quotas, 200 is a more honest safety net that
-# also caps any runaway burn quickly. Override per-run via `--max-turns N`
-# for genuinely larger initiatives.
-#
-# 2026-08-11: raised 200 → 300. A full from-scratch site build (re-scaffold +
-# 5 pages + design system + SSG + JSON-LD/llms.txt + unit + e2e specs, then
-# drive gates green) legitimately exceeds 200 — mortgagesourcing-website-visual
-# hit the 200 cap mid-build at turn 201 (SDK crashes abruptly on cap-hit, #913)
-# having pushed only incomplete work, so its PR gates were red for missing specs
-# it hadn't reached yet. With the resume-fetch fix above a cap-hit is now
-# survivable (retry resumes the pushed branch), but 300 gives a single run enough
-# headroom to finish + drive gates for these larger website builds without a
-# forced retry. Still a hard runaway ceiling; override per-run for bigger jobs.
 DEFAULT_INITIATIVE_MAX_TURNS = 300
 
-# Standard write-mode toolkit. Bash gives `git`, `gh`, `npm`, etc.; the rest are file ops.
 WRITE_MODE_TOOLS = ['Read', 'Write', 'Edit', 'Glob', 'Grep', 'Bash']
 
-# Fail-fast terminal MCP whose `all_passed` result means "the agent's job is
-# COMPLETE" (see the initiative system prompt, step 9/12). We match on the
-# unqualified suffix so a namespace change (`mcp__leartech-jx3-flow__…`) doesn't
-# silently disable the hard-stop safety net below.
 WAIT_FOR_TERMINAL_TOOL_SUFFIX = 'wait_for_terminal'
 
 
@@ -525,7 +440,6 @@ def _tool_result_reports_all_passed(block: ToolResultBlock) -> bool:
     if isinstance(content, str):
         text = content
     else:
-        # List of content parts — join any string / {"text": …} entries.
         parts: list[str] = []
         for part in content:
             if isinstance(part, str):
@@ -592,16 +506,11 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> tuple[int, str | None]:
         timeout=120,
     )
     if result.returncode != 0:
-        # Defensive: redact the token from any error output before echoing.
         redacted_stderr = result.stderr.replace(gh_token, '***REDACTED***')
         click.echo(
             f'Clone failed (exit {result.returncode}):\n{redacted_stderr}',
             err=True,
         )
-        # Surface a concise reason for the Layer-1 error column. Pick the
-        # most informative line from stderr; default to the exit code
-        # otherwise. "Repository not found" is the canonical
-        # missing-collaborator shape called out in the initiative spec.
         snippet_lines = [line for line in redacted_stderr.splitlines() if line.strip()]
         snippet = snippet_lines[-1] if snippet_lines else f'git exit {result.returncode}'
         if 'Repository not found' in redacted_stderr or 'not found' in redacted_stderr.lower():
@@ -610,50 +519,6 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> tuple[int, str | None]:
             reason = f'clone_failed: {snippet[:160]}'
         return 2, reason
     return 0, None
-
-
-# ─── Resume-on-retry (reliability part 3) ────────────────────────────────
-#
-# When the agent Job pod dies (OOM, node preemption, SIGKILL from the
-# cluster) and Kubernetes' backoffLimit spawns a retry pod, the retry
-# pod would otherwise re-enter ``run_initiative`` and restart the
-# initiative from scratch — fresh clone, redo every commit, potentially
-# open a duplicate PR. Empirically motivated by run B1 (2026-07-13)
-# where the first pod died and the retry redid ~all the work before the
-# duplicate-PR path was blocked by GitHub's "PR already exists on branch"
-# check.
-#
-# The durable work-state is the pushed git branch (``agent/<initiative>``)
-# + any open PR on it. The retry pod needs to DETECT that state and
-# RESUME from it rather than starting over. We do this deterministically
-# by asking GitHub two independent questions:
-#
-#   1. Does an open PR exist on ``<qualified_repo> --head <branch>``?
-#      (``gh pr list`` — same shape as ``_resolve_pr_number``.)
-#   2. Does the remote branch itself exist? (``git ls-remote``.)
-#
-# Either signal alone flips us into resume mode. Both use short timeouts
-# and swallow every subprocess/network failure — a detector that raised
-# would break fresh-run behaviour, which is precisely what the initiative
-# forbids.
-#
-# In resume mode the harness:
-#   * ``git fetch``es the remote branch into the local clone,
-#   * ``git checkout``s it (leaving HEAD on the prior attempt's work),
-#   * writes the PR-number hint file so the preStop hook is armed even
-#     before the SDK loop sees the PR URL,
-#   * prepends a "RESUME MODE" preamble to the user prompt telling the
-#     LLM this is a retry — DO NOT restart from scratch, DO NOT open a
-#     duplicate PR, continue from the existing branch state.
-#
-# Safety: if any of detection / fetch / checkout fails, we fall back to
-# the current fresh-start behaviour. The guard is on detection outcomes,
-# not a global flag — a detection blip flips one specific run back to
-# fresh-start without touching the rest. The system-prompt loop's own
-# step 1 ("create from base if missing, checkout+pull if it exists")
-# handles the fresh-start path, so a false-negative on resume-detection
-# is at worst a "did the work over again" outcome (matching the pre-fix
-# baseline behaviour) — never a corruption path.
 
 
 @dataclass(frozen=True)
@@ -702,8 +567,6 @@ def _remote_branch_exists(*, qualified_repo: str, branch: str) -> bool:
     """
     gh_token = os.environ.get('GH_TOKEN')
     if not gh_token:
-        # Without auth we can only reach public repos; every consumer
-        # repo we run against is private. Treat as "unknown → fresh".
         return False
     url = f'https://x-access-token:{gh_token}@github.com/{qualified_repo}.git'
     try:
@@ -716,8 +579,6 @@ def _remote_branch_exists(*, qualified_repo: str, branch: str) -> bool:
         )
     except (subprocess.TimeoutExpired, OSError):
         return False
-    # exit 0 with non-empty output → branch exists. exit 2 (per git docs)
-    # → no match. Anything else → error; treat as absent.
     return result.returncode == 0 and bool(result.stdout.strip())
 
 
@@ -785,15 +646,6 @@ def _fetch_and_checkout_existing(*, cwd: Path, branch: str) -> bool:
         )
 
     try:
-        # Explicit refspec so the remote-tracking ref origin/<branch> is created
-        # locally. Plain `git fetch origin <branch>` only populates FETCH_HEAD, so
-        # the checkout below (`-B <branch> origin/<branch>`) then fails with
-        # "origin/<branch> is not a commit" — especially on the pod's shallow
-        # clone, which has no origin/<branch> ref. That false-negative dropped
-        # resume to fresh-start and made every retry redo the whole build from
-        # main (observed: mortgagesourcing-website-visual PR #3, 2026-08-11 — a
-        # cap-hit retry threw away 88%-done pushed work). The refspec fetches the
-        # branch tip AND wires origin/<branch> so the checkout resumes on it.
         fetch = _run(
             ['git', 'fetch', 'origin', f'+refs/heads/{branch}:refs/remotes/origin/{branch}'],
             timeout=60,
@@ -840,10 +692,8 @@ def _checkpoint_wip_on_crash(*, cwd: Path, branch: str) -> None:
 
     try:
         if not _run(['git', 'status', '--porcelain']).stdout.strip():
-            return  # clean tree — the agent already pushed everything
+            return
         _run(['git', 'add', '-A'])
-        # --no-verify: skip hooks (a WIP checkpoint must not be blocked by a
-        # lint/test pre-commit hook — the point is to preserve work, not gate it).
         _run(['git', 'commit', '--no-verify', '-m', 'wip: turn-cap checkpoint (auto — resumable)'])
         push = _run(['git', 'push', 'origin', f'HEAD:{branch}'])
         ok = push.returncode == 0
@@ -920,19 +770,8 @@ def _build_resume_preamble(*, branch: str, base: str, pr_number: int | None) -> 
     )
 
 
-# The agent-runtime repo: the ONE consumer whose test suite exercises
-# AgentRun-patching code, because it IS the AgentRun runtime. Any run whose
-# ``initiative.primary.qualified_repo`` matches this triggers the
-# ``self_referential_repo`` signpost so incident triage instantly spots the
-# self-reference. Matched case-insensitive and by suffix so an unqualified
-# ``leartech-automated-agent`` or a rehomed ``someorg/leartech-automated-agent``
-# both fire — no false negatives.
 _AGENT_RUNTIME_REPO_SUFFIX = 'leartech-automated-agent'
 
-# Module-level flag so the signpost fires AT MOST ONCE per Python process
-# regardless of how many times ``run_initiative`` is invoked (e.g. within a
-# unit-test session that runs many initiatives). One line per run is enough
-# for a signpost; more would be noise.
 _self_referential_signpost_emitted: bool = False
 
 
@@ -1000,63 +839,9 @@ async def run_initiative(
     """Drive a single initiative end-to-end. Returns a summary of the run."""
     initiative = load_initiative(initiative_path)
 
-    # ── SANITISE THE SUBPROCESS ENVIRONMENT ────────────────────────────────
-    # Fix #1 in sanitise-subprocess-identity. The AgentRun identity is needed
-    # ONLY by this process's own code (backstop patch, test-mode phase report,
-    # obslog correlation). Nothing this process shells out to — the SDK's
-    # Bash tool, ``uv run pytest`` from the gate suite, git, jx CLI, … —
-    # should ever see it. Capture into an in-memory snapshot, then strip
-    # ``AGENT_RUN_NAME`` + ``AGENT_RUN_NAMESPACE`` + ``LEARTECH_AGENTRUN_STATUS``
-    # from :data:`os.environ` so every downstream subprocess inherits an
-    # env that CANNOT reach the AgentRun CR. ``LEARTECH_RUN_ID`` is kept
-    # for Loki correlation — see :mod:`gate.identity`.
-    #
-    # Must fire BEFORE the test-mode short-circuit and the resume-detection
-    # git shells below — everything that could spawn a child needs the
-    # stripped env inherited from us.
     identity.capture_and_strip()
 
-    # ── SELF-REFERENTIAL REPO SIGNPOST ─────────────────────────────────────
-    # Fix #2 in sanitise-subprocess-identity. This is the ONLY repo whose
-    # test suite exercises code that patches AgentRun status, because it
-    # IMPLEMENTS the AgentRun runtime. Emit one prominent WARN-level Loki
-    # line at the top of every run against this repo so anyone debugging
-    # the incident class (or its recurrence) can spot the self-reference
-    # without having to know it in advance.
     _emit_self_referential_repo_signpost_if_applicable(initiative)
-
-    # ── TEST-MODE short-circuit ────────────────────────────────────────────
-    # A plan step may set ``initiative.testMode`` to skip the LLM/SDK loop
-    # entirely and directly self-report a Succeeded/Failed phase (with
-    # optional open_pr exercise). ONLY honored when the guard env
-    # ``LEARTECH_AGENT_TEST_MODE_ALLOWED=true`` is set — otherwise the
-    # directive is IGNORED and the agent runs normally. Placed BEFORE the
-    # ANTHROPIC_API_KEY check because test-mode's whole point is to skip the
-    # LLM: a test-mode run with no key should still succeed.
-    inputs_for_test_mode: dict[str, object] = {}
-    if initiative.test_mode is not None:
-        inputs_for_test_mode['testMode'] = initiative.test_mode
-    test_mode_spec = parse_test_mode(inputs_for_test_mode)
-    if test_mode_spec is not None:
-        # Build open_pr args for the PR-backed dev-agent step — the real
-        # path opens a PR on ``initiative.primary`` (repo + head branch), so
-        # test-mode does too. The MCP tool's own test-mode support returns
-        # a synthetic PR and still patches ``AgentRun.status.targetPR``.
-        pr_target = initiative.primary
-        open_pr_args = maybe_open_pr_args_for_initiative(
-            qualified_repo=pr_target.qualified_repo,
-            base_branch=pr_target.base or 'main',
-            head_branch=pr_target.branch,
-            title=f'[test-mode] {initiative.name}',
-            body=(
-                'This PR was opened by the agent in TEST-MODE. The MCP tool '
-                'produces a synthetic PR (real GitHub call is bypassed by '
-                'leartech-mcp-servers) — the point is to exercise the '
-                'PR-capture path end-to-end without doing real work.'
-            ),
-        )
-        exit_code = await run_test_mode(test_mode_spec, open_pr_args=open_pr_args)
-        return RunSummary(exit_code=exit_code)
 
     if not os.environ.get('ANTHROPIC_API_KEY'):
         click.echo(
@@ -1065,9 +850,6 @@ async def run_initiative(
         )
         return RunSummary(exit_code=2)
 
-    # Multi-repo execution (coordinated changes across multiple PRs in a single
-    # agent session) is a follow-up slice. Schema accepts the shape today; the
-    # agent loop only handles len(repos) == 1 until that slice lands.
     if initiative.is_multi_repo:
         click.echo(
             click.style(
@@ -1085,41 +867,12 @@ async def run_initiative(
     primary = initiative.primary
     cwd = repo_root or _default_repo_root(primary.qualified_repo)
 
-    # V5 D2.2 — the spawning router writes the run_id into the Job's env
-    # so the agent loop can record the wall-clock moment its first SDK
-    # turn fires. Unset on laptop runs (no router involved) → diagnostics
-    # writes become no-ops, by design. We resolve this BEFORE the clone
-    # so a clone failure can still attribute itself to the right run.
-    #
-    # Read via :mod:`gate.identity` so the correlation id survives the
-    # capture_and_strip we ran at the top of this function — LEARTECH_RUN_ID
-    # is CAPTURED (not stripped), but going through the accessor keeps the
-    # code path consistent with every other identity read in this file.
     run_id_for_first_turn = identity.get_run_id() or None
     if not cwd.exists():
-        # Cluster mode: the consumer repo isn't pre-mounted, so clone it from GitHub
-        # on demand. We use direct `git clone` over HTTPS (with GH_TOKEN injected
-        # into the URL) rather than `gh repo clone`, because `gh` resolves the
-        # clone URL via the GitHub GraphQL API — which shares a 5000pts/h bucket
-        # with operator-side `gh` usage. Direct git protocol hits no API.
-        # Laptop mode normally has the repo at ~/leartech/<repo>/ already, so this
-        # branch only fires on a fresh dev machine or the deployed pod.
         clone_exit, clone_reason = _clone_repo(qualified_repo=primary.qualified_repo, cwd=cwd)
         if clone_exit != 0:
-            # Layer 1 — Persist the classified clone failure to
-            # ``initiative_runs.error`` before exiting so the operator
-            # has the reason in the DB without pod-log archaeology.
             return RunSummary(exit_code=clone_exit)
 
-    # Compose: JX3 platform calibration (static, shipped in wheel) → encoded
-    # lesson calibrations (filtered by role) → initiative system prompt.
-    # Both calibration sources stack on top of the role prompt; either or
-    # both may be empty.
-    #
-    # ``hold`` is threaded through from the initiative YAML (default False) so
-    # the role prompt tells the agent whether to post `/hold` after opening
-    # the PR. Default False = let Tide auto-merge on green; the gate suite
-    # (incl. ai-review) IS the review.
     blocks: list[str] = [load_jx3_calibration()]
     lessons = render_for('initiative_agent')
     if lessons:
@@ -1129,23 +882,7 @@ async def run_initiative(
 
     options = ClaudeAgentOptions(
         system_prompt=system_prompt,
-        mcp_servers={
-            'leartech-test-artifacts': build_artifacts_server(),
-            'leartech-criteria': build_criteria_server(),
-            # Two tools that couldn't move remote (LLM classifier heuristics +
-            # git ops on the cloned workspace). See `gate/mcp_servers/agent_local.py`.
-            'leartech-agent-local': build_agent_local_server(),
-            # Authed remote MCPs (Streamable-HTTP over the network) —
-            # leartech-pr-context for open_pr, leartech-tekton for the
-            # step-aware Tekton inspection surface previously reimplemented
-            # in-process, AND leartech-jx3-flow for the PR-check status
-            # surface (list_pr_checks / wait_for_terminal /
-            # wait_for_first_failure_or_all_pass) previously served by an
-            # in-process `pipeline_server` shim. Empty dict when unconfigured
-            # so the agent degrades cleanly rather than crashing. See
-            # gate/mcp_servers/remote.py for the registry.
-            **build_remote_mcp_servers(),
-        },
+        mcp_servers={**build_remote_mcp_servers()},
         allowed_tools=[*WRITE_MODE_TOOLS, *MCP_ALLOWED_TOOLS, *INITIATIVE_TEKTON_TOOLS],
         permission_mode='bypassPermissions',
         max_turns=max_turns,
@@ -1154,22 +891,6 @@ async def run_initiative(
         add_dirs=[str(cwd)],
     )
 
-    # Reliability part 3 — resume-on-retry. When the agent Job pod dies
-    # and K8s spawns a retry, the retry pod would otherwise restart the
-    # initiative from scratch: fresh clone (done above), fresh branch,
-    # redo every commit, potentially open a duplicate PR. We detect the
-    # "prior attempt already pushed" state by querying GitHub for the
-    # branch + open PR, and if either fires we ``git fetch`` +
-    # ``git checkout`` the existing branch and prepend a "RESUME MODE"
-    # preamble to the user prompt so the LLM knows to continue from the
-    # pushed state instead of redoing the work.
-    #
-    # Safety: any failure — detection error, missing GH_TOKEN, fetch
-    # timeout, checkout non-zero — flips us back to fresh-start (the
-    # pre-fix baseline). We don't hard-fail the run on resume issues
-    # because the system-prompt loop can recover from a fresh-start
-    # against an already-existing remote branch anyway (its step 1
-    # handles "checkout existing branch and pull").
     resume_context = _detect_resume_context(
         qualified_repo=primary.qualified_repo,
         branch=primary.branch,
@@ -1189,12 +910,6 @@ async def run_initiative(
             fetch_ok = _fetch_and_checkout_existing(cwd=cwd, branch=primary.branch)
             if fetch_ok:
                 resume_active = True
-                # Arm the preStop hook immediately: the PR number hint
-                # file is normally written by ``_resolve_pr_number`` at
-                # end-of-run, but on a resume we already know the PR
-                # number BEFORE the SDK loop starts. A retry pod
-                # cancelled early (before the run resolves the PR)
-                # would otherwise not fire the crash sticky.
                 if resume_context.pr_number is not None:
                     _write_pr_number_hint(resume_context.pr_number)
             else:
@@ -1206,9 +921,6 @@ async def run_initiative(
                     err=True,
                 )
         else:
-            # Only signal was the PR existing but no branch on remote —
-            # that's a shape we don't expect (an open PR requires a
-            # branch), so treat it as a detection blip and fall back.
             click.echo(
                 click.style(
                     '  resume signal fired without branch-on-remote — skipping fetch, falling back to fresh-start',
@@ -1217,30 +929,12 @@ async def run_initiative(
                 err=True,
             )
 
-    # v6p0.5 step 2 — when the PR watcher re-spawned this run with prior-
-    # attempt feedback, prepend the structured failure context BEFORE the
-    # standard "Run this initiative end-to-end..." instruction. The order
-    # matters: the agent must read the failure detail BEFORE starting its
-    # standard loop (otherwise it begins from "branch check" and uses the
-    # feedback as ambient context, which empirically gets de-prioritised
-    # against the loop steps). ``format_feedback_payloads_for_prompt``
-    # returns the empty string on a fresh first-attempt run, so this is
-    # a no-op for runs that aren't re-spawns.
-    feedback_block = format_feedback_payloads_for_prompt([dict(p) for p in initiative.feedback_payloads])
     base_prompt = (
         f'Run this initiative end-to-end. Your working directory is `{cwd}`.\n\n'
         f'```yaml\n{initiative_path.read_text()}\n```\n\n'
         f'Begin by checking what state the branch is in (`git status`, `git branch --show-current`), '
         f'then proceed through the loop in your system prompt.'
     )
-    # Resume-on-retry — prepend the RESUME MODE block ahead of both the
-    # respawn-feedback block (if any) and the base prompt. Order: resume
-    # signal first (tells the LLM the working tree is on prior HEAD),
-    # then per-attempt feedback (tells it what specifically failed in
-    # the last cycle), then the standard loop kickoff. Empirically the
-    # LLM prioritises the earliest-placed instructions when signals
-    # conflict, so anchoring the physical-state message first prevents
-    # the "start fresh" default from re-emerging.
     if resume_active:
         resume_preamble = _build_resume_preamble(
             branch=primary.branch,
@@ -1253,8 +947,6 @@ async def run_initiative(
     prompt_parts: list[str] = []
     if resume_preamble:
         prompt_parts.append(resume_preamble)
-    if feedback_block:
-        prompt_parts.append(feedback_block)
     prompt_parts.append(base_prompt)
     user_prompt = '\n\n---\n\n'.join(prompt_parts)
 
@@ -1263,39 +955,21 @@ async def run_initiative(
     click.echo(click.style(f'  cwd: {cwd}', fg='green'), err=True)
     click.echo('', err=True)
 
-    # PR-backed step marker. ``run_initiative`` (this non-test dev-agent path) is
-    # the entrypoint that genuinely OPENS a PR — the LLM assembles the ``open_pr``
-    # MCP call itself, but the initiative-shaped arg dict is deterministic, so we
-    # build it up front. Its truthiness is the single "a PR was expected" signal
-    # consumed by the end-of-run fail-fast below (mirrors the test-mode path,
-    # which builds the same dict via ``maybe_open_pr_args_for_initiative``).
-    open_pr_args = maybe_open_pr_args_for_initiative(
-        qualified_repo=primary.qualified_repo,
-        base_branch=primary.base or 'main',
-        head_branch=primary.branch,
-        title=initiative.name,
-        body=f'Automated changes for initiative `{initiative.name}`.',
-    )
-
-    # NOTE: ``run_id_for_first_turn`` + ``db_engine_initialised`` are
-    # already resolved above the clone block — they need to be available
-    # so a clone failure can attribute itself to the run via Layer 1.
-    # Bidirectional command queue (initiative
-    # agent-add-command-queue-with-injection). Operator-issued commands
-    # land in ``agent_run_commands`` rows; the SDK loop drains them at
-    # each turn boundary and applies the sink's primitives. DB-less
-    # mode no-ops the drain — laptop runs see zero command-queue
-    # overhead per turn.
+    open_pr_args = {
+        'run_id': identity.get_run_id(),
+        'namespace': identity.get_namespace(),
+        'repo': primary.qualified_repo,
+        'base': primary.base or 'main',
+        'head': primary.branch,
+        'title': initiative.name,
+        'body': f'Automated changes for initiative `{initiative.name}`.',
+    }
 
     exit_code = 0
     last_turn_count = 0
     last_cost: float | None = None
     crash_sticky_body: str | None = None
 
-    # PR-checkpoint state. Dict rather than closure locals so the per-turn hook
-    # can update it without `nonlocal` gymnastics in this long function.
-    # `pr` is cached once resolved: status.targetPR is written by the open_pr MCP
-    # tool and does not change for the life of the run.
     handoff_state: dict[str, int] = {'turn': 0, 'pr': 0}
 
     async def _handoff_checkpoint(*, turns: int, cost_usd: float | None, last_tool_call: str | None) -> None:
@@ -1323,53 +997,12 @@ async def run_initiative(
         except Exception as exc:  # noqa: BLE001 — observability must not break the run
             logger.warning('PR checkpoint failed at turn %s: %s', turns, exc)
 
-    # Initiative agent-fix-exit-code-after-pr-opened — distinguish the
-    # operator-cancel path from the SDK-crash/max-turns path. The post-loop
-    # normaliser preserves exit_code=2 when ``exit_via_cancel`` is set
-    # (operator intent to terminate) but downgrades 1/2 → 0 when a PR was
-    # opened before an SDK crash or max_turns hit (substantive work shipped;
-    # re-firing is wasteful and triggers K8s BackoffLimitExceeded).
     exit_via_cancel = False
-    # Per-turn writeback (initiative agent-add-per-turn-writeback).
-    # We track the NAME of the last tool the agent invoked during the
-    # in-flight turn so we can include it in the per-turn writeback
-    # when the ResultMessage arrives. Reset to None at each
-    # ResultMessage so a plain-text turn after a tool-using turn writes
-    # NULL (the explicit "no tool this turn" signal). The "LAST tool
-    # wins" rule means later ToolUseBlocks in a single AssistantMessage
-    # overwrite earlier ones — operators see the most recent action.
     current_turn_last_tool: str | None = None
-    # Post-green hard-stop safety net (fix-agent-exit-on-mcp-success). The
-    # PRIMARY lever is the system prompt telling the LLM to STOP once
-    # `wait_for_terminal` returns `all_passed`. This is the belt-and-braces
-    # backstop for the known SDK behaviour (issue #913: the SDK doesn't
-    # cleanly terminate, so a model that lingers past "done" would keep
-    # burning idle turns — the "agent outlives merged PR" overrun). We track
-    # the tool_use_ids of `wait_for_terminal` calls, flip
-    # ``terminal_all_passed_seen`` when one returns `all_passed`, and — only
-    # AFTER a subsequent turn that made NO tool call (the agent emitting its
-    # final text summary, its own designated done-signal) — break the SDK
-    # loop. Gating on the no-tool turn means we never cut off the "ready for
-    # review" sticky (a tool call) or a some_failed→fix iteration.
     wait_for_terminal_tool_ids: set[str] = set()
-    # tool_use_id → tool name, so a ToolResultBlock (which carries only the id)
-    # can be logged against the tool that produced it. See log_tool_result below.
     tool_names_by_id: dict[str, str] = {}
     terminal_all_passed_seen = False
     turn_made_tool_call = False
-    # Reliability — resume-on-retry seed for the exit-code normalisation below
-    # (which downgrades a 1/2 exit → 0 when a PR was opened during this run, so
-    # K8s doesn't retry a crashed pod whose substantive work already shipped).
-    # When this run is a retry pod that discovered an already-open PR on THIS
-    # branch before the SDK loop started, seed ``pr_emitted`` with that number.
-    # Source is AUTHORITATIVE + BRANCH-SCOPED ONLY: the resume-detection lookup
-    # here (a branch-scoped ``gh pr list --head``), and a branch-scoped
-    # ``_resolve_pr_number`` re-check at the exit-code path for non-resume runs.
-    # We no longer scrape PR URLs out of tool-result prose — that matched
-    # unrelated PRs the agent merely cited (the wrong-PR / targetPR mis-capture
-    # bug). The authoritative PR number is recorded onto AgentRun.status by the
-    # ``open_pr`` MCP tool at PR-open; ``_resolve_pr_number`` remains only as a
-    # read-only orphan-PR classifier at end-of-run.
     pr_emitted: int | None = resume_context.pr_number if resume_active else None
 
     try:
@@ -1380,51 +1013,19 @@ async def run_initiative(
                         click.echo(block.text)
                     elif isinstance(block, ToolUseBlock):
                         click.echo(click.style(f'\n→ {block.name}', fg='cyan'), err=True)
-                        # Structured, redacted trajectory → Loki. The '→ name'
-                        # echo above is for a human tailing the pod; this carries
-                        # the actual command/input so operators aren't blind to
-                        # WHAT ran (e.g. how a private gs:// artifact was read).
                         tool_names_by_id[block.id] = block.name
                         log_tool_call(block.name, block.input)
-                        # Post-green hard-stop safety net — this turn made a
-                        # tool call, so it is NOT the agent's final
-                        # no-tool "I'm done" summary turn. Record the
-                        # ``wait_for_terminal`` invocation's id so the
-                        # matching ToolResultBlock (delivered on a later
-                        # UserMessage) can be recognised as the terminal
-                        # completion signal.
                         turn_made_tool_call = True
                         if _tool_name_is_wait_for_terminal(block.name):
                             wait_for_terminal_tool_ids.add(block.id)
-                        # Per-turn writeback (initiative
-                        # agent-add-per-turn-writeback). Track the
-                        # LATEST tool the agent invoked this turn so the
-                        # ResultMessage handler can flush it to
-                        # ``initiative_runs.last_tool_call``. Last-wins
-                        # by design — operators see the most recent
-                        # action even when an AssistantMessage carries
-                        # several ToolUseBlocks.
                         current_turn_last_tool = block.name
-                        # Layer 2 — one decision row per tool invocation so
-                        # the operator can read the agent's turn-by-turn
-                        # trajectory from the DB. ``payload`` carries the
-                        # tool input so the row is self-contained.
                     elif isinstance(block, ThinkingBlock):
                         pass
             elif isinstance(message, UserMessage):
-                # Post-green hard-stop safety net — tool RESULTS come back to
-                # the model as a UserMessage carrying ToolResultBlock(s). When
-                # a `wait_for_terminal` result reports `all_passed`, flip the
-                # flag so the ResultMessage boundary can end the loop once the
-                # agent emits its final no-tool summary turn.
                 content = message.content
                 if isinstance(content, list):
                     for block in content:
                         if isinstance(block, ToolResultBlock):
-                            # Structured, redacted tool OUTPUT → Loki, paired with
-                            # the tool name via the id map. Completes the trajectory
-                            # so a failed/odd command shows its result, not just
-                            # that it ran.
                             log_tool_result(
                                 tool_names_by_id.get(block.tool_use_id),
                                 block.content,
@@ -1438,13 +1039,6 @@ async def run_initiative(
                 last_turn_count = message.num_turns
                 cost = message.total_cost_usd if message.total_cost_usd is not None else 0.0
                 last_cost = cost
-                # Durable PR checkpoint — the ONLY record of turn count and spend
-                # that survives this pod. A deadline kill or node move would
-                # otherwise leave the successor iteration with a branch and a PR
-                # but no record of where this one got to. Cadence is decided in
-                # pr_handoff; the MCP tool rewrites the comment only when its
-                # state digest changes, so a call that says nothing new costs one
-                # round-trip and no PR edit.
                 if pr_handoff.should_post(
                     turns=last_turn_count,
                     max_turns=max_turns,
@@ -1460,19 +1054,6 @@ async def run_initiative(
                     )
                 current_turn_last_tool = None
 
-                # Post-green hard-stop safety net
-                # (fix-agent-exit-on-mcp-success). If `wait_for_terminal`
-                # has reported `all_passed` AND this just-completed turn made
-                # no tool call, the agent has emitted its final text summary —
-                # its own designated done-signal — and the initiative is
-                # COMPLETE. Break the SDK loop here rather than relying solely
-                # on the model to stop taking turns. This is the belt to the
-                # prompt's braces: it caps the "agent outlives merged PR"
-                # idle overrun (SDK issue #913 means the session doesn't
-                # cleanly terminate, so a lingering model keeps burning turns).
-                # Gating on ``not turn_made_tool_call`` guarantees we never
-                # cut off the "ready for review" sticky or a some_failed→fix
-                # iteration — those turns make tool calls.
                 if terminal_all_passed_seen and not turn_made_tool_call:
                     click.echo(
                         click.style(
@@ -1486,22 +1067,8 @@ async def run_initiative(
                         err=True,
                     )
                     break
-                # Reset the per-turn tool-call marker for the NEXT turn. Placed
-                # after both the cancel + hard-stop checks so each ResultMessage
-                # boundary reflects exactly the turn that just closed.
                 turn_made_tool_call = False
     except Exception as exc:  # noqa: BLE001 — SDK raises bare Exception; we narrow via turn-count heuristic
-        # The SDK's `receive_messages()` raises a generic Exception when the consumer-set
-        # `max_turns` is reached (see issue #913) AND for genuine transport errors. We use
-        # the most recent ResultMessage's `num_turns` to distinguish: if we got close to
-        # the cap, it's almost certainly a cap-hit; otherwise it's a real crash.
-        # In either case the agent never reached its own step-11 sticky, so the harness
-        # posts a crash sticky itself once we've resolved the PR number below.
-        #
-        # First: best-effort push a checkpoint of any UNCOMMITTED work. The SDK
-        # crashes mid-turn, so the final chunk (the tests it was writing when PR #3
-        # hit the cap) is otherwise lost and redone on retry. Preserve it so
-        # resume-on-retry continues from the true latest.
         _checkpoint_wip_on_crash(cwd=cwd, branch=primary.branch)
         if last_turn_count >= max_turns:
             click.echo(
@@ -1549,54 +1116,14 @@ async def run_initiative(
                 ),
             )
 
-        # Layer 1 — Write the classified failure reason to
-        # Classified reason, surfaced in the crash sticky on the PR. cap-hit
-        # gets ``agent_sdk_max_turns_exceeded``; everything else gets
-        # ``agent_sdk_error: <ExcClass>: <message>``.
-        classified_reason = classify_failure(
-            exc,
-            last_turn_count=last_turn_count,
-            max_turns=max_turns,
-        )
-        logger.warning('initiative terminal: %s', classified_reason)
-        # Layer 3 — Persist whatever conversation history is in-flight
-        # at the moment of the crash. This is the only chance: the pod
-        # may not reach the natural-terminal snapshot writer below.
-        # Layer 2 — Record the terminal decision so the operator's
-        # ``SELECT ... FROM agent_run_decisions`` view captures the
-        # moment of failure (not just the leading tool calls).
+        if max_turns and last_turn_count >= max_turns:
+            logger.warning('initiative terminal: agent_sdk_max_turns_exceeded at turn %s', last_turn_count)
+        else:
+            logger.warning('initiative terminal: agent_sdk_error: %s: %s', type(exc).__name__, exc)
 
-    # ── Verdict gate + exit-code normalisation ──────────────────────────
-    # Core principle (Mike 2026-08-05): opening a PR is NOT success —
-    # reaching green is. The single authoritative "the work shipped" signal
-    # is ``terminal_all_passed_seen`` (wait_for_terminal reported all_passed —
-    # the prompt's mandated completion signal, initiative_prompt.py §Stopping
-    # criteria), NOT "a PR exists". An agent that opens a PR then declares
-    # itself BLOCKED, or never gets the wait command to report all-green, must
-    # record a FAILURE so the step recycles the agent (its normal retry loop).
-    # A false-Succeed here is the exact bug that let a blocked run (no webhook,
-    # 0 checks fired) report success while nothing was built (setup-mcp-design,
-    # 2026-08-05).
-    #
-    # Resolve the PR ONCE, up-front, for the gates + fail-fast below. The signal is
-    # AUTHORITATIVE — ``AgentRun.status.targetPR`` (written by the open_pr MCP tool),
-    # read via ``_resolve_target_pr`` — with a merge-aware ``gh`` break-glass fallback
-    # only when that field is empty. We deliberately no longer (a) scrape PR URLs out
-    # of tool-result prose (mis-captured cited PRs — the wrong-PR bug), nor (b) rely on
-    # ``gh pr list --state open`` as the primary signal (it returned None once Tide
-    # merged the PR — the expected_pr_missing false-FAIL, since a merged PR is a
-    # SUCCESS). Reused as ``pr_number`` at end-of-run — no second resolution.
     if pr_emitted is None:
         pr_emitted = await _resolve_target_pr(primary.qualified_repo, primary.branch)
 
-    # Gate 1 — blocked / never-green (natural-end path only). The agent stopped
-    # of its own accord (no SDK crash: ``crash_sticky_body is None``; no
-    # operator cancel) with ``exit_code == 0`` and a PR open, but
-    # wait_for_terminal never reported all_passed. It either posted a "blocked"
-    # summary or ran out of road on red/absent checks. Record FAILED so the run
-    # recycles. The reasons the agent already posted (its sticky + summary) are
-    # untouched — only the exit code changes ("quick exit AND still post the
-    # reasons, but that is not success").
     if (
         crash_sticky_body is None
         and not exit_via_cancel
@@ -1626,18 +1153,6 @@ async def run_initiative(
         )
         exit_code = 1
 
-    # Gate 2 — crash / max-turns normalisation. When the SDK crashed, hit the
-    # max_turns ceiling, or returned is_error=True (``exit_code in (1, 2)``)
-    # AFTER the work genuinely shipped, exit 0 so K8s doesn't retry a path
-    # whose substantive work already landed — each retry hits the same SDK
-    # regression and eventually trips BackoffLimitExceeded (canonical case: run
-    # 59aefbd8f2d8, PR #111 merged cleanly while status=failed). The rescue is
-    # gated on ``terminal_all_passed_seen`` — CONFIRMED GREEN — NOT merely "a PR
-    # was opened". That was the flaw: a blocked/never-green run (PR open,
-    # nothing built) was also rescued to success. Confirmed-green is the correct
-    # proxy for "shipped"; PR-opened is not. Operator-cancel intent is preserved
-    # (``not exit_via_cancel``). The crash sticky + warn logs still fire below;
-    # only the exit code changes.
     if exit_code in (1, 2) and not exit_via_cancel and terminal_all_passed_seen:
         click.echo(
             click.style(
@@ -1651,29 +1166,7 @@ async def run_initiative(
         )
         exit_code = 0
 
-    # Layer 3 — persist the full conversation snapshot on natural
-    # terminal (success path). The exception branch above already
-    # persisted on failure; this is the success-side companion. Doing it
-    # BEFORE engine dispose so we still have a live connection pool.
-
-    # V5 D2.2 — release the engine that ``mark_first_turn`` was sharing.
-    # Paired with the eager init above so a long-running process doesn't
-    # keep a connection pool alive past the SDK loop's lifetime. Tolerate
-    # any disposal error — the agent is exiting anyway and the K8s Job
-    # tears down the pod regardless.
-
-    # Reuse the PR resolved once above (status-first, via ``_resolve_target_pr``) —
-    # no second ``gh`` shellout, and no divergent representation of the same fact.
-    # Between the verdict gate and here the LLM loop is finished, so no new PR can
-    # appear; ``pr_emitted`` is the authoritative value.
     pr_number = pr_emitted
-    # PR publish is owned by the open_pr MCP tool (it patches AgentRun.status
-    # {targetPR, headBranch} at create time; the controller then emits the
-    # Maestro run.pr_opened). The agent no longer patches/emits here — the
-    # resolved value above is only the read-only signal for the orphan-PR
-    # classification below + the exit-code normalisation + the fail-fast.
-    # Layer 1 + 2 — classify the orphan-PR case. When the agent reports
-    # success but no PR exists on the branch, the operator needs to know.
     if pr_number is None and exit_code == 0:
         logger.warning(
             'pr_link_missing: agent reported success but no open PR on %s@%s',
@@ -1687,25 +1180,8 @@ async def run_initiative(
             body=crash_sticky_body,
         )
 
-    # Runtime backstop: open_pr is the authoritative writer of
-    # ``AgentRun.status.targetPR``, but if the LLM opened a PR via raw ``gh``
-    # without calling the tool the field stays empty and the controller's
-    # stop-on-merge correlation breaks (the agent then overruns polling release
-    # status). This guarantees the field is set from the branch-scoped
-    # ``_resolve_pr_number`` result above AND emits a loud, greppable Loki signal
-    # (event="targetpr_backstop_fired") for downstream forensic harvesting. It is
-    # a no-op when open_pr already set the field, when no PR was resolved, or when
-    # not running as a real AgentRun — and any failure is swallowed.
     await _backstop_target_pr(qualified_repo=primary.qualified_repo, branch=primary.branch, pr_number=pr_number)
 
-    # Deterministic fail-fast: a PR-backed step (``open_pr_args`` truthy) that
-    # finished with NO PR on its branch must NOT false-Succeed. Force a non-zero
-    # exit so the AgentRun goes Failed (and K8s can retry) and emit a loud,
-    # greppable Loki signal (event="expected_pr_missing"). This is the AGENT-layer
-    # complement to the controller's ``kind:pr`` step check. It is mutually
-    # exclusive with the backstop above (that fires only when a PR exists; this
-    # fires only when none does) and is a no-op when a PR was resolved or when no
-    # PR was expected. Threaded into ``exit_code`` so ``run_end`` reflects it too.
     exit_code = _fail_fast_if_expected_pr_missing(
         pr_expected=bool(open_pr_args),
         pr_number=pr_number,
@@ -1714,12 +1190,6 @@ async def run_initiative(
         branch=primary.branch,
     )
 
-    # Note: we used to emit a trailing `--- turns=... pr=N` stdout marker
-    # here for a pod-log reconciler to grep. That consumer is long gone — the
-    # authoritative ``AgentRun.status.targetPR`` is patched by the ``open_pr``
-    # MCP tool, and the controller's maestro_producer emits ``run.pr_opened``
-    # when it observes that change. The RunSummary below is the sole return
-    # channel; there is no stdout-side reporting.
     return RunSummary(
         exit_code=exit_code,
         turns=last_turn_count or None,
@@ -1742,10 +1212,6 @@ async def run_initiative(
 )
 def main(initiative_path: Path, repo_root: Path | None, model: str, max_turns: int) -> None:
     """Run an initiative YAML end-to-end via the write-mode agent."""
-    # Phase-A observability: emit stable run-boundary events. obslog is
-    # seam-agnostic — Phase B's runtime calls the same fns, so this survives the
-    # refactor. run_end is THE authoritative per-run outcome line (one per run),
-    # queryable in Loki: {namespace="jx-staging"} | json | event="run_end"
     obslog.info(
         'run_start',
         'initiative run starting',

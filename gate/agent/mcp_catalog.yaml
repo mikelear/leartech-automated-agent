@@ -1,198 +1,170 @@
-# MCP catalog — single source of truth for the platform's tool surface.
-#
-# Adopts the registry pattern from mqube-mcp-connector (see
-# project_mcp_catalog_pattern memo) without the LLM-gateway layer.
-# claude-agent-sdk handles the Anthropic side; this catalog only describes
-# the MCP servers themselves.
-#
-# Three deployment modes supported (`type:` field):
-#   - sdk     : in-process via claude_agent_sdk.create_sdk_mcp_server.
-#               Builder is a "module:function" reference returning McpSdkServerConfig.
-#   - stdio   : subprocess launched per agent session (mqube pattern).
-#               `command` + `args` + optional `env` describe how to spawn.
-#   - http_sse: long-running HTTP server speaking MCP over SSE.
-#               `url` + optional `auth` describe how to connect.
-#   - remote  : remote API speaking MCP over HTTP.
-#               `url` + optional `auth` describe how to connect.
-#
-# Role-to-MCP mapping below selects which MCPs each agent persona gets
-# at session start. Adding an MCP requires three changes: add to the
-# `mcp_servers` map, add any required env to the chart's externalSecrets,
-# and reference it in the right role's `mcps` list. No agent code changes.
-
 mcp_servers:
-  # These `url:` values are schema-only — gate/mcp_servers/remote.py builds live
-  # connections from LEARTECH_MCP_URL and discovers mounts at runtime. The
-  # localhost default is for local dev (Go server's own default port); the
-  # AgentType CRDs set LEARTECH_MCP_URL in every cluster.
   leartech-jx3-flow:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/jx3_flow/sse
-    description: |
-      PR-check status — list_pr_checks, wait_for_terminal,
+    description: 'PR-check status — list_pr_checks, wait_for_terminal,
+
       wait_for_first_failure_or_all_pass. Each result carries a `coverage`
+
       block naming which clusters were actually observed; an aggregate verdict
+
       is not an estate-wide claim. Served by leartech-mcp-servers (Go).
 
-  leartech-criteria:
-    type: sdk
-    builder: gate.mcp_servers.criteria_server:build_criteria_server
-    description: Discover and execute pytest gate criteria; returns structured pass/fail per criterion.
-
+      '
   leartech-pr-context:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/pr-context/sse
-    description: |
-      PR metadata + diff + changed files. Served by leartech-mcp-servers (Go);
+    description: 'PR metadata + diff + changed files. Served by leartech-mcp-servers (Go);
+
       new features for the pr-context MCP land in the
+
       leartech-mcp-servers repo.
 
-  leartech-test-artifacts:
-    type: sdk
-    builder: gate.mcp_servers.artifacts_server:build_artifacts_server
-    description: Playwright videos, traces, screenshots from GCS test-artifacts bucket.
-
+      '
   leartech-tekton:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/tekton/sse
-    description: |
-      Step-aware Tekton PipelineRun inspection. Surfaces WHICH STEP failed
+    description: 'Step-aware Tekton PipelineRun inspection. Surfaces WHICH STEP failed
+
       (git-clone vs ruff vs pytest), tails per-step logs, and cancels
+
       superseded runs on force-push: list_pipelineruns_for_pr, step_status,
+
       step_logs, cancel_pipelinerun, cancel_superseded_for_pr,
+
       wait_first_failure, release_pipeline_status (the release-verify
+
       `release-passed` check), diagnose_pr_failures. Served by
+
       leartech-mcp-servers (Go).
 
+      '
   leartech-repo-factory:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/repo_factory/sse
-    description: |
-      Server-side deterministic repo-factory ops (infra agent): create_repo
+    description: 'Server-side deterministic repo-factory ops (infra agent): create_repo
+
       (owner PAT, rejects bot tokens, invites the 6 bots), register_source_config
+
       (Contents API, idempotent minimal-diff), scaffold (Git Data API, literal
+
       rename — no LLM grep). The high-privilege credential (GITHUB_OWNER_ADMIN_PAT)
+
       lives in leartech-mcp-servers, NOT the agent. New features land in that
+
       repo (internal/repofactory).
 
+      '
   leartech-jx-release:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/jx_release/sse
-    description: |
-      JX3 release-check primitives the deterministic release-verify checks call
+    description: 'JX3 release-check primitives the deterministic release-verify checks call
+
       directly (via the stdio bridge, no LLM): release_status (did the release
+
       Tekton pipeline fire + succeed on the repo?), promote_status (jx-promote
+
       PRs across both clusters + qa-gate / verify / merged state), retest_promote
+
       (chatops /retest on a single-cluster flake). Served remotely by
+
       leartech-mcp-servers/jx_release. Used WITH leartech-tekton (release
+
       PipelineRun outcome) + leartech-k8s (boot job + deploy_health) by the thin
+
       deterministic checks in gate/agent/release_checks.py.
 
+      '
   leartech-k8s:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/k8s/sse
-    description: |
-      In-cluster Kubernetes read surface — no kubectl needed on the agent side.
+    description: 'In-cluster Kubernetes read surface — no kubectl needed on the agent side.
+
       Exposes deploy_health (Deployment healthy iff >=1 available replica +
+
       running the NEW version — the authoritative signal for the deploy-health
+
       check), bootjob_for_commit (the release-verify `bootjob-ran` check),
+
       get_deployment_state (raw state deploy_health wraps), get_job_state +
+
       list_jobs_by_label (jx-boot Job signals), get_pod_state / get_pod_events /
-      get_pod_logs (stale-progress detector + diagnosis). Runs from inside a cluster with a ServiceAccount scoped to the
-      read verbs, so the agent doesn't need kubectl / cluster credentials of its
-      own — replacing the historical httpx /health probe that couldn't reach the
+
+      get_pod_logs (stale-progress detector + diagnosis). Runs from inside a cluster with a ServiceAccount
+      scoped to the
+
+      read verbs, so the agent doesn''t need kubectl / cluster credentials of its
+
+      own — replacing the historical httpx /health probe that couldn''t reach the
+
       ingress from the infra sandbox and produced false FAILs.
 
-  leartech-agent-local:
-    type: sdk
-    builder: gate.mcp_servers.agent_local:build_agent_local_server
-    description: |
-      Two step-aware helpers that MUST stay in-process because they depend on
-      state inside the agent pod: `classify_step_failure` (LLM-adjacent
-      heuristic classifier — imports gate.agent.step_failure_diagnosis) and
-      `rebase_branch_on_base` (git ops on the cloned consumer-repo workspace).
-      The rest of the step-aware surface lives in the remote `leartech-tekton`
-      MCP; this catalog entry is the boundary marker.
-
-  leartech-ai-gateway-web:
-    type: sdk
-    builder: gate.mcp_servers.ai_gateway_web_server:build_ai_gateway_web_server
-    description: |
-      Web research helpers backed by leartech-ai-gateway (BA agent). Exposes
-      `web_search` (POST /v1/search) and `web_fetch` (POST /v1/fetch) as MCP
-      tools so the BA agent can research the state of the world before
-      authoring a Plan CRD — e.g. "has upstream fixed X?", "current release
-      cadence for Y?". Reads ANTHROPIC_BASE_URL + AI_GATEWAY_API_KEY (or
-      ANTHROPIC_API_KEY) from env; returns `{"error": ...}` when unset so the
-      caller can degrade cleanly rather than crash.
-
-  # Remote — BA agent's live-state read surface. Served by the Go
-  # leartech-mcp-servers `platform_state` deployment.
+      '
   leartech-platform-state:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/platform_state/sse
-    description: |
-      Read-only view of live platform state — `list_plans`, `list_runs`,
+    description: 'Read-only view of live platform state — `list_plans`, `list_runs`,
+
       `get_plan_state`, `deploy_health`. Consumed by the BA agent to
-      correlate the brief's `resolves: [PlanRef]` against what's actually in
-      flight before authoring a new remediation Plan (so BA doesn't
+
+      correlate the brief''s `resolves: [PlanRef]` against what''s actually in
+
+      flight before authoring a new remediation Plan (so BA doesn''t
+
       re-author an existing plan or miss the healthy path).
 
-  # Remote — BA agent's authoring write surface. Served by the Go
-  # leartech-mcp-servers `control_plane` deployment.
+      '
   leartech-control-plane:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/control_plane/sse
-    description: |
-      Control-plane write surface — `create_plan` and other landscape-level
+    description: 'Control-plane write surface — `create_plan` and other landscape-level
+
       authoring tools. The BA agent authors REMEDIATION Plans here
+
       DRAFT-BY-DEFAULT (hold:true + draft annotation) so nothing heavy
+
       triggers downstream until a human reviews. May be called MULTIPLE
+
       times per brief (cluster-wide multi-resolve).
 
-  # Remote — orchestrator/agent API surface for mutating in-flight plans AND
-  # firing initiatives. Distinct from control_plane so future finer-grained
-  # authz can gate the two independently.
-  #
-  # The former in-process `leartech-initiatives` SDK shim
-  # (`gate.mcp_servers.initiatives_server`, with `fire_initiative` +
-  # `fire_initiative_inline`) has been retired in favour of this remote
-  # server, which exposes `fire_initiative(initiative_body)` — the
-  # by-name path composes client-side as `get_catalog_entry(name)` →
-  # `fire_initiative(initiative_body=yaml_body)`.
+      '
   leartech-agent-api:
     type: http_sse
     url: ${LEARTECH_MCP_URL:-http://localhost:8080}/mcp/agent_api/sse
-    description: |
-      Agent/orchestrator API surface. Authoring surface for BA:
+    description: 'Agent/orchestrator API surface. Authoring surface for BA:
+
       `amend_plan` (mutate an in-flight plan when re-authoring is safer
+
       than opening a new one). Initiative firing + inspection for
+
       orchestrator fix-up flows: `fire_initiative(initiative_body)`,
+
       `list_catalog_entries`, `get_catalog_entry`, `list_initiative_runs`,
+
       `get_initiative_run`, `get_run_snapshot`, `get_run_decisions`,
+
       `cancel_initiative_run`, `send_command_to_run`, `list_roles`.
 
-  # Stdio (subprocess) — for external tools and future cross-process agents.
-  # Marked `status: not_built` until the wrapper repo exists.
+      '
   stitch:
     type: stdio
     command: uvx
-    args: [stitch-mcp]
+    args:
+    - stitch-mcp
     env:
       STITCH_API_KEY: $STITCH_API_KEY
     description: Leartech design-system catalog; component variants, token lookup.
     status: not_built
-
   figma:
     type: stdio
     command: npx
-    args: ['@figma/mcp-server', '--readonly']
+    args:
+    - '@figma/mcp-server'
+    - --readonly
     env:
       FIGMA_TOKEN: $FIGMA_TOKEN
     description: Figma file + component access for the BA agent's design ingest.
     status: not_built
-
-  # HTTP/SSE — when a vendor hosts the MCP themselves
   lovable:
     type: http_sse
     url: https://api.lovable.app/mcp/sse
@@ -201,7 +173,6 @@ mcp_servers:
       token_env: LOVABLE_TOKEN
     description: Lovable mockup + screen-flow access for BA-agent ingest.
     status: not_built
-
   github-copilot-mcp:
     type: remote
     url: https://api.githubcopilot.com/mcp/
@@ -210,130 +181,127 @@ mcp_servers:
       token_env: GITHUB_TOKEN
     description: GitHub Copilot's hosted MCP — broader repo/issue/PR queries.
     status: not_built
-
 roles:
   initiative_agent:
-    description: |
-      Write-mode agent. Drives an initiative end-to-end: edit code, commit,
+    description: 'Write-mode agent. Drives an initiative end-to-end: edit code, commit,
+
       push, open PR, watch the gate, iterate until green or budget exhausted.
+
+      '
     llm:
       backend: claude
       model: claude-opus-4-7
       max_turns: 1000
     mcps:
-      - leartech-jx3-flow
-      - leartech-criteria
-      - leartech-pr-context
-      - leartech-test-artifacts
-      - leartech-tekton
-      - leartech-agent-local
+    - leartech-jx3-flow
+    - leartech-pr-context
+    - leartech-tekton
     tools:
-      - Read
-      - Write
-      - Edit
-      - Bash
-      - Glob
-      - Grep
-
+    - Read
+    - Write
+    - Edit
+    - Bash
+    - Glob
+    - Grep
   review_agent:
-    description: |
-      Read-only verdict agent. Looks at a PR, runs the gate, produces a
-      structured review. Cannot write code or push — that's the build agent's job.
-    mcps:
-      - leartech-jx3-flow
-      - leartech-pr-context
-      - leartech-test-artifacts
-    tools:
-      - Read
-      - Glob
-      - Grep
+    description: 'Read-only verdict agent. Looks at a PR, runs the gate, produces a
 
+      structured review. Cannot write code or push — that''s the build agent''s job.
+
+      '
+    mcps:
+    - leartech-jx3-flow
+    - leartech-pr-context
+    tools:
+    - Read
+    - Glob
+    - Grep
   ba_agent:
-    description: |
-      Business analyst — takes a BRIEF (Initiative contract EXTENDED with
+    description: 'Business analyst — takes a BRIEF (Initiative contract EXTENDED with
+
       successCriteria, context, resolves:[PlanRef]) and OUTPUTS a Plan CRD
+
       (does NOT open a PR). Reads live platform state, correlates it against
-      the brief's `resolves`, then AUTHORS remediation/target Plans via
+
+      the brief''s `resolves`, then AUTHORS remediation/target Plans via
+
       `create_plan` DRAFT-BY-DEFAULT (hold:true + draft annotation) so
+
       nothing heavy triggers downstream until a human reviews. Every
-      authored plan's FINAL step must verify the brief's successCriteria
+
+      authored plan''s FINAL step must verify the brief''s successCriteria
+
       (the deterministic deploy-health check). May author/amend MULTIPLE plans
+
       (cluster-wide multi-resolve). BA has ZERO infra-specific knowledge —
+
       it consumes the brief only.
+
+      '
     llm:
-      # Fixed Opus 4.8 — NOT "auto" (which can downgrade to GLM per the
-      # ai-gateway router). Reasoning-heavy authoring where a downgrade
-      # loses the ability to correlate live state against the brief.
       backend: claude
       model: claude-opus-4-8
       max_turns: 200
     mcps:
-      # Live platform state — list_plans / list_runs / get_plan_state /
-      # deploy_health for correlation before authoring.
-      - leartech-platform-state
-      # Authoring surfaces — create_plan on control_plane, amend_plan on
-      # agent_api. Draft-by-default so nothing merges into a live plan
-      # without human review.
-      - leartech-control-plane
-      - leartech-agent-api
-      # Web research via ai-gateway /v1/search + /v1/fetch (metered +
-      # governed alongside the LLM turns).
-      - leartech-ai-gateway-web
-      # PR context (read-only) — the brief may reference PRs the BA needs
-      # to inspect before authoring a remediation plan against them.
-      - leartech-pr-context
+    - leartech-platform-state
+    - leartech-control-plane
+    - leartech-agent-api
+    - leartech-pr-context
     tools:
-      - Read
-      - Glob
-      - Grep
-
+    - Read
+    - Glob
+    - Grep
   forensic_agent:
-    description: |
-      Read-mostly. Analyses post-merge regressions, generates lessons from
-      qa-arch ring 2 (staging) and ring 3 (forensic) findings, writes them
-      to the catalog via POST /lessons.
-    mcps:
-      - leartech-jx3-flow
-      - leartech-pr-context
-      - github-copilot-mcp
-    tools:
-      - Read
-      - Grep
-      - Bash
+    description: 'Read-mostly. Analyses post-merge regressions, generates lessons from
 
+      qa-arch ring 2 (staging) and ring 3 (forensic) findings, writes them
+
+      to the catalog via POST /lessons.
+
+      '
+    mcps:
+    - leartech-jx3-flow
+    - leartech-pr-context
+    - github-copilot-mcp
+    tools:
+    - Read
+    - Grep
+    - Bash
   infra_agent:
-    description: |
-      Cluster-side write-mode agent. Owns the repo/cluster wiring the dev agent
-      doesn't: create a repo, register it in source-config (per cluster), land
+    description: 'Cluster-side write-mode agent. Owns the repo/cluster wiring the dev agent
+
+      doesn''t: create a repo, register it in source-config (per cluster), land
+
       deploy config, and (via the DETERMINISTIC no-LLM release-verify checks in
+
       gate/agent/release_checks.py) VERIFY a release is healthy after a dev PR
+
       merges (the "PR merged != release healthy" gap). Scaffolds new repos
+
       DETERMINISTICALLY via gate.tools.repo_factory (literal rename, never LLM
+
       grep/replace) and opens the scaffold PR whose preview exercises the Tekton
+
       steps. Runs on a cheaper model via its OWN gateway virtual key (see
+
       project_per_agent_model_routing) — smaller scope than the code agent.
+
+      '
     llm:
       backend: claude
-      # Placeholder default; the real switch to a cheap/OSS model happens on this
-      # agent's OWN virtual key in the gateway (no redeploy) — the AgentType maps
-      # to leartech-infra-agent-key once provisioned.
       model: claude-opus-4-7
       max_turns: 200
     mcps:
-      - leartech-jx3-flow
-      - leartech-tekton
-      - leartech-pr-context
-      - leartech-repo-factory
-      # jx-release + tekton + k8s back the DETERMINISTIC release-verify checks
-      # (gate/agent/release_checks.py, no LLM): jx_release (release-pipeline-status
-      # + promote-status), tekton (release PipelineRun outcome), k8s (deploy-health
-      # + bootjob-for-commit, replacing the unreachable-from-sandbox HTTP probe).
-      - leartech-jx-release
-      - leartech-k8s
+    - leartech-jx3-flow
+    - leartech-tekton
+    - leartech-pr-context
+    - leartech-repo-factory
+    - leartech-jx-release
+    - leartech-k8s
     tools:
-      - Read
-      - Write
-      - Edit
-      - Bash
-      - Glob
-      - Grep
+    - Read
+    - Write
+    - Edit
+    - Bash
+    - Glob
+    - Grep

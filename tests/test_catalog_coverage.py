@@ -24,9 +24,6 @@ REPO_ROOT = Path(__file__).parent.parent
 INITIATIVES_DIR = REPO_ROOT / 'initiatives'
 
 
-# ─── Lessons ─────────────────────────────────────────────────────────────
-
-
 def _lesson_files() -> list[Path]:
     return sorted(LESSONS_DIR.glob('*.md'))
 
@@ -71,9 +68,6 @@ def test_calibration_lessons_have_applies_to(lesson_path: Path) -> None:
     )
 
 
-# ─── Initiatives ─────────────────────────────────────────────────────────
-
-
 def _initiative_files() -> list[Path]:
     return sorted(INITIATIVES_DIR.glob('*.yaml'))
 
@@ -100,9 +94,6 @@ def test_initiative_name_matches_filename(initiative_path: Path) -> None:
     assert initiative.name == initiative_path.stem, (
         f'{initiative_path.name}: name={initiative.name!r} does not match filename stem'
     )
-
-
-# ─── MCP catalog ─────────────────────────────────────────────────────────
 
 
 def test_mcp_catalog_loads() -> None:

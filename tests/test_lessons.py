@@ -84,7 +84,6 @@ def test_real_catalog_loads_without_errors() -> None:
     """Pin the production catalog — accidental edits surface as test failures."""
     lessons = load_all_lessons()
     assert len(lessons) >= 4, f'Expected at least 4 lessons in the production catalog, found {len(lessons)}'
-    # Every lesson must have a non-empty title and ID.
     for lesson in lessons:
         assert lesson.id
         assert lesson.title
@@ -115,9 +114,6 @@ def test_render_for_includes_titles_and_bodies() -> None:
         assert lesson.title in block
 
 
-# ─── repo-tests-may-touch-k8s-api lesson (2026-08-15 incident) ───────────
-
-
 def test_repo_tests_may_touch_k8s_api_lesson_loads_and_validates() -> None:
     """Frontmatter validates, applies to initiative_agent, status is encoded."""
     lessons = load_all_lessons()
@@ -138,8 +134,6 @@ def test_repo_tests_may_touch_k8s_api_renders_for_initiative_agent() -> None:
     """
     block = render_for('initiative_agent')
     assert 'Calibrations from past runs' in block
-    # A recognisable phrase from the lesson body. If the wording drifts,
-    # update the probe deliberately — do not soften the assertion.
     assert 'live AgentRun identity' in block
     assert 'managedFields' in block, 'diagnostic ladder must reach the prompt intact'
     assert 'load_incluster_config' in block, 'cheap-check probe must reach the prompt intact'
@@ -154,9 +148,5 @@ def test_pre_push_validation_still_loads_after_amendment() -> None:
     assert len(match) == 1
     lesson = match[0]
     assert lesson.status == 'encoded'
-    # The pre-push mandate itself must still be present, not weakened by the
-    # cross-reference edit.
     assert 'do NOT push' in lesson.body
-    # And the cross-reference to the new lesson must be in place at the point
-    # tests are discussed — that's the whole point of the amendment.
     assert 'repo-tests-may-touch-k8s-api' in lesson.body

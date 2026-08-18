@@ -28,7 +28,6 @@ def test_wait_for_terminal_name_matches_qualified_and_bare() -> None:
     disable the hard-stop."""
     assert _tool_name_is_wait_for_terminal('mcp__leartech-jx3-flow__wait_for_terminal')
     assert _tool_name_is_wait_for_terminal('wait_for_terminal')
-    # A future prefix rename still matches on the suffix.
     assert _tool_name_is_wait_for_terminal('mcp__some-other-ns__wait_for_terminal')
 
 
@@ -52,7 +51,6 @@ def test_all_passed_detected_in_string_content() -> None:
 def test_all_passed_detected_in_list_content() -> None:
     """The SDK may surface content as a list of {"text": …} parts."""
     assert _tool_result_reports_all_passed(_result_block([{'type': 'text', 'text': '{"status": "all_passed"}'}]))
-    # Plain-string list entries are also handled.
     assert _tool_result_reports_all_passed(_result_block(['status: all_passed']))
 
 

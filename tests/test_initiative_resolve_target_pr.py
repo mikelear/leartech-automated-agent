@@ -63,7 +63,6 @@ def _resolved_events(rec: _Recorder) -> list[dict[str, Any]]:
 
 @pytest.mark.asyncio
 async def test_status_first_returns_authoritative_and_skips_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    # open_pr wrote status.targetPR → that is the answer; no gh query at all.
     rec = _Recorder(status_pr='12', gh_pr=999)
     _wire(monkeypatch, rec)
 
@@ -71,8 +70,8 @@ async def test_status_first_returns_authoritative_and_skips_gh(monkeypatch: pyte
 
     assert number == 12
     assert rec.get_calls == [('run-1', 'jx-staging')]
-    assert rec.gh_calls == []  # never touched GitHub — provenance is the status field
-    assert rec.hint_writes == [12]  # preStop hint still armed
+    assert rec.gh_calls == []
+    assert rec.hint_writes == [12]
     ev = _resolved_events(rec)
     assert len(ev) == 1
     assert ev[0]['source'] == 'status'
@@ -81,30 +80,24 @@ async def test_status_first_returns_authoritative_and_skips_gh(monkeypatch: pyte
 
 @pytest.mark.asyncio
 async def test_merged_pr_is_not_lost_regression(monkeypatch: pytest.MonkeyPatch) -> None:
-    # THE BUG: Tide merged the PR before run-end. The old code did
-    # `gh pr list --state open` → None → expected_pr_missing false-FAIL. Now the
-    # merged PR's number lives in status.targetPR (open_pr set it, never cleared),
-    # so the resolver returns it and the fail-fast sees a PR → no false-FAIL.
-    rec = _Recorder(status_pr='12', gh_pr=None)  # gh --state open WOULD return None here
+    rec = _Recorder(status_pr='12', gh_pr=None)
     _wire(monkeypatch, rec)
 
     number = await initiative._resolve_target_pr('mikelear/leartech-plan-api', 'feat/plan-api-dto-fidelity')
 
     assert number == 12
-    assert rec.gh_calls == []  # authoritative status short-circuits the flaky query
+    assert rec.gh_calls == []
 
 
 @pytest.mark.asyncio
 async def test_falls_back_to_gh_all_state_when_status_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Status empty (open_pr's publish didn't land / raw-gh PR) → break-glass gh
-    # fallback, and it MUST be merge-aware (state='all'), not the old --state open.
     rec = _Recorder(status_pr=None, gh_pr=55)
     _wire(monkeypatch, rec)
 
     number = await initiative._resolve_target_pr('mikelear/x', 'feat/a')
 
     assert number == 55
-    assert rec.gh_calls == [('mikelear/x', 'feat/a', 'all')]  # merge-aware fallback
+    assert rec.gh_calls == [('mikelear/x', 'feat/a', 'all')]
     ev = _resolved_events(rec)
     assert len(ev) == 1
     assert ev[0]['source'] == 'gh_fallback'
@@ -113,8 +106,6 @@ async def test_falls_back_to_gh_all_state_when_status_empty(monkeypatch: pytest.
 
 @pytest.mark.asyncio
 async def test_returns_none_when_no_pr_anywhere(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Genuinely no PR: status empty AND gh (any state) finds nothing → None, which
-    # is what the fail-fast legitimately converts to a failure.
     rec = _Recorder(status_pr=None, gh_pr=None)
     _wire(monkeypatch, rec)
 
@@ -129,13 +120,11 @@ async def test_returns_none_when_no_pr_anywhere(monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.asyncio
 async def test_local_run_skips_status_read_and_uses_gh(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No AgentRun identity (local/dev): don't attempt the k8s status read, go
-    # straight to the gh fallback.
     rec = _Recorder(status_pr='12', gh_pr=88)
     _wire(monkeypatch, rec, as_agentrun=False)
 
     number = await initiative._resolve_target_pr('mikelear/x', 'feat/a')
 
     assert number == 88
-    assert rec.get_calls == []  # never read status without an AgentRun identity
+    assert rec.get_calls == []
     assert rec.gh_calls == [('mikelear/x', 'feat/a', 'all')]

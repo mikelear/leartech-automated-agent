@@ -64,8 +64,6 @@ from gate.agent.initiative import (
     run_initiative,
 )
 
-# ─── _remote_branch_exists ─────────────────────────────────────────────
-
 
 def test_remote_branch_exists_returns_true_on_git_success_with_output(tmp_path: Path) -> None:
     """``git ls-remote --exit-code`` exits 0 and prints the ref line when the
@@ -78,7 +76,6 @@ def test_remote_branch_exists_returns_true_on_git_success_with_output(tmp_path: 
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout=stdout, stderr='')
         assert _remote_branch_exists(qualified_repo='mikelear/example', branch='agent/foo') is True
 
-    # Sanity: the URL embeds the token (matches _clone_repo shape).
     args = mock_run.call_args[0][0]
     assert args[0] == 'git'
     assert 'ls-remote' in args
@@ -131,9 +128,6 @@ def test_remote_branch_exists_returns_false_on_empty_stdout_even_with_exit_0() -
     ):
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='   \n', stderr='')
         assert _remote_branch_exists(qualified_repo='mikelear/example', branch='agent/foo') is False
-
-
-# ─── _detect_resume_context ─────────────────────────────────────────────
 
 
 def test_detect_resume_context_true_when_pr_and_branch_exist() -> None:
@@ -190,9 +184,6 @@ def test_detect_resume_context_false_when_neither_signal_fires() -> None:
     assert ctx == ResumeContext(is_resume=False, pr_number=None, branch_exists_on_remote=False)
 
 
-# ─── _fetch_and_checkout_existing ───────────────────────────────────────
-
-
 def test_fetch_and_checkout_returns_true_when_both_commands_succeed(tmp_path: Path) -> None:
     """Success path: ``git fetch`` returns 0 AND ``git checkout -B`` returns 0."""
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
@@ -202,15 +193,9 @@ def test_fetch_and_checkout_returns_true_when_both_commands_succeed(tmp_path: Pa
         ]
         assert _fetch_and_checkout_existing(cwd=tmp_path, branch='agent/foo') is True
 
-    # First call: git fetch origin with an EXPLICIT refspec, so the remote-tracking
-    # ref origin/<branch> is created locally (a bare `git fetch origin <branch>`
-    # only populates FETCH_HEAD, so the `checkout -B <branch> origin/<branch>`
-    # below fails with "origin/<branch> is not a commit" — the resume bug that
-    # dropped retries to fresh-start).
     first = mock_run.call_args_list[0][0][0]
     assert first[0:3] == ['git', 'fetch', 'origin']
     assert first[3] == '+refs/heads/agent/foo:refs/remotes/origin/agent/foo'
-    # Second call: git checkout -B <branch> origin/<branch>
     second = mock_run.call_args_list[1][0][0]
     assert second[0:3] == ['git', 'checkout', '-B']
     assert 'agent/foo' in second
@@ -224,8 +209,6 @@ def test_fetch_and_checkout_returns_false_when_fetch_fails(tmp_path: Path) -> No
             args=[], returncode=128, stdout='', stderr='fatal: no such remote'
         )
         assert _fetch_and_checkout_existing(cwd=tmp_path, branch='agent/foo') is False
-    # Exactly one call — the fetch. Checkout is skipped because there's
-    # nothing to check out from.
     assert mock_run.call_count == 1
 
 
@@ -246,16 +229,12 @@ def test_fetch_and_checkout_returns_false_on_subprocess_timeout(tmp_path: Path) 
         assert _fetch_and_checkout_existing(cwd=tmp_path, branch='agent/foo') is False
 
 
-# ─── _checkpoint_wip_on_crash ───────────────────────────────────────────
-
-
 def test_checkpoint_noop_on_clean_tree(tmp_path: Path) -> None:
     """Clean tree (empty `git status --porcelain`) → no commit/push: the agent
     already pushed everything, nothing to preserve."""
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
         mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr='')
         _checkpoint_wip_on_crash(cwd=tmp_path, branch='agent/foo')
-    # Exactly one call — the status probe; no add/commit/push.
     assert mock_run.call_count == 1
     assert mock_run.call_args_list[0][0][0][0:3] == ['git', 'status', '--porcelain']
 
@@ -265,10 +244,10 @@ def test_checkpoint_commits_and_pushes_dirty_tree(tmp_path: Path) -> None:
     continues from the crash-time work, not the agent's last self-push."""
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
         mock_run.side_effect = [
-            subprocess.CompletedProcess(args=[], returncode=0, stdout=' M src/foo.ts\n', stderr=''),  # status: dirty
-            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),  # add
-            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),  # commit
-            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),  # push
+            subprocess.CompletedProcess(args=[], returncode=0, stdout=' M src/foo.ts\n', stderr=''),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),
+            subprocess.CompletedProcess(args=[], returncode=0, stdout='', stderr=''),
         ]
         _checkpoint_wip_on_crash(cwd=tmp_path, branch='agent/foo')
     calls = [c[0][0] for c in mock_run.call_args_list]
@@ -282,10 +261,7 @@ def test_checkpoint_swallows_errors(tmp_path: Path) -> None:
     handling the original SDK exception)."""
     with patch('gate.agent.initiative.subprocess.run') as mock_run:
         mock_run.side_effect = OSError('git missing')
-        _checkpoint_wip_on_crash(cwd=tmp_path, branch='agent/foo')  # must not raise
-
-
-# ─── _build_resume_preamble ─────────────────────────────────────────────
+        _checkpoint_wip_on_crash(cwd=tmp_path, branch='agent/foo')
 
 
 def test_resume_preamble_mentions_pr_when_number_known() -> None:
@@ -295,8 +271,6 @@ def test_resume_preamble_mentions_pr_when_number_known() -> None:
     assert 'RESUME MODE' in preamble
     assert 'agent/foo' in preamble
     assert '#42' in preamble
-    # The critical injunction — must be phrased strong enough that the
-    # LLM won't try `gh pr create` on the resumed branch.
     assert 'duplicate' in preamble.lower() or 'reuse this one' in preamble.lower()
 
 
@@ -308,7 +282,6 @@ def test_resume_preamble_notes_no_pr_when_number_unknown() -> None:
     assert 'RESUME MODE' in preamble
     assert 'agent/foo' in preamble
     assert 'No open PR' in preamble
-    # Must NOT contain a specific PR number when we don't know one.
     assert '#' not in preamble.replace('#### ', '').replace('##', '')
 
 
@@ -318,12 +291,8 @@ def test_resume_preamble_tells_agent_not_to_recreate_branch() -> None:
     a fresh branch."""
     preamble = _build_resume_preamble(branch='agent/foo', base='main', pr_number=None)
     lowered = preamble.lower()
-    # We check for the semantic instruction, not a specific phrasing.
     assert 'do not re-create' in lowered or "don't re-create" in lowered or 'do not' in lowered
-    assert 'main' in preamble  # cites the base branch as "the thing NOT to reset to"
-
-
-# ─── Integration: run_initiative wire-up ────────────────────────────────
+    assert 'main' in preamble
 
 
 @dataclass
@@ -352,11 +321,7 @@ class _FakeInitiative:
     is_multi_repo: bool = False
     repos: list[_FakeRepo] = field(default_factory=lambda: [_FakeRepo()])
     feedback_payloads: list[dict[str, Any]] = field(default_factory=list)
-    # Hold-as-init-option — the agent renders `/hold` posting only when true.
     hold: bool = False
-    # Test-mode directive — default None so these tests hit the real
-    # resume-detection + SDK-loop paths instead of the test-mode
-    # short-circuit added later.
     test_mode: dict[str, object] | None = None
 
     @property
@@ -446,21 +411,14 @@ async def test_run_initiative_resumes_when_branch_and_pr_already_exist(
         summary = await run_initiative(**_build_run_kwargs(tmp_path))
 
     assert isinstance(summary, RunSummary)
-    # The fetch/checkout wrapper must have been invoked with the
-    # initiative's target branch.
     mock_fetch.assert_called_once()
     assert mock_fetch.call_args.kwargs['branch'] == 'agent/resume-test'
 
-    # The prompt the SDK received must contain the RESUME preamble.
     assert len(captured_prompts) == 1, 'query should be invoked exactly once'
     assert 'RESUME MODE' in captured_prompts[0]
     assert '#42' in captured_prompts[0]
-    # And the standard base prompt must still be present — the preamble
-    # is prepended, not a replacement.
     assert 'Run this initiative end-to-end' in captured_prompts[0]
 
-    # The resume seed arms the preStop hint file with the discovered PR
-    # so a same-pod re-crash posts a crash sticky + the exit-code path fires.
     mock_hint.assert_any_call(42)
 
 
@@ -493,13 +451,10 @@ async def test_run_initiative_fresh_start_when_no_resume_signals(
     ):
         await run_initiative(**_build_run_kwargs(tmp_path))
 
-    # Fresh runs must NOT trigger fetch/checkout.
     mock_fetch.assert_not_called()
 
-    # Prompt must be free of the RESUME preamble.
     assert len(captured_prompts) == 1
     assert 'RESUME MODE' not in captured_prompts[0]
-    # And the standard base prompt still fires.
     assert 'Run this initiative end-to-end' in captured_prompts[0]
 
 
@@ -527,7 +482,7 @@ async def test_run_initiative_falls_back_to_fresh_when_fetch_fails(
         ),
         patch(
             'gate.agent.initiative._fetch_and_checkout_existing',
-            return_value=False,  # <-- fetch fails
+            return_value=False,
         ) as mock_fetch,
         patch('gate.agent.initiative.query', _make_query_capturing(messages, captured_prompts)),
         patch('gate.agent.initiative._resolve_pr_number', return_value=42),
@@ -535,11 +490,8 @@ async def test_run_initiative_falls_back_to_fresh_when_fetch_fails(
     ):
         await run_initiative(**_build_run_kwargs(tmp_path))
 
-    # Fetch was attempted (detection said resume) but returned False.
     mock_fetch.assert_called_once()
 
-    # The RESUME preamble must NOT be present — resume_active is False
-    # when the fetch failed.
     assert len(captured_prompts) == 1
     assert 'RESUME MODE' not in captured_prompts[0]
 

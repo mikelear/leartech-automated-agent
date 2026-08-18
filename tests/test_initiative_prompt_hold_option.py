@@ -39,9 +39,6 @@ def test_default_rendering_omits_hold_posting_instruction() -> None:
     """No `/hold` posting when the initiative doesn't opt in."""
     rendered = render_initiative_system_prompt(hold=False)
     assert HOLD_POSTING_MARKER not in rendered
-    # It must actively state the default (Tide auto-merges on green) so the
-    # agent knows the absence of a hold instruction is intentional, not an
-    # oversight. Match ignoring whitespace since the prompt wraps across lines.
     normalized = ' '.join(rendered.split())
     assert 'let Tide auto-merge' in normalized
     assert 'hold: false' in rendered
@@ -51,8 +48,6 @@ def test_hold_true_rendering_includes_hold_posting_instruction() -> None:
     """`hold=True` renders the explicit `gh pr comment ... /hold` block."""
     rendered = render_initiative_system_prompt(hold=True)
     assert HOLD_POSTING_MARKER in rendered
-    # And cites the initiative's opt-in as the reason, so the agent understands
-    # this is scoped to this initiative rather than a global rule.
     assert 'hold: true' in rendered
 
 
@@ -93,29 +88,20 @@ def test_step_5_opens_pr_via_mcp_tool_never_gh_create() -> None:
     re-introduces `gh pr create` or an always-hold surfaces here."""
     hold_true = render_initiative_system_prompt(hold=True)
     hold_false = render_initiative_system_prompt(hold=False)
-    # Both variants open via the open_pr MCP tool.
     assert '`open_pr` MCP tool' in hold_true
     assert '`open_pr` MCP tool' in hold_false
-    # `gh pr create` may appear ONLY inside prohibitions, never as an instruction
-    # to run it. Normalise whitespace first (the prohibition wording wraps across
-    # lines) then check every occurrence sits within a few chars of a negation.
     for rendered in (hold_true, hold_false):
         norm = ' '.join(rendered.split())
         idx = 0
         while (idx := norm.find('gh pr create', idx)) != -1:
-            # Look both directions — the negation may precede ("do NOT run `gh pr
-            # create`") or follow ("`gh pr create` … CANNOT write that status").
             window = norm[max(0, idx - 60) : idx + 60]
             assert any(neg in window for neg in ('NOT', 'Never', 'NO ', 'CANNOT', 'not just')), (
                 f'`gh pr create` appears without a nearby prohibition: ...{window!r}...'
             )
             idx += len('gh pr create')
-    # The never-fallback / retry-then-FAIL rule must be present (an MCP outage is
-    # a platform failure, not a licence to route around — the run FAILS instead).
     for rendered in (hold_true, hold_false):
         assert 'FAILED' in rendered
         assert 'open_pr' in rendered
-    # Only the hold=True variant posts the merge hold.
     assert HOLD_POSTING_MARKER in hold_true
     assert HOLD_POSTING_MARKER not in hold_false
 
@@ -147,7 +133,6 @@ def test_prompt_says_all_passed_means_complete_stop_this_turn() -> None:
     for hold in (False, True):
         rendered = render_initiative_system_prompt(hold=hold)
         norm = ' '.join(rendered.split())
-        # The completion signal is tied to the fail-fast MCP's all_passed result.
         assert 'all_passed' in norm
         assert 'wait_for_terminal' in norm
         assert 'YOUR JOB IS COMPLETE' in norm
@@ -161,10 +146,8 @@ def test_prompt_forbids_waiting_for_merge_after_green() -> None:
     for hold in (False, True):
         rendered = render_initiative_system_prompt(hold=hold)
         norm = ' '.join(rendered.split())
-        # Explicit "do not wait for merge" + names the responsible parties.
         assert 'Merging is Tide' in norm
         assert 'do NOT poll' in norm or 'Do NOT then wait for the PR to merge' in norm
-        # No lingering "drive through to merge" style framing.
         assert 'through to merge' not in norm.lower()
 
 
@@ -197,7 +180,5 @@ def test_initiative_compose_calls_renderer_with_hold() -> None:
     blocks.append(render_initiative_system_prompt(hold=init.hold))
     composed = '\n\n---\n\n'.join(blocks)
 
-    # Calibration precedes the role prompt.
     assert JX3_CALIBRATION_HEADER in composed
-    # And the /hold instruction is present because hold=True was threaded in.
     assert HOLD_POSTING_MARKER in composed

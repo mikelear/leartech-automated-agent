@@ -51,8 +51,6 @@ def _rpc(base: str, server: str, method: str, params: dict | None, token: str | 
             raw = r.read().decode()
     except urllib.error.HTTPError as e:
         return {'error': f'HTTP {e.code}: {e.read().decode()[:200]}'}
-    # Streamable-HTTP may frame the reply as SSE (`event: message\ndata: {...}`)
-    # or as plain JSON. Extract the last `data:` line if present.
     if 'data:' in raw:
         for line in raw.splitlines():
             if line.startswith('data:'):
