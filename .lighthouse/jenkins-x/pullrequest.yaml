@@ -88,13 +88,6 @@ spec:
         # auth entirely. Release builds use the real agent-base.
         - name: build-runtime-image-smoke
           image: gcr.io/kaniko-project/executor:debug
-          env:
-            - name: GIT_TOKEN
-              valueFrom:
-                secretKeyRef:
-                  name: tekton-git
-                  key: password
-                  optional: true
           command:
           - /busybox/sh
           args:
@@ -102,16 +95,15 @@ spec:
           - |
             set -e
             echo "=== Smoke-building Dockerfile.runtime on the base the release uses (no push) ==="
-            if [ -n "$GIT_TOKEN" ]; then
-              GHCR_AUTH=$(printf "mikelear:%s" "$GIT_TOKEN" | base64 | tr -d '\n')
-              mkdir -p /kaniko/.docker
-              printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$GHCR_AUTH" > /kaniko/.docker/config.json
-            fi
+            # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-go-toolset
+            TOOLSET_VERSION=0.49.33
+            mkdir -p /kaniko/.docker
+            sed 's/"credHelpers":{[^}]*},//' /tekton/creds/.docker/config.json > /kaniko/.docker/config.json
             /kaniko/executor \
               --dockerfile=Dockerfile.runtime \
               --context=/workspace/source \
               --no-push \
-              --build-arg=BASE_IMAGE=ghcr.io/mikelear/leartech-agent-go-toolset:latest
+              --build-arg=BASE_IMAGE=ghcr.io/mikelear/leartech-agent-go-toolset:${TOOLSET_VERSION}
           workingDir: /workspace/source
           resources:
             requests:

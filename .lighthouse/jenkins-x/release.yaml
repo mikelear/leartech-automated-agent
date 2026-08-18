@@ -115,6 +115,9 @@ spec:
             # NOTE: script runs in /busybox/sh — no bash arrays.
             LANGS="go py ng rust"
 
+            # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-go-toolset
+            TOOLSET_VERSION=0.49.33
+
             for LANG in $LANGS; do
               IMG="leartech-agent-${LANG}"
               DESTS="--destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/${IMG}:${VERSION} --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/${IMG}:latest"
@@ -129,7 +132,7 @@ spec:
                 --dockerfile=Dockerfile.runtime \
                 --context=/workspace/source \
                 $DESTS \
-                --build-arg=BASE_IMAGE=ghcr.io/mikelear/${IMG}-toolset:latest \
+                --build-arg=BASE_IMAGE=ghcr.io/mikelear/${IMG}-toolset:${TOOLSET_VERSION} \
                 --cache=true
             done
           workingDir: /workspace/source

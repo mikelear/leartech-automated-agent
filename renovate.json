@@ -1,3 +1,22 @@
 {
-  "$schema": "https://docs.renovatebot.com/renovate-schema.json"
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended"
+  ],
+  "labels": [
+    "updatebot"
+  ],
+  "customManagers": [
+    {
+      "customType": "regex",
+      "description": "TOOLSET_VERSION pins the leartech-dockerfiles toolset image each agent image is layered on. All four language toolsets share one version stream, so following the go toolset follows them all. Without this the build consumed :latest and an agent image gave no clue which toolchain it carried.",
+      "managerFilePatterns": [
+        "/^\\.lighthouse/jenkins-x/(release|pullrequest)\\.yaml$/"
+      ],
+      "matchStrings": [
+        "# renovate: datasource=(?<datasource>[a-z-]+) depName=(?<depName>\\S+)\\s+TOOLSET_VERSION=(?<currentValue>\\S+)"
+      ],
+      "versioningTemplate": "semver"
+    }
+  ]
 }
