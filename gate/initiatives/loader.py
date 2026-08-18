@@ -147,18 +147,7 @@ class Initiative(BaseModel):
             'Feedback context from a prior failed attempt. Each entry has a `kind:` '
             "discriminator (`end2end_failure` / `ai_review_finding`); the agent's prompt "
             'construction surfaces it as a "fix this before iterating" block. Populated '
-            "by the PR watcher's re-spawn path; defaults to empty for fresh runs."
-        ),
-    )
-
-    test_mode: dict[str, object] | None = Field(
-        default=None,
-        alias='testMode',
-        description=(
-            'Optional test-mode directive: {finishAs, prOutcome, message?, delaySeconds?}. '
-            'Only honored when LEARTECH_AGENT_TEST_MODE_ALLOWED=true is set in the agent '
-            "runtime env; otherwise IGNORED so a stray directive can't no-op a real run. "
-            'See gate.agent.test_mode for the full contract.'
+            'on a re-spawn; defaults to empty for fresh runs.'
         ),
     )
 

@@ -8,12 +8,8 @@ wiring the dev agent doesn't:
   - ``deploy-config``         : land the deploy/helmfile config for a cluster
   - ``scaffold-pr``           : deterministically scaffold from a language template and open the PR
                                 whose preview exercises the Tekton steps
-  - the ``kind: check`` release-verify actions (release-pipeline-status / promote-status /
-                                deploy-health / bootjob-for-commit) : thin DETERMINISTIC Go-MCP-tool
-                                relays (no LLM turn-loop) — see ``gate.agent.release_checks``. These
-                                cover the "PR merged != release healthy" gap version-awarely.
 
-Scaffolding is DETERMINISTIC via ``gate.tools.repo_factory`` (literal rename, never LLM
+Scaffolding is DETERMINISTIC via the repo-factory MCP (literal rename, never LLM
 grep/replace); the agent orchestrates + handles per-cluster variation but does NOT hand-edit
 template files. Its persona (MCPs/tools/model) is the ``infra_agent`` role in
 ``mcp_catalog.yaml``; it runs on its own gateway virtual key (see
@@ -95,12 +91,9 @@ GROUND RULES
   The high-privilege owner credential lives in the MCP host, NOT here. If a tool errors or a
   rename looks wrong, report it as a TOOL bug — do not patch by hand.
 - The release-verify checks (release-pipeline-status / promote-status / deploy-health /
-  bootjob-for-commit) are DETERMINISTIC and run WITHOUT the LLM — each is a thin relay that
-  calls ONE Go MCP tool (jx-release / tekton / k8s) and decides PASS/FAIL on the tool's typed
-  verdict (see gate/agent/release_checks.py). They never reach this prompt; you are never asked
-  to hand-scrape Tekton/GitHub or attempt a kubectl or /health HTTP probe. deploy-health is
-  version-aware and reads Deployment status in-cluster — the authoritative "the new release
-  landed healthy" signal.
+  bootjob-for-commit) run on the `leartech-agent-infra-go` AgentType, not here. They never
+  reach this prompt; you are never asked to hand-scrape Tekton/GitHub or attempt a kubectl
+  or /health HTTP probe.
 - The platform runs on TWO clusters (GCP gitops `jx-build-cluster-gsm`, Azure
   `jx-build-cluster-akv`). Registration is ONE PR PER CLUSTER — do the cluster in your inputs;
   a Plan runs one register step per cluster.
@@ -135,7 +128,7 @@ Report concisely what you did, which PRs you opened (numbers), and the pass/fail
 
 
 def _build_system_prompt() -> str:
-    """JX3 calibration + any encoded infra_agent lessons + the infra system prompt."""
+    """JX3 calibration + the infra system prompt."""
     blocks: list[str] = [load_jx3_calibration()]
     blocks.append(INFRA_SYSTEM_PROMPT)
     return '\n\n---\n\n'.join(blocks)

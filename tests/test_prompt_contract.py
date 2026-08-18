@@ -89,3 +89,30 @@ def test_rendered_prompt_snapshot_is_current() -> None:
         check=False,
     )
     assert result.returncode == 0, result.stderr or result.stdout
+
+
+def test_prompt_references_no_python_module_that_no_longer_exists() -> None:
+    """The prompt must not cite `gate.<module>` paths that have been deleted.
+
+    Two survived the last cut — `gate.mcp_servers.pipeline_server` and
+    `gate.tools.e2e_coverage` — because the tool-name and path rules above do not look at
+    module paths. An instruction naming a module that is gone sends the agent looking for
+    code that cannot be found, which costs turns and reads as though the code still exists.
+    """
+    import pathlib
+
+    existing: set[str] = {'gate'}
+    for path in pathlib.Path('gate').rglob('*.py'):
+        if '__pycache__' in str(path):
+            continue
+        dotted = str(path)[:-3].replace('/', '.').replace('.__init__', '')
+        parts = dotted.split('.')
+        for i in range(1, len(parts) + 1):
+            existing.add('.'.join(parts[:i]))
+
+    referenced = set(re.findall(r'\bgate(?:\.[a-z_]+)+', _prompt_text()))
+    dead = sorted(name for name in referenced if name not in existing)
+    assert not dead, (
+        f'the prompt cites Python modules that do not exist: {dead} — '
+        'either the module was deleted and the prompt was not updated, or the path is wrong'
+    )

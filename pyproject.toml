@@ -44,7 +44,6 @@ dev = [
 ]
 
 [project.scripts]
-gate = "gate.cli:main"
 agent = "gate.agent.main:main"
 initiative = "gate.agent.initiative:main"
 

@@ -19,18 +19,16 @@ pre-capture (so unit tests that monkeypatch env vars and never enter
 
 Every ``subprocess`` the agent spawns after :func:`capture_and_strip` inherits
 the STRIPPED environment, so the existing "no AgentRun identity → skip" guards
-in :mod:`gate.agent.initiative` (backstop) and :mod:`gate.agent.test_mode`
-(annotation + phase patches) do genuinely skip rather than merely hope-to-skip.
+in :mod:`gate.agent.initiative` (backstop) do genuinely skip rather than merely
+hope-to-skip.
 
 ``LEARTECH_RUN_ID`` is CAPTURED but not STRIPPED. It is:
 
 - the primary correlation key obslog stamps on every log record — every
   diagnostic query in the incident-response ladder keys off this one field,
   so silently dropping it from log lines would break Loki triage; and
-- the DB write-back id for :mod:`gate.agent.run_driver`'s per-turn progress
-  hook — a subprocess seeing this alone can UPDATE its own initiative-run row
-  in the DB but cannot reach the AgentRun CR (which needs
-  ``AGENT_RUN_NAME`` + ``AGENT_RUN_NAMESPACE`` for the k8s API call). Every
+- harmless on its own: a subprocess seeing only the run id cannot reach the
+  AgentRun CR, which needs ``AGENT_RUN_NAME`` + ``AGENT_RUN_NAMESPACE``. Every
   AgentRun status/annotation write needs BOTH ``metadata.name`` (from
   ``AGENT_RUN_NAME``) AND ``metadata.namespace`` (from ``AGENT_RUN_NAMESPACE``);
   stripping either is minimally sufficient. Stripping ``LEARTECH_AGENTRUN_STATUS``

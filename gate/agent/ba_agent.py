@@ -345,7 +345,7 @@ def _render_authoring_capabilities() -> str:
 
 
 def _build_system_prompt() -> str:
-    """JX3 calibration + any encoded ba_agent lessons + the authorable-capability
+    """JX3 calibration + the authorable-capability
     catalog + the BA system prompt."""
     blocks: list[str] = [load_jx3_calibration()]
     capabilities = _render_authoring_capabilities()
