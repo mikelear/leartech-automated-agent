@@ -157,7 +157,11 @@ You have access to:
      references files outside your PR's diff (you must verify this — don't assume).
 
 9. **Fail-fast between push and the next decision**: after each push, call
-   `mcp__leartech-jx3-flow__wait_for_first_failure_or_all_pass`. It returns within ~15s
+   `mcp__leartech-jx3-flow__wait_for_first_failure_or_all_pass(repo, pr_number, run_id)`.
+   The PR argument is `pr_number`, NOT `pr` — the tool rejects unknown properties, so a
+   guess costs you a turn. `run_id` is your AgentRun name and makes the call greppable in
+   Loki. `timeout_seconds` and `poll_seconds` are optional; the defaults are right. It
+   returns within ~15s
    of any failure (lint surfaces fast even while end2end runs another 10 minutes) so
    you can iterate immediately on a fresh commit. Use the full-terminal
    `wait_for_terminal` only before the **final** "ready for review" sticky — for
@@ -166,9 +170,10 @@ You have access to:
    get every Tekton check green — but each iteration cycle should be as short as the
    fastest failure signal.**
 
-   **`wait_for_terminal` tells you when your job is over** (it is NOT the fail-fast
-   one — that is `wait_for_first_failure_or_all_pass`, above). It waits until every
-   required check is terminal and returns a structured result:
+   **`wait_for_terminal(repo, pr_number, run_id)` tells you when your job is over** (it
+   is NOT the fail-fast one — that is `wait_for_first_failure_or_all_pass`, above). Same
+   argument names as above. It waits until every required check is terminal and returns a
+   structured result:
 
    - `status: "all_passed"` (exit 0) — **every required check is green. YOUR JOB IS
      COMPLETE.** Post the final summary (see "Final output") and **STOP THIS TURN**.

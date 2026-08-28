@@ -116,3 +116,30 @@ def test_prompt_references_no_python_module_that_no_longer_exists() -> None:
         f'the prompt cites Python modules that do not exist: {dead} — '
         'either the module was deleted and the prompt was not updated, or the path is wrong'
     )
+
+
+def test_mcp_tool_signatures_use_the_schema_argument_names() -> None:
+    """Where the prompt spells out a tool call, the argument names must be the real ones.
+
+    On the controller-ba-agent-default-sa run the agent called
+    wait_for_first_failure_or_all_pass with `pr` instead of `pr_number` and the MCP rejected
+    it — "unexpected additional properties [\"pr\"]" — costing a turn before it corrected
+    itself. The prompt named arguments for cancel_superseded_for_pr but not for the wait
+    tools, so it was guessing from the JSON schema.
+
+    leartech-mcp-servers spells the PR argument `pr_number` on every tool that takes one
+    (WaitForTerminalIn, WaitForFirstFailureOrAllPassIn, and the tekton tools).
+    """
+    text = _prompt_text()
+
+    bad = re.findall(r'(mcp__[a-z0-9_-]+__[a-z_]+)\(([^)]*)\)', text)
+    offenders = [
+        f'{tool}({args})' for tool, args in bad if re.search(r'\bpr\b\s*(?:,|$)', args) and 'pr_number' not in args
+    ]
+    assert not offenders, f'tool signatures name the PR argument `pr`, but the schema calls it `pr_number`: {offenders}'
+
+    for tool in ('wait_for_first_failure_or_all_pass', 'wait_for_terminal'):
+        assert re.search(rf'{tool}\(repo, pr_number', text), (
+            f'{tool} should have its arguments spelled out in the prompt — the agent '
+            'otherwise guesses them from the schema and can burn a turn on a rejection'
+        )
