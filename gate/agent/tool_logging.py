@@ -22,6 +22,7 @@ to the provider) — just the provider-neutral command/result summary.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from typing import Any
@@ -72,6 +73,34 @@ def _clip(text: str) -> str:
     return text
 
 
+_VERDICT_KEYS = ('status', 'verdict', 'merged', 'remaining_seconds')
+
+
+def _verdict_fields(text: str) -> dict[str, object]:
+    """Lift a tool result's verdict-bearing scalars out of the payload.
+
+    ``detail`` is clipped at _MAX, and the fields that decide a run sit AFTER the
+    bulky ones: wait_for_terminal returns ``checks`` (9 rows, ~2k chars) before
+    ``status``, so every one of a run's wait results logged an identical 2013-char
+    prefix with the verdict cut off. The outcome had to be read from the MCP
+    server's own logs instead, which breaks "no outcome is decided from a value
+    whose provenance isn't in Loki".
+
+    Generic on purpose: any tool returning these keys gets them promoted, with no
+    per-tool coupling. Never raises — a logging helper must not break a run.
+    """
+    stripped = text.strip()
+    if not stripped.startswith('{'):
+        return {}
+    try:
+        parsed = json.loads(stripped)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {k: parsed[k] for k in _VERDICT_KEYS if isinstance(parsed.get(k), str | int | float | bool)}
+
+
 def _summarise_input(tool: str, tool_input: Any) -> str:
     """Compact one-line-ish view of a tool's input. Bash → the command; other
     tools → their most salient field (path/pattern/url) falling back to a redacted
@@ -110,4 +139,5 @@ def log_tool_result(tool: str | None, content: Any, *, is_error: bool = False) -
         tool=tool,
         ok=not is_error,
         detail=detail,
+        **_verdict_fields(text),
     )

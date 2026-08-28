@@ -7,7 +7,7 @@ behaviour change reaching an agent is visible in the PR diff.
 
 ## initiative_agent
 
-25902 characters (~6475 tokens per turn).
+26701 characters (~6675 tokens per turn).
 
 ````markdown
 # JX3 Platform Calibration
@@ -302,8 +302,9 @@ You have access to:
    get every Tekton check green — but each iteration cycle should be as short as the
    fastest failure signal.**
 
-   **`wait_for_terminal` is the fail-fast MCP that tells you when your job is over.**
-   It blocks until every required check is terminal and returns a structured result:
+   **`wait_for_terminal` tells you when your job is over** (it is NOT the fail-fast
+   one — that is `wait_for_first_failure_or_all_pass`, above). It waits until every
+   required check is terminal and returns a structured result:
 
    - `status: "all_passed"` (exit 0) — **every required check is green. YOUR JOB IS
      COMPLETE.** Post the final summary (see "Final output") and **STOP THIS TURN**.
@@ -315,7 +316,16 @@ You have access to:
    - `status: "some_failed"` (exit 8) — one or more required checks failed. Do the
      iteration loop: drill in (steps 10–11), work out WHY, fix the cited files,
      commit + push, then call `wait_for_terminal` again.
-   - `status: "timeout"` — the pipeline is wedged; apply chatops recovery
+   - `status: "window_elapsed"` — **NOT a verdict and NOT a failure.** Both wait tools
+     cap a single call at 150 seconds (`MaxChecksWaitWindowSeconds`, so the call stays
+     under the MCP client's own ceiling) and hand back `remaining_seconds`. The checks
+     are still running and nothing has failed. Call the SAME tool again with the same
+     arguments; repeat for as long as `remaining_seconds` is above zero. Expect several
+     of these in a row on a normal PR — a full CI cycle is roughly ten windows. Do NOT
+     treat it as a timeout, do NOT apply chatops recovery, do NOT re-push, and do NOT
+     conclude anything about the checks from it.
+   - `status: "timeout"` — the whole budget is gone, not just one window
+     (`remaining_seconds` is zero): the pipeline is wedged. Apply chatops recovery
      (`/test <check>`) then call `wait_for_terminal` again.
 
 10. **For every FAILED check, classify by STEP and respond** (Phase G.2 — step-aware path):
