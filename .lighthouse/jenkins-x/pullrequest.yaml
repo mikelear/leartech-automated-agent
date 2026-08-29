@@ -93,7 +93,7 @@ spec:
             set -e
             echo "=== Smoke-building Dockerfile.runtime on the base the release uses (no push) ==="
             # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-go-toolset
-            TOOLSET_VERSION=0.49.33
+            TOOLSET_VERSION=0.50.4
             mkdir -p /kaniko/.docker
             sed 's/"credHelpers":{[^}]*},//' /tekton/creds/.docker/config.json > /kaniko/.docker/config.json
             /kaniko/executor \
