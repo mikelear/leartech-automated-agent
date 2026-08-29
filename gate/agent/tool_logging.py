@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from gate import obslog
@@ -111,6 +112,66 @@ def _summarise_input(tool: str, tool_input: Any) -> str:
         if key in tool_input and tool_input[key]:
             return _clip(str(tool_input[key]))
     return _clip(str(tool_input))
+
+
+ADVERTISED_TOOLS_EVENT = 'agent_advertised_tools'
+
+
+def log_advertised_tools(
+    mcp_servers: Any,
+    allowed_tools: Iterable[str],
+    *,
+    logger: str = 'agent.initiative',
+) -> None:
+    """Emit ONE structured record naming every MCP server + every allowed tool the
+    agent has been wired with, so a later reader can compute which advertised
+    tools were never called (advertised − called = never-used).
+
+    Emitted at INFO — deliberately NOT DEBUG, because the controller runs at INFO
+    and a DEBUG record is the same as no record (leartech-orchestrator-controller
+    has three ``internal/controller`` comments recording exactly that mistake
+    costing weeks). The `agent_advertised_tools` event is the wire contract; the
+    fields ``mcp_servers`` + ``allowed_tools`` (sorted list[str]) are keyed on by
+    the recorder that computes never-called sets, so their names + shape are
+    stable across releases.
+
+    Loki query — advertised set for one run id:
+        {namespace=~".+"} | json | event="agent_advertised_tools" | run_id="<id>"
+
+    Called EXACTLY ONCE per run (at run start). Duplicating the emission would
+    inflate the never-called cardinality on the recorder side; the caller is
+    expected to fire this next to its ``run_start`` line, not per turn / tool.
+
+    ``mcp_servers`` accepts either the ``ClaudeAgentOptions.mcp_servers`` value
+    (a dict whose keys are agent-facing server names like ``leartech-pr-context``,
+    or, per the SDK's union type, a config-file path — treated as opaque) OR a
+    plain iterable of server-name strings. ``Any`` on the annotation is a
+    deliberate loosening — the SDK types ``mcp_servers`` as
+    ``dict[...] | str | Path``, and adding a runtime shape check here lets a
+    caller thread the raw options value in without a static-type battle. The
+    record always carries the run_id via obslog's ambient ``_context()`` — no
+    extra parameter needed.
+    """
+    if isinstance(mcp_servers, Mapping):
+        server_names = sorted(str(s) for s in mcp_servers.keys())
+    elif isinstance(mcp_servers, str | bytes) or mcp_servers is None:
+        # SDK allows a config-file path — treat as opaque (no keys to enumerate).
+        server_names = []
+    else:
+        try:
+            server_names = sorted(str(s) for s in mcp_servers)
+        except TypeError:
+            server_names = []
+    tool_names = sorted(str(t) for t in allowed_tools)
+    obslog.info(
+        ADVERTISED_TOOLS_EVENT,
+        f'agent advertised {len(server_names)} MCP server(s) and {len(tool_names)} allowed tool(s)',
+        logger=logger,
+        mcp_servers=server_names,
+        allowed_tools=tool_names,
+        mcp_server_count=len(server_names),
+        allowed_tool_count=len(tool_names),
+    )
 
 
 def log_tool_call(tool: str, tool_input: Any) -> None:

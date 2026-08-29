@@ -39,6 +39,7 @@ from gate import obslog
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative import INITIATIVE_TEKTON_TOOLS, WRITE_MODE_TOOLS
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
+from gate.agent.tool_logging import log_advertised_tools
 from gate.mcp_servers import build_remote_mcp_servers
 
 DEFAULT_MAX_TURNS = 200
@@ -171,6 +172,7 @@ async def run_infra_task(
 
     obslog.info('run_start', f'infra agent action={action}', logger='infra', action=action)
     options = _build_options(model, max_turns)
+    log_advertised_tools(options.mcp_servers or {}, options.allowed_tools or [], logger='infra')
     prompt = _task_prompt(action, inputs)
 
     exit_code = 0

@@ -86,6 +86,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from gate import obslog
 from gate.agent.calibrations import load_jx3_calibration
+from gate.agent.tool_logging import log_advertised_tools
 from gate.mcp_servers import build_remote_mcp_servers
 
 DEFAULT_MODEL = os.environ.get('LEARTECH_BA_AGENT_MODEL', 'claude-opus-4-8')
@@ -408,6 +409,7 @@ async def run_ba_task(
 
     obslog.info('run_start', f'ba agent brief={brief.name}', logger='ba', brief=brief.name, model=model)
     options = _build_options(model, max_turns)
+    log_advertised_tools(options.mcp_servers or {}, options.allowed_tools or [], logger='ba')
     prompt = _task_prompt(brief)
 
     exit_code = 0
