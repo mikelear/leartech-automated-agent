@@ -39,6 +39,68 @@ kept.
 2. **A trigger.** A final Plan step, appended by plan-api, depending on every other step.
 3. **Sinks.** See below.
 
+## Two components, split by cadence
+
+**Sidecar — per Plan, deterministic, no LLM.** Computes the record, emits the structured
+event, commits the file, posts the sticky comment. This is the delivery path and it must be
+boring.
+
+**Analyst — nightly, one LLM call through the ai-gateway on its own virtual key.** Reads
+the committed records, writes the narrative, and may post back to individual PRs. PRs accept
+comments indefinitely, so a next-morning comment still lands where the next agent will read
+it.
+
+Nightly rather than per-run, for four reasons:
+
+- **Cross-run patterns are the valuable output.** "This tool error recurred five nights" is
+  an image defect; one occurrence is noise. A per-run narrator structurally cannot see it —
+  the unwritable GOMODCACHE looked like a one-off until the same workaround turned up in the
+  previous run's Bash calls.
+- **A bad prompt night costs a report, not a run.**
+- **Cheaper**: one call over N records instead of N calls.
+- **It produces the existing house format** — `docs/audits/<name>-<date>.md`, of which
+  `go-lint-drift-2026-08-02.md` is the precedent.
+
+So the analyst is not a second sidecar. It is the nightly pass, promoted to a component.
+
+### Detection is deterministic; the analyst only explains
+
+The rule that keeps this honest. Anomaly DETECTION lives in the sidecar as rules — "MCP
+calls happened and mcp-servers logged zero lines" is a rule, not a judgement. The analyst is
+given the metrics, the fired rules and the verbatim errors, and asked to explain them and to
+state what remained unknowable.
+
+If the LLM were finding the problems, a quiet night would be ambiguous: "all good" or "did
+not notice". With rules finding and the model explaining, a quiet night means the rules did
+not fire, which is a fact. It also bounds the damage from a bad analyst prompt to a poor
+write-up over a complete, correct record.
+
+### What the analyst is actually for
+
+The most useful output from analysing these runs by hand was not a metric. It was sentences
+like: *"could not establish what each wait call returned from the agent logs — status was
+past the 2000-char clip — so the MCP server's own logs were read instead."* That sentence IS
+the bug report that became the tool-result verdict fix.
+
+So the analyst's job is a **"what could not be established, and why"** section. That is the
+observability backlog, written by the thing that just hit the gap, and it is the part that
+resists being computed.
+
+### Analyst inputs and discipline
+
+- **Input is the committed JSON, not the sticky comment.** Comments are prose-shaped and get
+  edited; the JSON is structured and outlives Loki retention.
+- **Context is the record, not raw logs.** Feeding hundreds of log lines is expensive and
+  worse, because the model then re-derives what the aggregator computed reliably.
+- **Summarisation, not reasoning** — a Haiku-class model is right, which makes the cost
+  negligible even nightly.
+- **Its own prompt is version-controlled and hashed**, exactly like
+  `docs/agent-system-prompt.md`. Otherwise drift is built into the thing whose job is
+  detecting drift — and this session proved how quietly that happens: the agent prompt named
+  three deleted tools and a developer's home directory, and nothing failed.
+- **If the gateway call fails, the deterministic record still stands** and the narrative is
+  recorded as absent. Never retro-fit a missing narrative by guessing.
+
 ## Three sinks, three jobs
 
 | Sink | Purpose | Lifetime |
@@ -58,9 +120,14 @@ event and the committed file still exist. The PR is the nicest sink, never the o
 
 ## The record
 
-Generated, never hand-edited, in both shapes from one source so they cannot drift:
-`docs/agent-runs/<utc-date>-<plan-name>.md` carrying the narrative, and `.json` carrying
-the same data for a cron or an LLM to aggregate.
+Generated, never hand-edited: `docs/agent-runs/<utc-date>-<plan-name>.json` carrying the
+data, and `.md` carrying the same data rendered for a human, both from one source so they
+cannot drift.
+
+**The JSON is authoritative; any narrative is commentary.** The sidecar's md is a rendering
+of the JSON. The analyst's prose is added later, must cite fields present in the JSON, and
+is labelled generated. A committed record asserting "the release failed because of X" when
+it did not is worse than no record.
 
 Fields that matter, and why each is there rather than for completeness:
 
@@ -98,10 +165,10 @@ If aggregation, the commit or the comment fails, the Plan's verdict is unaffecte
 recorder that can fail delivery has inverted its own purpose. Log the failure and exit
 zero.
 
-## Follow-up: nightly analysis over the corpus
+## The rules the analyst is handed
 
-Worth building second, once records exist. The valuable output is not drifting metrics — it
-is ABSENCES and repetition:
+Deterministic, evaluated by the sidecar, and the input to every narrative. The valuable
+output is ABSENCES and repetition, not drifting metrics:
 
 - a run with MCP calls but no mcp-servers log lines
 - **a phase change with no matching `phase_transition` line** — `phase_transition_logging.go`

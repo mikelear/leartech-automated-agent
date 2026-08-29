@@ -21,7 +21,12 @@ COPY --chown=agent:agent initiatives/ initiatives/
 COPY --chown=agent:agent README.md ./
 
 ENV UV_FROZEN=true
-RUN uv sync --frozen --no-cache --no-dev 2>/dev/null || uv sync --no-cache --no-dev
+# rm -rf is load-bearing: it discards any inherited or half-written .venv, and it
+# changes this RUN's command string so kaniko cannot serve a poisoned cached layer.
+RUN rm -rf /app/.venv \
+    && uv sync --frozen --no-cache --no-dev \
+    && test -x /app/.venv/bin/python \
+    && /app/.venv/bin/python -c "import click, gate"
 
 ENV UV_CACHE_DIR=/tmp/uv-cache
 ENV LEARTECH_REPO_ROOT=/workspace
