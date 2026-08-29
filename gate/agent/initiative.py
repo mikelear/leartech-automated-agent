@@ -35,7 +35,7 @@ from gate.agent import agentrun_client, pr_handoff
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative_prompt import render_initiative_system_prompt
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
-from gate.agent.tool_logging import log_tool_call, log_tool_result
+from gate.agent.tool_logging import log_advertised_tools, log_tool_call, log_tool_result
 from gate.initiatives import load_initiative
 from gate.mcp_servers import build_remote_mcp_servers
 from gate.mcp_servers.call import call_mcp_tool
@@ -915,6 +915,7 @@ async def run_initiative(
         cwd=str(cwd),
         add_dirs=[str(cwd)],
     )
+    log_advertised_tools(options.mcp_servers or {}, options.allowed_tools or [], logger='agent.initiative')
 
     resume_context = _detect_resume_context(
         qualified_repo=primary.qualified_repo,

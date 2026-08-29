@@ -20,6 +20,7 @@ from claude_agent_sdk.types import (
 
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.system_prompt import REVIEW_SYSTEM_PROMPT
+from gate.agent.tool_logging import log_advertised_tools
 from gate.mcp_servers import build_remote_mcp_servers
 
 DEFAULT_MODEL = os.environ.get('LEARTECH_AGENT_MODEL', 'claude-opus-4-7')
@@ -63,6 +64,7 @@ async def review_pr(
         return 2
 
     options = _build_options(model, max_turns)
+    log_advertised_tools(options.mcp_servers or {}, options.allowed_tools or [], logger='agent.review')
     user_prompt = (
         f'Review {repo}#{pr_number}. Use the MCP tools to gather context, '
         f'run the gate, and produce a concise review report following the structure in your system prompt.'
