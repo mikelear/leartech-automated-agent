@@ -26,6 +26,7 @@ import json
 import os
 import re
 from collections.abc import Iterable, Mapping
+from pathlib import Path
 from typing import Any
 
 from gate import obslog
@@ -118,7 +119,7 @@ ADVERTISED_TOOLS_EVENT = 'agent_advertised_tools'
 
 
 def log_advertised_tools(
-    mcp_servers: Any,
+    mcp_servers: Mapping[str, object] | Iterable[str] | str | Path | None,
     allowed_tools: Iterable[str],
     *,
     logger: str = 'agent.initiative',
@@ -142,19 +143,17 @@ def log_advertised_tools(
     inflate the never-called cardinality on the recorder side; the caller is
     expected to fire this next to its ``run_start`` line, not per turn / tool.
 
-    ``mcp_servers`` accepts either the ``ClaudeAgentOptions.mcp_servers`` value
-    (a dict whose keys are agent-facing server names like ``leartech-pr-context``,
-    or, per the SDK's union type, a config-file path — treated as opaque) OR a
-    plain iterable of server-name strings. ``Any`` on the annotation is a
-    deliberate loosening — the SDK types ``mcp_servers`` as
-    ``dict[...] | str | Path``, and adding a runtime shape check here lets a
-    caller thread the raw options value in without a static-type battle. The
+    ``mcp_servers`` accepts the shapes the Agent-SDK's own union defines:
+    a mapping keyed by agent-facing server name (e.g. ``leartech-pr-context``),
+    a plain iterable of server-name strings, or a config-file path string
+    (treated as opaque — no keys to enumerate). ``None`` is accepted as a
+    convenience for callers that pass ``options.mcp_servers or None``. The
     record always carries the run_id via obslog's ambient ``_context()`` — no
     extra parameter needed.
     """
     if isinstance(mcp_servers, Mapping):
         server_names = sorted(str(s) for s in mcp_servers.keys())
-    elif isinstance(mcp_servers, str | bytes) or mcp_servers is None:
+    elif isinstance(mcp_servers, str | Path) or mcp_servers is None:
         # SDK allows a config-file path — treat as opaque (no keys to enumerate).
         server_names = []
     else:
