@@ -130,8 +130,12 @@ def test_initiative_emits_advertised_tools_once_at_run_start(
     repo_root = tmp_path / 'repo'
     repo_root.mkdir()
 
-    # Neutralise the resume-detection helpers so the harness sees a fresh-start
-    # (they hit the real gh CLI + git otherwise, which we don't want under pytest).
+    # Neutralise every helper `run_initiative` calls that shells out to the
+    # real `gh` / `git` CLI. In CI the `pr` pipeline runs on `python:3.13-slim`
+    # which has NEITHER `gh` NOR `git` on PATH — those subprocess calls raise
+    # FileNotFoundError, which is fatal to `run_initiative` even though our
+    # unit under test (the `agent_advertised_tools` emission) has already run
+    # at that point. Stubbing them out keeps the test focused on run-start.
     monkeypatch.setattr(
         initiative,
         '_detect_resume_context',
@@ -139,6 +143,16 @@ def test_initiative_emits_advertised_tools_once_at_run_start(
             is_resume=False, pr_number=None, branch_exists_on_remote=False
         ),
     )
+
+    async def _stub_resolve_target_pr(qualified_repo: str, branch: str) -> None:
+        return None
+
+    monkeypatch.setattr(initiative, '_resolve_target_pr', _stub_resolve_target_pr)
+
+    async def _stub_backstop_target_pr(*, qualified_repo: str, branch: str, pr_number: int | None) -> None:
+        return None
+
+    monkeypatch.setattr(initiative, '_backstop_target_pr', _stub_backstop_target_pr)
     monkeypatch.setattr(initiative, 'query', _fake_query)
 
     # Write a minimal initiative YAML the loader accepts.
