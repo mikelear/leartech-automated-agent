@@ -103,6 +103,77 @@ def _verdict_fields(text: str) -> dict[str, object]:
     return {k: parsed[k] for k in _VERDICT_KEYS if isinstance(parsed.get(k), str | int | float | bool)}
 
 
+# Bash tool results carry ``Exit code N`` on the very first line when the command
+# failed (observed shape: ``Exit code 2\nls: cannot access '/x': No such file…``).
+# Successful commands do NOT prefix ``Exit code 0`` — they just return raw output —
+# so the pattern itself gates against firing on a green run.
+_BASH_EXIT_RE = re.compile(r'\AExit code (\d+)\s*(?:\n|\Z)')
+
+# Bound the promoted error line well below _MAX so a promoted field cannot itself
+# grow to 2000 chars and just move the same problem. 240 fits typical shell/CLI
+# diagnostics ("ls: cannot access '/x': No such file or directory",
+# "fatal: not a git repository", "npm ERR! code E404") with headroom.
+_BASH_ERROR_MAX = 240
+
+
+def _bash_failure_fields(text: str) -> dict[str, object]:
+    """Lift a failed Bash result's exit status and identifying error out of the payload.
+
+    Mirrors :func:`_verdict_fields` deliberately — same helper style, same
+    snake_case field names spliced into the emit call, promotion strictly
+    BEFORE the clip. The reason we can't just read them out of ``detail`` after
+    the fact is the same as the verdict-fields case: a long failing command
+    (a chatty ``pytest``, a verbose ``kaniko`` build, a firehose ``curl -v``)
+    fills the 2000-char window with partial stdout, and the actual diagnostic
+    line is the FIRST casualty of clipping.
+
+    Bash-specific format: the CLI prefixes failing runs with ``Exit code N`` on
+    line 1 followed by the interleaved stdout/stderr. Successful commands emit
+    raw output with no such prefix, so the regex gate self-guards against
+    firing on green runs (no ``is_error`` parameter needed; matches the
+    format-only guard in ``_verdict_fields``).
+
+    Choice of message line — LAST non-blank line, not first:
+    - Shells and CLI tools emit their conclusive diagnostic AFTER any partial
+      stdout ("ls: cannot access ...", "fatal: ...", "error: ...",
+      "FAILED tests/foo.py::test_bar - AssertionError: ..."). Taking the last
+      non-blank line captures that conclusive line for the common case.
+    - The clip cuts the END of the output, so pre-promoting the last line is
+      what makes it survive at all — the exact lesson ``_verdict_fields``
+      encoded. Taking the first line would have been safe-from-clipping too,
+      but would surface e.g. an env-dump preamble instead of the actual fail.
+    - For single-diagnostic failures (``ls /missing``) the "first line after
+      Exit code" and "last non-blank line" coincide, so the choice only
+      matters for the multi-line case, where LAST is the right one.
+
+    Field names (wire contract — the recorder keys on these; keep stable):
+    - ``exit_code`` (int) — the numeric shell exit status
+    - ``error``     (str) — the bounded, redacted, identifying diagnostic line
+
+    Bounded to :data:`_BASH_ERROR_MAX` chars so this promotion doesn't just
+    relocate the 2000-char clipping problem. Never raises — a logging helper
+    must not break a run.
+    """
+    m = _BASH_EXIT_RE.match(text)
+    if not m:
+        return {}
+    try:
+        exit_code = int(m.group(1))
+    except (ValueError, TypeError):
+        return {}
+    remainder = text[m.end() :]
+    error_line = ''
+    for line in reversed(remainder.splitlines()):
+        stripped_line = line.strip()
+        if stripped_line:
+            error_line = stripped_line
+            break
+    error_line = redact(error_line)
+    if len(error_line) > _BASH_ERROR_MAX:
+        error_line = error_line[:_BASH_ERROR_MAX] + f'…[+{len(error_line) - _BASH_ERROR_MAX} chars]'
+    return {'exit_code': exit_code, 'error': error_line}
+
+
 def _summarise_input(tool: str, tool_input: Any) -> str:
     """Compact one-line-ish view of a tool's input. Bash → the command; other
     tools → their most salient field (path/pattern/url) falling back to a redacted
@@ -189,6 +260,10 @@ def log_tool_result(tool: str | None, content: Any, *, is_error: bool = False) -
         text = '\n'.join(str(part.get('text', '')) for part in content if isinstance(part, dict))
     else:
         text = '' if content is None else str(content)
+    # Promote BEFORE clipping — the failure diagnostic lives at the end of the
+    # payload for the same reason `_verdict_fields` promotes `status`: the
+    # 2000-char clip cuts the tail, and the tail is what identifies the failure.
+    bash_fields = _bash_failure_fields(text) if is_error else {}
     detail = _clip(text)
     level = 'WARN' if is_error else 'INFO'
     obslog.emit(
@@ -200,4 +275,5 @@ def log_tool_result(tool: str | None, content: Any, *, is_error: bool = False) -
         ok=not is_error,
         detail=detail,
         **_verdict_fields(text),
+        **bash_fields,
     )
