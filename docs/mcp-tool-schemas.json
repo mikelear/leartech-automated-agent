@@ -1,0 +1,743 @@
+{
+  "leartech-jx3-flow": {
+    "get_active_lifecycle_summary": {
+      "description": "One summary row per open PR on the repo (pr_number, title, stage, action, head_sha, url). For 'what's in flight right now?' dashboards / orchestrator polls.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "repo": {
+            "description": "the repo name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo"
+        ],
+        "type": "object"
+      }
+    },
+    "get_pr_lifecycle_state": {
+      "description": "Lifecycle stage + per-stage timestamps + next-action hint for one PR. Single call replaces seven primitives (PR labels, check-runs, ai-review comments, Tide eligibility, jx-promote PR state, GitOps reconcile).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "description": "GitHub owner; defaults to mikelear when empty",
+            "type": "string"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "get_pr_lifecycle_timeline": {
+      "description": "Chronological list of observed transitions for a PR. Reconstructed from observable timestamps \u2014 no stored-history requirement.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "owner": {
+            "description": "GitHub owner; defaults to mikelear when empty",
+            "type": "string"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "get_release_state": {
+      "description": "Where is image:version in its release journey (registry mirrors, signing, scanning, promote, reconcile)? Best-effort: registry probe failures collapse to false rather than raising.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "image": {
+            "description": "the image name",
+            "type": "string"
+          },
+          "version": {
+            "description": "the image version (tag)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "image",
+          "version"
+        ],
+        "type": "object"
+      }
+    },
+    "list_pr_checks": {
+      "description": "Snapshot of every check-run on a PR \u2014 one row per <cluster>/<check> with state (success|failure|pending|neutral), PipelineRun name + SHA + timestamps. Retires the gh-pr-checks shim; sources direct from Tekton PipelineRun state so cross-cluster asymmetry (green on gcp, red on az) is visible at a glance.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "calling AgentRun name, for Loki correlation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "post_pr_handoff": {
+      "description": "Upsert this run's sticky handoff comment on the PR \u2014 the durable note a successor iteration reads FIRST. Call it freely (every loop is fine): the comment is rewritten only when the state actually changes, so frequent calls are cheap and an iteration killed mid-flight still leaves its last known state behind. Scoped per run_id, and explicitly labelled a hint rather than truth, because authoritative state is the PR's checks plus Keeper's merge status.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "budget_state": {
+            "description": "ok | approaching_limit | exhausted; derived from turns when omitted",
+            "type": "string"
+          },
+          "cost_usd": {
+            "description": "cumulative credits/cost for this run",
+            "type": "number"
+          },
+          "evidence": {
+            "description": "short factual lines a successor should not have to rediscover",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "null",
+              "array"
+            ]
+          },
+          "iteration": {
+            "description": "this run's iteration number, if known",
+            "type": "integer"
+          },
+          "model": {
+            "description": "the model actually served, which may differ from the one requested",
+            "type": "string"
+          },
+          "next_step": {
+            "description": "the single next action a successor should take",
+            "type": "string"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "calling AgentRun name; scopes the sticky comment and joins Loki",
+            "type": "string"
+          },
+          "summary": {
+            "description": "what is true right now, for the next iteration to read first",
+            "type": "string"
+          },
+          "turns_max": {
+            "description": "the max_turns ceiling this run was given",
+            "type": "integer"
+          },
+          "turns_used": {
+            "description": "turns consumed so far; only the agent knows this",
+            "type": "integer"
+          },
+          "verdict": {
+            "description": "the current verdict, e.g. a pr_gate_snapshot verdict",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number",
+          "summary"
+        ],
+        "type": "object"
+      }
+    },
+    "pr_gate_snapshot": {
+      "description": "One call: is this PR mergeable, and what should I do next? Reads GitHub commit statuses (cluster-attributed and what Keeper actually gates on, so both estates are covered, unlike the Tekton-backed tools) plus the PR's labels, and returns a verdict: WAIT (checks running, or green+approved so Keeper will merge), FIX (a check failed \u2014 read its target_url log FIRST, because a red context can be a publish/infrastructure failure whose work passed and needs /retest not a code change), STOP (blocked_needs_human, e.g. green but no `approved` label), DONE (merged). Never reports success from an empty check list.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "calling AgentRun name, for Loki correlation",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "wait_for_first_failure_or_all_pass": {
+      "description": "Fail-fast wait: return as soon as ANY check fails OR all checks pass. Returns {status: first_failure|all_passed|timeout, first_failure, checks}. Surface a lint failure in ~15s while end2end is still running so the agent iterates on a fresh commit instead of waiting for the slowest check.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "poll_seconds": {
+            "description": "poll interval (default 15, minimum 5)",
+            "type": "integer"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "calling AgentRun name, for Loki correlation",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "wall-clock timeout (default 1800)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "wait_for_terminal": {
+      "description": "Block until every check on the PR reaches a terminal state (success|failure) or timeout_seconds elapses. Returns {status: all_passed|some_failed|timeout, checks}. Use before the final 'ready for review' sticky \u2014 want every check settled.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "poll_seconds": {
+            "description": "poll interval (default 15, minimum 5)",
+            "type": "integer"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "calling AgentRun name, for Loki correlation",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "wall-clock timeout (default 1800)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "leartech-pr-context": {
+    "get_pr_diff": {
+      "description": "Unified diff for a PR. Without pattern returns the full diff. With pattern (suffix like '.spec.ts') returns only the matching changed file paths.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pattern": {
+            "description": "optional path suffix filter (e.g. '.spec.ts')",
+            "type": "string"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "get_pr_metadata": {
+      "description": "Canonical PR context: head/base SHA, head branch (head_ref), title, body, state, merged flag + merged_at timestamp, changed files, labels + mergeable_state + a computed `held` boolean. Two GitHub REST calls (PR object + files list). Use `merged` to disambiguate MERGED vs CLOSED-unmerged \u2014 GitHub reports both as state=closed. Use `held` (or the `labels` list) to verify a `do-not-merge/*` label is present before treating the PR as safely blocked from auto-merge.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare like 'webcoder-ui' or owner/name form)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "list_changed_files": {
+      "description": "Just the list of changed file paths (no diff body, no metadata).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "open_pr": {
+      "description": "Ensure a PR exists on the branch and authoritatively record it \u2014 IDEMPOTENT (adopt-or-create). Creates via POST /pulls, or if an open PR already exists on the head branch ADOPTS it (a resumed/re-spawned dev agent, or a Dev agent taking over an Infra-opened PR) \u2014 never a duplicate-create error. The PR number + head branch come from STRUCTURED API JSON (never scraped), then it patches the calling AgentRun's status.targetPR + status.headBranch (controller emits Maestro run.pr_opened). PUSH your branch first, then call this INSTEAD of `gh pr create` \u2014 safe to call on resume. Inputs: run_id (LEARTECH_RUN_ID), namespace, repo (owner/repo), base, head, title, body. Optional test_mode=true (or leartech.io/test-mode annotation on the AgentRun) requests the SYNTHETIC path: no GitHub call, a fake PR number in the 999xxxxx range, same AgentRun.status patch \u2014 honored only when the cluster env LEARTECH_MCP_TEST_MODE_ALLOWED is truthy (a stray test_mode on a production pod is silently demoted to the real GitHub path).",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "head": {
+            "type": "string"
+          },
+          "namespace": {
+            "type": "string"
+          },
+          "repo": {
+            "type": "string"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "test_mode": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "namespace",
+          "repo",
+          "base",
+          "head",
+          "title",
+          "body"
+        ],
+        "type": "object"
+      }
+    },
+    "resolve_pr": {
+      "description": "READ the PR this run produced \u2014 the query counterpart to open_pr's command. Resolves AUTHORITATIVE-first: AgentRun.status.targetPR (the value open_pr wrote \u2014 state-agnostic, SURVIVES a merge), then a GitHub fallback for the branch's PR in ANY state (\"all\", not \"open\") so a MERGED PR (a success) is visible. Strictly READ-ONLY: no PR create, no status patch \u2014 use this (never open_pr) to CHECK whether a run produced a PR. Inputs: run_id (LEARTECH_RUN_ID, optional \u2014 omit to resolve purely by branch), namespace (required to read status.targetPR), repo (owner/repo or bare), head (the pushed branch). Returns {found, number, state, merged, head_ref, url, source} where source is status|github|none.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "head": {
+            "description": "the head branch the agent pushed",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "the AgentRun namespace; required to read status.targetPR",
+            "type": "string"
+          },
+          "repo": {
+            "description": "the repo (bare like 'leartech-plan-api' or owner/name)",
+            "type": "string"
+          },
+          "run_id": {
+            "description": "the AgentRun name (LEARTECH_RUN_ID) whose status.targetPR is authoritative; optional",
+            "type": "string"
+          }
+        },
+        "required": [
+          "run_id",
+          "namespace",
+          "repo",
+          "head"
+        ],
+        "type": "object"
+      }
+    }
+  },
+  "leartech-tekton": {
+    "cancel_pipelinerun": {
+      "description": "Cancel one PipelineRun via a merge-patch that sets spec.status=PipelineRunCancelled. Use after a force-push supersedes an in-flight run. Returns {cancelled: bool}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster": {
+            "description": "target cluster (az|gcp)",
+            "type": "string"
+          },
+          "pipelinerun_name": {
+            "description": "the PipelineRun resource name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pipelinerun_name",
+          "cluster"
+        ],
+        "type": "object"
+      }
+    },
+    "cancel_superseded_for_pr": {
+      "description": "Cancel every in-flight PipelineRun on this PR whose lastCommitSHA differs from keep_sha. Skips already-terminal runs. Returns {cancelled_count: N}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster": {
+            "description": "target cluster (az|gcp)",
+            "type": "string"
+          },
+          "keep_sha": {
+            "description": "the SHA whose PipelineRuns must NOT be cancelled",
+            "type": "string"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number",
+          "keep_sha",
+          "cluster"
+        ],
+        "type": "object"
+      }
+    },
+    "diagnose_pr_failures": {
+      "description": "One-shot cross-cluster failure diagnosis for a PR. Per failing check returns the failed step, exit code, log tail, classification + recommended action.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "list_pipelineruns_for_pr": {
+      "description": "Discover Tekton PipelineRuns attached to a GitHub PR via Lighthouse refs.repo+refs.pull labels. Returns newest-first.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster": {
+            "description": "target cluster (az|gcp); defaults to az",
+            "type": "string"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number"
+        ],
+        "type": "object"
+      }
+    },
+    "release_pipeline_status": {
+      "description": "Release-verification steps 1+2: did a release pipeline FIRE (a PipelineRun exists) and PASS for a commit? A release runs on a MAIN-PUSH postsubmit with NO PR number, so list_pipelineruns_for_pr can't find it \u2014 this keys on the commit SHA (lastCommitSHA label). Inputs: repo, sha (the merged/pushed main commit), cluster (az|gcp, default az). Returns {fired, passed, running, failed, run, runs, cluster}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster": {
+            "description": "target cluster (az|gcp); defaults to az",
+            "type": "string"
+          },
+          "repo": {
+            "description": "the repo whose main-push release pipeline to check (bare or owner/name)",
+            "type": "string"
+          },
+          "sha": {
+            "description": "the release-triggering commit SHA (the merged/pushed main commit); runs are matched by the lastCommitSHA label",
+            "type": "string"
+          }
+        },
+        "required": [
+          "repo",
+          "sha"
+        ],
+        "type": "object"
+      }
+    },
+    "step_logs": {
+      "description": "Tail of stdout+stderr from one step of one PipelineRun (default 200 lines). Empty string when pod is GC'd.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster": {
+            "description": "target cluster (az|gcp)",
+            "type": "string"
+          },
+          "pipelinerun_name": {
+            "description": "the PipelineRun resource name",
+            "type": "string"
+          },
+          "step_name": {
+            "description": "the step name within the PipelineRun",
+            "type": "string"
+          },
+          "tail": {
+            "description": "number of trailing lines; default 200",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "pipelinerun_name",
+          "step_name",
+          "cluster"
+        ],
+        "type": "object"
+      }
+    },
+    "step_status": {
+      "description": "Walk a PipelineRun and return per-step verdicts {task, step, state, reason, exit_code, pod}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster": {
+            "description": "target cluster (az|gcp)",
+            "type": "string"
+          },
+          "pipelinerun_name": {
+            "description": "the PipelineRun resource name",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pipelinerun_name",
+          "cluster"
+        ],
+        "type": "object"
+      }
+    },
+    "wait_first_failure": {
+      "description": "Step-aware fail-fast wait: returns within one poll of any step failing on the PR (e.g. a ruff failure surfaces in ~15s even while pytest is still running). Returns {status: first_failure|all_passed|timeout, first_failure, runs}.",
+      "inputSchema": {
+        "additionalProperties": false,
+        "properties": {
+          "cluster": {
+            "description": "target cluster (az|gcp)",
+            "type": "string"
+          },
+          "poll_seconds": {
+            "description": "poll interval (default 15, minimum 5)",
+            "type": "integer"
+          },
+          "pr_number": {
+            "description": "the GitHub PR number",
+            "oneOf": [
+              {
+                "type": "integer"
+              },
+              {
+                "pattern": "^-?[0-9]+$",
+                "type": "string"
+              }
+            ]
+          },
+          "repo": {
+            "description": "the repo name (bare or owner/name)",
+            "type": "string"
+          },
+          "timeout_seconds": {
+            "description": "wall-clock timeout (default 1800)",
+            "type": "integer"
+          }
+        },
+        "required": [
+          "repo",
+          "pr_number",
+          "cluster"
+        ],
+        "type": "object"
+      }
+    }
+  }
+}

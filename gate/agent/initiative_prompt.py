@@ -158,9 +158,10 @@ You have access to:
 
 9. **Fail-fast between push and the next decision**: after each push, call
    `mcp__leartech-jx3-flow__wait_for_first_failure_or_all_pass(repo, pr_number, run_id)`.
-   The PR argument is `pr_number`, NOT `pr` — the tool rejects unknown properties, so a
-   guess costs you a turn. `run_id` is your AgentRun name and makes the call greppable in
-   Loki. `timeout_seconds` and `poll_seconds` are optional; the defaults are right. It
+   The PR argument is `pr_number` (an INTEGER — not `pr`, not a string). The tool
+   rejects unknown properties AND wrong types, so a guess costs you a turn on either
+   axis. `run_id` is your AgentRun name and makes the call greppable in Loki.
+   `timeout_seconds` and `poll_seconds` are optional; the defaults are right. It
    returns within ~15s
    of any failure (lint surfaces fast even while end2end runs another 10 minutes) so
    you can iterate immediately on a fresh commit. Use the full-terminal
@@ -172,8 +173,8 @@ You have access to:
 
    **`wait_for_terminal(repo, pr_number, run_id)` tells you when your job is over** (it
    is NOT the fail-fast one — that is `wait_for_first_failure_or_all_pass`, above). Same
-   argument names as above. It waits until every required check is terminal and returns a
-   structured result:
+   argument names as above (`pr_number` is an INTEGER on this tool too). It waits until
+   every required check is terminal and returns a structured result:
 
    - `status: "all_passed"` (exit 0) — **every required check is green. YOUR JOB IS
      COMPLETE.** Post the final summary (see "Final output") and **STOP THIS TURN**.
@@ -202,10 +203,12 @@ You have access to:
     The aggregate "lint: failure" or "pr: failure" status from `list_pr_checks`
     masks the actual cause. Use the `leartech-tekton` MCP to drill in:
 
-    a. Call `mcp__leartech-tekton__step_status(pipelinerun=<from list_pr_checks>, cluster=<az|gcp>)`
+    a. Call `mcp__leartech-tekton__step_status(pipelinerun_name=<from list_pr_checks>, cluster=<az|gcp>)`
        to see WHICH step failed (git-clone, ruff, mypy, pytest, kaniko, ai-review, …).
+       The argument is `pipelinerun_name`, NOT `pipelinerun` — the tool rejects unknown
+       properties.
     b. For each step whose state is `Failed`, call
-       `mcp__leartech-tekton__step_logs(pipelinerun, step_name, cluster, tail=200)`.
+       `mcp__leartech-tekton__step_logs(pipelinerun_name, step_name, cluster, tail=200)`.
     c. Read the failing step's logs and decide what the failure is yourself. You have
        the step name and its log tail; that is the same evidence a classifier would
        have had. Act on it directly:
@@ -231,7 +234,7 @@ You have access to:
 11. **Cancel superseded PipelineRuns on every force-push.** Whenever you push a new
     commit to an existing PR (any iteration after the first push), call
     `mcp__leartech-tekton__cancel_superseded_for_pr(repo, pr_number, keep_sha=<new HEAD sha>, cluster=<az|gcp>)`
-    for BOTH clusters before waiting on the new run. The old in-flight runs from
+    (`pr_number` is an INTEGER here as everywhere else) for BOTH clusters before waiting on the new run. The old in-flight runs from
     the prior SHA are wasted cluster CPU and slow the next cycle. Skip on the
     very first push (no prior runs).
 
