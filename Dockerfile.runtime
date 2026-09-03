@@ -1,4 +1,4 @@
-ARG BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.49.30
+ARG BASE_IMAGE=ghcr.io/mikelear/leartech-agent-base:0.51.1
 FROM $BASE_IMAGE
 
 LABEL org.opencontainers.image.source="https://github.com/mikelear/leartech-automated-agent" \
