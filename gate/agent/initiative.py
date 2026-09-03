@@ -31,10 +31,20 @@ from claude_agent_sdk.types import (
 )
 
 from gate import identity, obslog
-from gate.agent import agentrun_client, pr_handoff
+from gate.agent import agentrun_client, pr_handoff, repo_access
 from gate.agent.calibrations import load_jx3_calibration
 from gate.agent.initiative_prompt import render_initiative_system_prompt
 from gate.agent.main import DEFAULT_MODEL, MCP_ALLOWED_TOOLS
+from gate.agent.repo_access import (
+    SOURCE_CLONE,
+    SOURCE_MIDRUN,
+    SOURCE_PREFLIGHT,
+    classify_bash_tool_result,
+    classify_repo_access_failure,
+    emit_repo_access_denied,
+    preflight_declared_repo,
+    redact_token,
+)
 from gate.agent.tool_logging import log_advertised_tools, log_tool_call, log_tool_result
 from gate.initiatives import load_initiative
 from gate.mcp_servers import build_remote_mcp_servers
@@ -54,12 +64,28 @@ INITIATIVE_TEKTON_TOOLS = [
 
 @dataclass(frozen=True)
 class RunSummary:
-    """Outcome of a single initiative run."""
+    """Outcome of a single initiative run.
+
+    ``failure_reason`` is the load-bearing addition for the
+    ``repo_access_denied`` design: the point-of-failure classification
+    (produced by :func:`_clone_repo` or :func:`preflight_declared_repo`)
+    is threaded through here so the trailing ``run_end`` obslog record
+    can carry ``reason=<classification>`` alongside the bare
+    ``exit_code``. Without this field a Loki reader who queries only
+    ``event="run_end"`` sees an exit code and no explanation — which
+    was the shape of the prod incident the ``repo_access_denied``
+    initiative fixes. The point-of-failure event is emitted independently
+    (see :func:`emit_repo_access_denied`) so a pod killed between the
+    denial and ``run_end`` still leaves an explanation; this field is
+    the SECOND destination, so the explanation reaches ``run_end`` too
+    when the pod survives.
+    """
 
     exit_code: int
     turns: int | None = None
     cost_usd: float | None = None
     pr_number: int | None = None
+    failure_reason: str | None = None
 
 
 PR_NUMBER_HINT_FILE = '/tmp/run_pr_number'  # noqa: S108  # nosec B108
@@ -405,6 +431,85 @@ WAIT_FOR_TERMINAL_TOOL_SUFFIX = 'wait_for_terminal'
 CHECKS_STATUS_ALL_PASSED = 'all_passed'
 
 
+def _extract_bash_command(tool_input: object) -> str:
+    """Best-effort: pull the ``command`` string out of a Bash tool_use input.
+
+    The Claude Agent SDK passes tool inputs as dicts (per the tool's JSON
+    schema); Bash inputs carry a ``command`` key. Returns '' when the
+    input is unshaped or the key missing — the caller treats '' as
+    "nothing to classify", so an unexpected shape degrades to skipping
+    the mid-run classifier rather than crashing the run.
+    """
+    if isinstance(tool_input, dict):
+        command = tool_input.get('command')
+        if isinstance(command, str):
+            return command
+    return ''
+
+
+def _tool_result_content_as_text(block: ToolResultBlock) -> str:
+    """Flatten a ToolResultBlock content payload to a single string.
+
+    Mirrors :func:`_tool_result_reports_all_passed`'s extraction —
+    content can be ``str`` OR a list of ``str`` / ``dict{'text': ...}``
+    parts. Any unshaped part is skipped. Returns '' when nothing text-y
+    is present, which reads as "no output" to the classifier.
+    """
+    content = block.content
+    if content is None:
+        return ''
+    if isinstance(content, str):
+        return content
+    parts: list[str] = []
+    for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+        elif isinstance(part, dict):
+            value = part.get('text')
+            if isinstance(value, str):
+                parts.append(value)
+    return '\n'.join(parts)
+
+
+def _classify_and_emit_midrun_repo_access_denial(
+    *,
+    tool_use_id: str,
+    command: str,
+    result_block: ToolResultBlock,
+    emitted_ids: set[str],
+) -> None:
+    """Classify a mid-run Bash-tool git/gh result; emit if it's a denial.
+
+    Dedupes on ``tool_use_id`` via ``emitted_ids`` — one denial from one
+    tool call yields one event. A subsequent retry with a fresh
+    tool_use_id classifies + emits independently, which is correct: the
+    denial happened again.
+
+    The dedup check lives INSIDE the helper (not only at the call site)
+    so a direct unit-test call also benefits from it and any future
+    caller that forgets the ``if ... not in emitted_ids`` gate does not
+    reintroduce spam.
+    """
+    if tool_use_id in emitted_ids:
+        return
+    output = _tool_result_content_as_text(result_block)
+    is_error = bool(getattr(result_block, 'is_error', False))
+    outcome = classify_bash_tool_result(command=command, output=output, is_error=is_error)
+    if outcome.ok:
+        return
+    emitted_ids.add(tool_use_id)
+    emit_repo_access_denied(
+        repo=outcome.repo,
+        classification=outcome.classification,
+        remediation=outcome.remediation,
+        git_exit_code=outcome.git_exit_code,
+        stderr_snippet=outcome.stderr_snippet,
+        source=SOURCE_MIDRUN,
+        token=os.environ.get('GH_TOKEN'),
+        extra=dict(outcome.extra),
+    )
+
+
 def _tool_name_is_wait_for_terminal(name: str) -> bool:
     """True iff a tool name is the fail-fast full-terminal check.
 
@@ -505,11 +610,20 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> tuple[int, str | None]:
 
     Returns ``(exit_code, failure_reason)``. The failure reason is the
     Layer-1-classified one-liner (e.g. ``clone_failed: GH_TOKEN unset``)
-    when ``exit_code != 0``; None on success. The caller writes it to
-    ``initiative_runs.error`` via ``write_failure_reason``.
+    when ``exit_code != 0``; None on success. The caller threads the
+    reason into :attr:`RunSummary.failure_reason` so ``run_end`` carries
+    the explanation, and this helper additionally emits the structured
+    ``repo_access_denied`` event via :func:`emit_repo_access_denied` at
+    the point of failure so a pod killed before ``run_end`` still leaves
+    a queryable record. Both destinations are load-bearing — pods have
+    been observed dying between the two, so relying on either alone
+    would recreate the "correct classification, no destination" defect
+    this design fixes.
 
     The token is never logged: we redact it from any echoed stderr
-    before surfacing AND before constructing the failure reason.
+    before surfacing AND before constructing the failure reason, and
+    the ``repo_access_denied`` emitter re-redacts the snippet as a
+    belt-and-braces guard.
     """
     gh_token = os.environ.get('GH_TOKEN')
     if not gh_token:
@@ -519,7 +633,17 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> tuple[int, str | None]:
             f'or set GH_TOKEN.',
             err=True,
         )
-        return 2, f'clone_failed: GH_TOKEN unset, cannot clone {qualified_repo}'
+        reason = f'clone_failed: GH_TOKEN unset, cannot clone {qualified_repo}'
+        emit_repo_access_denied(
+            repo=qualified_repo,
+            classification=repo_access.CLASS_NO_GH_TOKEN,
+            remediation=repo_access.REMEDIATION_GH_TOKEN_UNSET,
+            git_exit_code=None,
+            stderr_snippet=None,
+            source=SOURCE_CLONE,
+            token=None,
+        )
+        return 2, reason
     click.echo(
         click.style(f'→ cloning {qualified_repo} → {cwd}', fg='cyan'),
         err=True,
@@ -534,17 +658,29 @@ def _clone_repo(*, qualified_repo: str, cwd: Path) -> tuple[int, str | None]:
         timeout=120,
     )
     if result.returncode != 0:
-        redacted_stderr = result.stderr.replace(gh_token, '***REDACTED***')
+        redacted_stderr = redact_token(result.stderr, gh_token)
         click.echo(
             f'Clone failed (exit {result.returncode}):\n{redacted_stderr}',
             err=True,
         )
         snippet_lines = [line for line in redacted_stderr.splitlines() if line.strip()]
         snippet = snippet_lines[-1] if snippet_lines else f'git exit {result.returncode}'
-        if 'Repository not found' in redacted_stderr or 'not found' in redacted_stderr.lower():
-            reason = f'clone_failed: Repository not found (likely missing bot collaborator) for {qualified_repo}'
+        classification, remediation = classify_repo_access_failure(stderr=redacted_stderr, exit_code=result.returncode)
+        emit_repo_access_denied(
+            repo=qualified_repo,
+            classification=classification,
+            remediation=remediation,
+            git_exit_code=result.returncode,
+            stderr_snippet=snippet[:200],
+            source=SOURCE_CLONE,
+            token=gh_token,
+        )
+        if classification == repo_access.CLASS_REPOSITORY_NOT_FOUND:
+            reason = (
+                f'clone_failed: {classification} (likely missing bot collaborator) for {qualified_repo} — {remediation}'
+            )
         else:
-            reason = f'clone_failed: {snippet[:160]}'
+            reason = f'clone_failed: {classification}: {snippet[:160]}'
         return 2, reason
     return 0, None
 
@@ -895,11 +1031,39 @@ async def run_initiative(
     primary = initiative.primary
     cwd = repo_root or _default_repo_root(primary.qualified_repo)
 
+    # Pre-flight the declared repo before any model turn. Costs one HTTPS
+    # round-trip and spends zero model tokens; the prior incident hit the
+    # same deterministic Repository-not-found across four pods for 85s.
+    # Deliberately read-only via `git ls-remote` — see
+    # gate.agent.repo_access module docstring for why write cannot be
+    # honestly probed without a side effect, and how mid-run classification
+    # covers the write-side failure under the same event name.
+    preflight = preflight_declared_repo(qualified_repo=primary.qualified_repo)
+    if not preflight.ok:
+        click.echo(
+            click.style(
+                f'✗ pre-flight failed for {primary.qualified_repo}: {preflight.classification} — {preflight.reason}',
+                fg='red',
+                bold=True,
+            ),
+            err=True,
+        )
+        emit_repo_access_denied(
+            repo=preflight.repo or primary.qualified_repo,
+            classification=preflight.classification,
+            remediation=preflight.remediation,
+            git_exit_code=preflight.git_exit_code,
+            stderr_snippet=preflight.stderr_snippet,
+            source=SOURCE_PREFLIGHT,
+            token=os.environ.get('GH_TOKEN'),
+        )
+        return RunSummary(exit_code=2, failure_reason=preflight.reason)
+
     run_id_for_first_turn = identity.get_run_id() or None
     if not cwd.exists():
         clone_exit, clone_reason = _clone_repo(qualified_repo=primary.qualified_repo, cwd=cwd)
         if clone_exit != 0:
-            return RunSummary(exit_code=clone_exit)
+            return RunSummary(exit_code=clone_exit, failure_reason=clone_reason)
 
     blocks: list[str] = [load_jx3_calibration()]
     blocks.append(render_initiative_system_prompt(hold=initiative.hold))
@@ -1027,6 +1191,15 @@ async def run_initiative(
     current_turn_last_tool: str | None = None
     wait_for_terminal_tool_ids: set[str] = set()
     tool_names_by_id: dict[str, str] = {}
+    # Bash tool_use_ids → their `command` input. Used to pair a
+    # ToolResultBlock back to the git/gh command that produced it so the
+    # mid-run classifier can fire ``repo_access_denied`` with the SAME
+    # event name the pre-flight/clone paths use. See
+    # gate.agent.repo_access.classify_bash_tool_result for the shape.
+    bash_commands_by_id: dict[str, str] = {}
+    # Dedupe: one denial → one emission per tool_use_id. Without this a
+    # long-lived retry loop would spam the event.
+    repo_access_emitted_ids: set[str] = set()
     terminal_all_passed_seen = False
     turn_made_tool_call = False
     pr_emitted: int | None = resume_context.pr_number if resume_active else None
@@ -1044,6 +1217,10 @@ async def run_initiative(
                         turn_made_tool_call = True
                         if _tool_name_is_wait_for_terminal(block.name):
                             wait_for_terminal_tool_ids.add(block.id)
+                        if block.name == 'Bash':
+                            command = _extract_bash_command(block.input)
+                            if command:
+                                bash_commands_by_id[block.id] = command
                         current_turn_last_tool = block.name
                     elif isinstance(block, ThinkingBlock):
                         pass
@@ -1061,6 +1238,22 @@ async def run_initiative(
                                 block
                             ):
                                 terminal_all_passed_seen = True
+                            # Mid-run repo-access classification. Fires when
+                            # a Bash-tool git/gh call denies access; loud
+                            # (event=repo_access_denied) rather than found
+                            # by grepping message text. Same event name as
+                            # pre-flight + clone: one query finds every
+                            # denial regardless of where it arose.
+                            if (
+                                block.tool_use_id in bash_commands_by_id
+                                and block.tool_use_id not in repo_access_emitted_ids
+                            ):
+                                _classify_and_emit_midrun_repo_access_denial(
+                                    tool_use_id=block.tool_use_id,
+                                    command=bash_commands_by_id[block.tool_use_id],
+                                    result_block=block,
+                                    emitted_ids=repo_access_emitted_ids,
+                                )
             elif isinstance(message, ResultMessage):
                 last_turn_count = message.num_turns
                 cost = message.total_cost_usd if message.total_cost_usd is not None else 0.0
@@ -1221,6 +1414,7 @@ async def run_initiative(
         turns=last_turn_count or None,
         cost_usd=last_cost,
         pr_number=pr_number,
+        failure_reason=None,
     )
 
 
@@ -1257,6 +1451,12 @@ def main(initiative_path: Path, repo_root: Path | None, model: str, max_turns: i
             error=str(exc),
         )
         raise
+    # `reason` is the load-bearing addition — see :class:`RunSummary` for
+    # why. A pre-flight / clone / mid-run repo denial threads its
+    # classification onto :attr:`RunSummary.failure_reason`, so a Loki
+    # query that filters on ``event="run_end"`` sees the same string
+    # ``event="repo_access_denied"`` already carries. Absent (None) on a
+    # green run — obslog drops None fields.
     obslog.emit(
         'INFO' if summary.exit_code == 0 else 'ERROR',
         'run_end',
@@ -1266,6 +1466,7 @@ def main(initiative_path: Path, repo_root: Path | None, model: str, max_turns: i
         targetPR=summary.pr_number,
         turns=summary.turns,
         cost_usd=summary.cost_usd,
+        reason=summary.failure_reason,
     )
     sys.exit(summary.exit_code)
 

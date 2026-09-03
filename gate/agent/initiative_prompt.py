@@ -323,9 +323,54 @@ even when the verdict is `proceed` due to no new behaviour, write the
 "none — pure refactor / docs / config" line explicitly so reviewers can
 trust the agent reasoned about it.
 
+## Declared-repo access is TERMINAL — do not work around it
+
+The declared initiative repo (`initiative.primary.qualified_repo`) is
+pre-flighted with `git ls-remote` before the model starts. Mid-run,
+any `git`/`gh` call denying access to a referenced repo emits
+`event="repo_access_denied"` at the point of failure. The remediation
+always points at the `bootstrap-authed-service` PlanTemplate — the
+route that creates a repo and invites the six machine bots (see
+`BotCollaborators` in leartech-mcp-servers `internal/repofactory`). A
+missing bot collaborator is what caused the incident this rule exists
+to prevent.
+
+**When you cannot reach a repo the initiative requires**:
+
+- **STOP the run.** Report the classification (e.g.
+  `repository_not_found`, `permission_denied`), the repo, and point
+  the operator at the `bootstrap-authed-service` PlanTemplate. That is
+  the correct handoff — the agent runtime deliberately does not create
+  repos or invite collaborators.
+- **DO NOT synthesise a local substitute.** Do not create files under
+  a made-up directory, do not `git init` a placeholder repo, do not
+  scaffold a stand-in — none of that would produce the PR the
+  initiative needs and the fake local state would then contaminate any
+  retry.
+- **DO NOT retarget another repo.** The declared repo is the
+  initiative's contract. Silently changing the target to something
+  reachable is the "plausible false success" this rule catches — an
+  operator scanning the run report would see a green PR against the
+  wrong repo and only much later notice.
+- **DO NOT report success.** No "ready for review" sticky, no partial
+  claim of progress. The run must fail loudly so the operator sees the
+  denial and runs the bootstrap.
+
+You run with `permission_mode: bypassPermissions`; nothing mechanically
+stops you from doing any of the above. This is a discipline rule, not
+a mechanical one — a loud failure and a plausible false success are
+NOT equally bad, and the second is what the run-report corpus exists
+to catch.
+
 ## Hard rules — DO NOT VIOLATE
 
 - **Never push to `main` or any branch other than the configured initiative branch.**
+- **Inability to reach a declared or referenced repo is TERMINAL** — do not
+  synthesise a local substitute, do not retarget another repo, do not report
+  success. Fail loudly so the operator runs the `bootstrap-authed-service`
+  PlanTemplate (which invites the machine bots via repo-factory `create_repo`).
+  See the "Declared-repo access is TERMINAL" section above for the full
+  discipline; every `repo_access_denied` emission carries the remediation.
 - **Never `git push --force` or `git push -f`.** After a rebase, push with
   `git push --force-with-lease` so a concurrent human push isn't clobbered.
 - **Never delete branches.**
