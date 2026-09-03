@@ -10,10 +10,6 @@ spec:
       resources: {}
       taskSpec:
         metadata: {}
-        # Explicit steps rather than a shared release task: this repo publishes
-        # IMAGES ONLY. Every python release task in the catalog runs
-        # build-container-build (needs a service Dockerfile) and helm-release
-        # (needs a chart) — this repo has neither, by design.
         stepTemplate:
           env:
           - name: HOME
@@ -50,12 +46,6 @@ spec:
         - image: uses:mikelear/leartech-pipeline-catalog/tasks/release/promote-cluster-suffixed.yaml@main
           name: ""
           resources: {}
-        # ghcr.io push needs inline auth injection: the catalog auto-mounts
-        # /tekton/creds/.docker/config.json with cluster-registry creds only
-        # (GAR + ACR), not ghcr.io. Same pattern as
-        # leartech-dockerfiles/.lighthouse/jenkins-x/leartech-agent-base/release.yaml:
-        # strip credHelpers (kaniko does not honour them) and inject a ghcr.io
-        # entry built from the tekton-git PAT.
         - name: build-agent-images
           image: gcr.io/kaniko-project/executor:v1.8.0-debug
           resources:
@@ -69,12 +59,6 @@ spec:
                 name: tekton-git
                 key: password
                 optional: true
-          # Which cluster this release is running on. ghcr.io is the SHARED
-          # registry and AZ owns publishing to it: per-cluster
-          # jx-release-version chains compute different next-versions, and
-          # GCP's chain stalled at v0.10.71-gcp, so its numbers collide with
-          # tags ghcr already holds (DENIED). Canonical gate, same as
-          # leartech-bus-common's tag-release step.
           - name: CLUSTER_ID
             valueFrom:
               configMapKeyRef:
@@ -85,17 +69,11 @@ spec:
             #!/busybox/sh
             set -e
             set -o pipefail
-            # Source jx-variables so PUSH_CONTAINER_REGISTRY + DOCKER_REGISTRY_ORG
-            # are exported with the cluster's home-registry prefix. Without this,
-            # both vars are empty and kaniko falls back to docker.io. Same pattern
-            # leartech-agent-base/release.yaml uses.
             source .jx/variables.sh
             VERSION=$(cat VERSION 2>/dev/null || echo "0.0.0-snapshot")
             echo "=== Building leartech-agent-runtime:${VERSION} ==="
             echo "    cluster registry: ${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}"
 
-            # Build docker config: cluster-registry creds + ghcr.io auth
-            # Mirrors leartech-dockerfiles/.lighthouse/jenkins-x/leartech-agent-base/release.yaml
             sed 's/"credHelpers":{[^}]*},//' /tekton/creds/.docker/config.json > /workspace/docker-config.json
             if [ -n "$GIT_TOKEN" ]; then
               GHCR_AUTH=$(printf "mikelear:%s" "$GIT_TOKEN" | base64)
@@ -104,15 +82,10 @@ spec:
               cp /workspace/docker-config.json /kaniko/.docker/config.json
             fi
 
-            # One FINAL agent image per language: this repo's code layered onto the
-            # matching toolset from leartech-dockerfiles. The toolset carries the
-            # build tools for its language (what CI/CD the agent will run); this
-            # layer carries the Dev Agent itself (how to take a PR to green).
-            #
-            # AgentTypes consume ghcr.io/mikelear/leartech-agent-<lang>, so these
-            # ARE the images agents run.
-            #
-            # NOTE: script runs in /busybox/sh — no bash arrays.
+            if [ -z "${CLUSTER_ID:-}" ]; then
+              echo "CLUSTER_ID is empty (jx-cluster-config/CLUSTER_ID, namespace jx) — refusing to guess which cluster publishes the shared ghcr tags"
+              exit 1
+            fi
             LANGS="go py ng rust"
 
             # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-go-toolset
@@ -121,10 +94,10 @@ spec:
             for LANG in $LANGS; do
               IMG="leartech-agent-${LANG}"
               DESTS="--destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/${IMG}:${VERSION} --destination=${PUSH_CONTAINER_REGISTRY}/${DOCKER_REGISTRY_ORG}/${IMG}:latest"
-              if [ "${CLUSTER_ID:-unknown}" = "az" ]; then
+              if [ "$CLUSTER_ID" = "gcp" ]; then
                 DESTS="$DESTS --destination=ghcr.io/mikelear/${IMG}:${VERSION} --destination=ghcr.io/mikelear/${IMG}:latest"
               else
-                echo "==> CLUSTER_ID=${CLUSTER_ID:-unknown}: skipping ghcr push for ${IMG} (AZ owns the shared registry)"
+                echo "==> CLUSTER_ID=${CLUSTER_ID}: skipping ghcr push for ${IMG} (gcp publishes the shared registry)"
               fi
               echo "=== Building ${IMG}:${VERSION} on ${IMG}-toolset ==="
               # shellcheck disable=SC2086 — deliberate word-split of $DESTS
@@ -136,14 +109,6 @@ spec:
                 --cache=true
             done
           workingDir: /workspace/source
-        # Kick the Renovate cronjob so the GitOps repos pick up the new agent
-        # image version within minutes instead of waiting for Renovate's own
-        # schedule. Renovate bumps agentTypes.tag in both clusters' configs;
-        # those PRs carry the updatebot label, which Keeper's second query
-        # auto-merges once the contexts pass — the same path promote PRs take.
-        #
-        # Non-fatal: a failed trigger delays the bump, it does not break the
-        # release. The next scheduled Renovate run picks it up.
         - name: trigger-renovate
           image: alpine/k8s:1.28.4
           resources: {}
