@@ -155,6 +155,20 @@ def test_initiative_emits_advertised_tools_once_at_run_start(
     monkeypatch.setattr(initiative, '_backstop_target_pr', _stub_backstop_target_pr)
     monkeypatch.setattr(initiative, 'query', _fake_query)
 
+    # Neutralise the pre-flight: the initiative now hits `git ls-remote`
+    # before the model starts. In this test env `git` may or may not be
+    # on PATH and the network is not guaranteed — either way the pre-flight
+    # would abort `run_initiative` before the `agent_advertised_tools`
+    # emission this test cares about. Stub it to a green outcome so the
+    # unit-under-test (advertised-tools emission at run start) reaches its
+    # emission point.
+    from gate.agent import repo_access
+
+    def _stub_preflight(*, qualified_repo: str, timeout_seconds: int = 15) -> repo_access.RepoAccessOutcome:
+        return repo_access.RepoAccessOutcome(ok=True, repo=qualified_repo)
+
+    monkeypatch.setattr(initiative, 'preflight_declared_repo', _stub_preflight)
+
     # Write a minimal initiative YAML the loader accepts.
     init_yaml = tmp_path / 'init.yaml'
     init_yaml.write_text(

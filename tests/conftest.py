@@ -37,6 +37,37 @@ _AGENTRUN_IDENTITY_ENV_VARS = (
 
 
 @pytest.fixture(autouse=True)
+def _stub_preflight_declared_repo(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Autouse: default the initiative-loop's pre-flight to a green outcome.
+
+    Added by the ``repo_access_denied`` initiative. The initiative
+    entrypoint now runs a ``git ls-remote`` pre-flight before the model
+    starts — an intentional cost-one-round-trip guard against the
+    incident where four pods burned an entire ``backoffLimit`` on a
+    deterministic ``Repository not found``. The pre-flight shells out to
+    ``git`` and hits github.com, neither of which is guaranteed in this
+    test environment (CI runs on ``python:3.13-slim`` which has no
+    ``git``; laptop runs may have no network).
+
+    So the default fixture rebinds ``initiative.preflight_declared_repo``
+    to a green outcome. Suites that specifically exercise the real
+    pre-flight (see ``tests/test_repo_access_terminal.py``) reach the
+    function via ``gate.agent.repo_access.preflight_declared_repo``
+    directly (not via the ``initiative`` module attribute the SDK loop
+    calls), so those tests are unaffected. A future test that wants to
+    verify the initiative-loop hook to the real pre-flight can
+    ``monkeypatch.setattr`` it back to the real function.
+    """
+    from gate.agent import initiative, repo_access
+
+    def _stub(*, qualified_repo: str, timeout_seconds: int = 15) -> repo_access.RepoAccessOutcome:
+        return repo_access.RepoAccessOutcome(ok=True, repo=qualified_repo)
+
+    monkeypatch.setattr(initiative, 'preflight_declared_repo', _stub)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _reset_identity_snapshot(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Reset :mod:`gate.identity` module state AND scrub identity env before each test.
 
