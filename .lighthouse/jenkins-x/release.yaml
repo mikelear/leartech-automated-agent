@@ -89,7 +89,7 @@ spec:
             LANGS="go py ng rust"
 
             # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-go-toolset
-            TOOLSET_VERSION=0.51.1
+            TOOLSET_VERSION=0.51.3
 
             for LANG in $LANGS; do
               IMG="leartech-agent-${LANG}"
