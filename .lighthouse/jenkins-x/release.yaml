@@ -88,8 +88,76 @@ spec:
             fi
             LANGS="go py ng rust"
 
+            # ONE PIN PER LANGUAGE, because the four toolsets are four images
+            # with four independent version streams — they are built by
+            # separate leartech-dockerfiles pipelines and their tags have never
+            # advanced together.
+            #
+            # A single shared TOOLSET_VERSION assumed they did, and on
+            # 2026-09-21 it was bumped to 0.51.13, which only agent-go-toolset
+            # has. Every release since then built go, published it, then failed
+            # on py and never reached ng or rust:
+            #
+            #   leartech-agent-go     0.50.40 @ 2026-09-27  (today)
+            #   leartech-agent-py     0.50.35 @ 2026-09-18  (9 days stale)
+            #   leartech-agent-ng     0.50.35 @ 2026-09-18
+            #   leartech-agent-rust   0.50.35 @ 2026-09-18
+            #
+            # Four consecutive release pipelines reported Failed and nobody
+            # noticed, because a GitHub release tag is still cut and `go` — the
+            # one anyone looks at — kept working.
+            #
+            # AND RENOVATE KEEPS DOING IT. While this PR was open the bot
+            # bumped the shared pin again — 0.51.13 -> 0.52.2 — because the
+            # renovate comment above it named agent-go-toolset and 0.52.2 is
+            # that image's newest tag. py, ng and rust have no 0.52.2 either,
+            # so main went from broken-at-0.51.13 to broken-at-0.52.2. The
+            # shared pin does not merely allow the fault; it guarantees a fresh
+            # one on every go-toolset release.
+            #
+            # Each pin now carries its OWN renovate comment so the bot bumps
+            # them separately, which is the whole point: a bump to one toolset
+            # cannot name a tag the other three do not have.
+
             # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-go-toolset
-            TOOLSET_VERSION=0.52.2
+            TOOLSET_GO=0.52.2
+            # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-py-toolset
+            TOOLSET_PY=0.51.10
+            # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-ng-toolset
+            TOOLSET_NG=0.51.10
+            # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-rust-toolset
+            TOOLSET_RUST=0.51.10
+
+            toolset_for() {
+              # A case, not indirect expansion: busybox sh has no ${!var}.
+              case "$1" in
+                go)   echo "$TOOLSET_GO" ;;
+                py)   echo "$TOOLSET_PY" ;;
+                ng)   echo "$TOOLSET_NG" ;;
+                rust) echo "$TOOLSET_RUST" ;;
+                *)    echo "" ;;
+              esac
+            }
+
+            # EVERY PIN RESOLVED AND PRINTED BEFORE ANYTHING IS BUILT.
+            #
+            # This does NOT check that the tags exist — kaniko's image has no
+            # registry client, and the build itself is the check. What it does
+            # is name all four pins up front, so a log reader sees which
+            # version each language is about to use rather than inferring it
+            # from whichever build failed first.
+            #
+            # A language in LANGS with no pin is refused here, because the
+            # alternative is an empty tag reference and a confusing kaniko
+            # error about a manifest for ":".
+            for LANG in $LANGS; do
+              TS=$(toolset_for "$LANG")
+              if [ -z "$TS" ]; then
+                echo "no toolset pin for language ${LANG}: add TOOLSET_$(echo "$LANG" | tr a-z A-Z) above" >&2
+                exit 1
+              fi
+              echo "==> ${LANG}: toolset ${TS}"
+            done
 
             for LANG in $LANGS; do
               IMG="leartech-agent-${LANG}"
@@ -99,13 +167,13 @@ spec:
               else
                 echo "==> CLUSTER_ID=${CLUSTER_ID}: skipping ghcr push for ${IMG} (gcp publishes the shared registry)"
               fi
-              echo "=== Building ${IMG}:${VERSION} on ${IMG}-toolset ==="
+              echo "=== Building ${IMG}:${VERSION} on ${IMG}-toolset:$(toolset_for "$LANG") ==="
               # shellcheck disable=SC2086 — deliberate word-split of $DESTS
               /kaniko/executor \
                 --dockerfile=Dockerfile.runtime \
                 --context=/workspace/source \
                 $DESTS \
-                --build-arg=BASE_IMAGE=ghcr.io/mikelear/${IMG}-toolset:${TOOLSET_VERSION} \
+                --build-arg=BASE_IMAGE=ghcr.io/mikelear/${IMG}-toolset:$(toolset_for "$LANG") \
                 --cache=true
             done
           workingDir: /workspace/source
