@@ -88,10 +88,12 @@ spec:
             fi
             LANGS="go py ng rust"
 
-            # ONE PIN PER LANGUAGE, because the four toolsets are four images
-            # with four independent version streams — they are built by
-            # separate leartech-dockerfiles pipelines and their tags have never
-            # advanced together.
+            # ONE PIN PER LANGUAGE, because a release of leartech-dockerfiles
+            # tags only the toolsets whose OWN directory changed — its triggers
+            # are `run_if_changed: "leartech-agent-go/.*"` per image. All four
+            # share that repo's release version, so they agree only while
+            # successive releases keep touching all four directories, and
+            # diverge the moment one does not.
             #
             # A single shared TOOLSET_VERSION assumed they did, and on
             # 2026-09-21 it was bumped to 0.51.13, which only agent-go-toolset
@@ -115,18 +117,22 @@ spec:
             # shared pin does not merely allow the fault; it guarantees a fresh
             # one on every go-toolset release.
             #
-            # Each pin now carries its OWN renovate comment so the bot bumps
-            # them separately, which is the whole point: a bump to one toolset
-            # cannot name a tag the other three do not have.
+            # Each pin carries its OWN renovate comment so the bot bumps them
+            # separately: a bump to one toolset cannot name a tag the other
+            # three do not have.
+            #
+            # They are all 0.53.0 today only because 2026-09-27 changed every
+            # directory. That is the coincidence a shared pin mistook for a
+            # rule.
 
             # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-go-toolset
-            TOOLSET_GO=0.52.2
+            TOOLSET_GO=0.53.0
             # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-py-toolset
-            TOOLSET_PY=0.51.10
+            TOOLSET_PY=0.53.0
             # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-ng-toolset
-            TOOLSET_NG=0.51.10
+            TOOLSET_NG=0.53.0
             # renovate: datasource=docker depName=ghcr.io/mikelear/leartech-agent-rust-toolset
-            TOOLSET_RUST=0.51.10
+            TOOLSET_RUST=0.53.0
 
             toolset_for() {
               # A case, not indirect expansion: busybox sh has no ${!var}.
